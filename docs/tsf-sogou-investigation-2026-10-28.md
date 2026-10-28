@@ -191,6 +191,29 @@ content!content::BrowserMainRunnerImpl::Initialize+0x23f
 
 → TSF 之前确实存在一个小而稳定的差异：**+1 个线程、+7 个句柄**。该线程尚未进入 `GpuMain`（实验 1 已验证），最可能是 `CreateThreads()` 提前创建的 GPU 线程以及为其准备的对象；另一个已知的早期差异是 `content_main_runner_impl.cc:577` 在 `--in-process-gpu` 下会提前创建 `ContentGpuClient`。
 
+**句柄对象类型分布**（同一时刻枚举，`NtQuerySystemInformation(SystemExtendedHandleInformation)` + 复制句柄取类型名）：
+
+| 对象类型 | 基线 | `--in-process-gpu` | 差 |
+| --- | --- | --- | --- |
+| Thread | 51 | 56 | **+5** |
+| Event | 98 | 100 | **+2** |
+| ALPC Port | 10 | 10 | 0 |
+| Section | 11 | 11 | 0 |
+| Desktop | 2 | 2 | 0 |
+| WindowStation | 3 | 3 | 0 |
+| Key | 17 | 17 | 0 |
+| Semaphore / Mutant / File / IoCompletion / IRTimer / Process / TpWorkerFactory / Directory / SchedulerSharedData / WaitCompletionPacket | 相同 | 相同 | 0 |
+
+→ 那 +7 个句柄**恰好就是 5 个 Thread 对象 + 2 个 Event**，即一条线程及其配套的启动/停止事件。**没有 ALPC 端口、没有共享内存 Section、没有新桌面/窗口站、没有新注册表键。** 换言之：TSF 时刻两种模式之间**不存在任何功能性对象差异**，只多了一条空闲线程。
+
+这带来一个重要推论：**静态状态无法解释崩溃**。两种模式在 TSF 入口处的功能性对象完全相同，其中一个必定崩、一个必定通过。因此触发因素只可能是以下之一：
+
+- **时序/调度**：多一条运行中的线程改变了 TSF 激活瞬间的竞争条件。5/5 的确定性并不排除这一点——稳定的启动形态可以让竞争结果稳定。
+- **库内部状态**（不经句柄可见）：主线程的 COM apartment、DirectWrite/字体栈、Win32 输入子系统内部状态。
+- **TSF 初始化过程中**才发生变化的东西，而不是之前。
+
+下一步应优先排除第一条：对比两种模式下 TSF 激活**期间的线程活动**（例如在 `MSCTF!CTip::Activate` 附近记录线程切换/争用），或直接测试"多一条空闲线程"是否足以复现。
+
 #### H5-A 小结
 
 | 假设 | 结论 |

@@ -37,6 +37,10 @@ echo "--- ${LABEL}: breakpoint hit=${hit} (args: $*) ---"
 if [ "$hit" = "1" ]; then
   SNAP_WIN="$(cygpath -w "$SNAP" 2>/dev/null || echo "$SNAP")"
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$SNAP_WIN"
+  if [ "${BCLI_HANDLES:-0}" = "1" ]; then
+    HANDLES_WIN="$(cygpath -w "$(dirname "$0")/enumerate-handles.ps1" 2>/dev/null || echo "$(dirname "$0")/enumerate-handles.ps1")"
+    timeout 120 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$HANDLES_WIN" || echo "HANDLES: enumeration failed or timed out"
+  fi
 else
   echo "TSF entry not reached; see $LOG"
 fi
