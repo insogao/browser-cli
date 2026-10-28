@@ -161,3 +161,78 @@ DelegatedFrameHost::WasHidden()            delegated_frame_host.cc:140
 1. **移除截图的前台依赖后，隐藏窗口截图变慢**（1–4 秒，等待渲染进程产帧）。这是真实代价，调度层需要按"截图是慢操作"来设计超时与并发。
 2. **后台命令不再有进程级互斥**：两个 Agent 若真操作同一 Tab（space 归属被破坏时）不会再被租约挡住。这是有意的取舍，由 P3 的输入仲裁接管。
 3. **`possiblyStale` 需要调用方真正尊重**：若上层把它当实时画面用，等于恢复旧行为。建议在 Popup/CLI 输出里显式提示。
+
+---
+
+## 7. 内核侧遮挡修复结果（2026-10-28 晚）与产品侧加固
+
+### 7.1 内核修复：BLOCKED
+
+Agent A 用运行时证据定位到：被完全遮挡的 Windows 窗口，UI 合成器**一帧都不产**；
+`RequestCopyOfOutput` 只是入队，唯一取出口是 `SurfaceAggregator::PrewalkSurface`
+→ `Surface::TakeCopyOutputRequestsFromClient`，必须有一次真实聚合。实测遮挡 16s 内
+`TakeCopyOutputRequestsFromClient=0`，隐藏窗口 13 次；`DisplayScheduler::AttemptDrawAndSwap=0`。
+
+候选 A/B/D（evictor 走隐藏分支 / 去掉 `WasHidden(kOccluded)` 早退 / capturer-count 定向）
+未实施即否决；C1 `ScheduleFullRedraw` 仅开 stderr 日志时偶然通过，关日志 16s 超时；
+C2/C3/C4（`SchedulePaintInRect` / 组合 / `SetVisible` 循环）均 0 次聚合。按 fail closed，
+**未生成 patch 027，Chromium 工作树已回到 26 个 patch 的基线**。细节见
+`windows-occluded-capture-2026-10-28.md`。
+
+### 7.2 新发现（基线既有，P0）：遮挡窗口反复截图会让渲染进程崩溃
+
+未改动的基线构建上，`--scenario occluded --repeat 3` 即触发：
+
+```
+FATAL ... layer_tree_view.cc:554
+DCHECK failed: callbacks.size() <= PresentationTimeCallbackBuffer::kMaxBufferSize (61 vs. 60)
+```
+
+每次 `fromSurface=true` 都在渲染进程累积一个 presentation-time 回调；遮挡窗口不呈现，
+回调永不消费，到 60 即 abort。产品侧对遮挡窗口反复截图同样会命中。
+
+### 7.3 产品侧加固：合成器路径冷却 + 同 tab 串行
+
+`src/background/cdp.ts` + `src/background/screenshot-policy.ts`：
+
+- 某个 tab 的 `fromSurface=true` **超时**后进入冷却：基础 30s，连续超时按 2 倍退避
+  （30s → 60s → 120s），连续 4 次超时后**硬闸**停止尝试合成器路径，直到
+  `resetSurfaceCooldown(tabId)`（`ensure_visible` 成功后会调用）或一次成功的
+  `fromSurface=true`；
+- 冷却期内直接走 `fromSurface=false`，不调用合成器路径，`possiblyStale=true` 且
+  `reason="fromSurface-cooldown-after-timeout"`；
+- 同一 tab 的截图用 per-tab 队列串行：并发调用（多 Agent、scroll + viewport）最多只有一个
+  `captureScreenshot` 在飞，第二个会等第一个超时/降级结束后再判断冷却，不会各自发起
+  `fromSurface`；不同 tab 使用各自的链，互不阻塞；
+- 目的：避免每轮截图挂满 8s 超时，并把未呈现回调的累积速率压到 60 阈值以下；
+- **不改变“stale 不能当成功”的语义**：调用方仍会看到 `possiblyStale=true`。
+
+#### 7.3.1 主代理审核结论（五个必查点）
+
+1. **超时后 CDP 底层请求是否仍未完成**：是。`chrome.debugger.sendCommand` 没有取消 API；
+   超时只清理扩展侧 pending 表、挂迟到消费器并丢弃迟到帧，浏览器侧的
+   `Page.captureScreenshot` 可能一直挂到标签关闭/`detach`。冷却只能阻止**新增**请求；
+   这不是扩展侧泄漏，但内核侧请求仍占用。要真正释放只能 detach/关标签（本轮不做）。
+2. **同一 tab 是否会累积多个挂起截图**：加固前会；现在 per-tab 队列保证同一时刻最多一个
+   `captureScreenshot` 在飞，测试用两个并发调用验证 `fromSurface` 只发 1 次。
+3. **冷却能否真正阻止 presentation 回调持续积累**：能阻止**无限**积累。基础 30s + 退避 +
+   连续 4 次硬闸；按 A 的实测（6 次 fromSurface 达到 61），4 次约 40 个回调，低于 60。
+   这是估算值，不是内核保证；且 `ensure_visible` 会重置硬闸，若调用方反复显式恢复窗口而
+   窗口仍被遮挡，理论上可再次累积（属于显式前台操作，不在后台截图循环内）。真正的修复
+   仍需 viz 层“按需一帧”或内核侧丢弃未呈现回调。
+4. **超时/降级是否影响其它 tab**：不影响。冷却表、pending 表和截图队列都按 tabId 隔离；
+   测试让 tab 21 永久挂起，同时 tab 22 正常返回新鲜帧。
+5. **冷却不是修复**：遮挡窗口仍返回 `possiblyStale=true` 的旧帧；它只是防崩与快速失败，
+   不能作为 P0“最新截图成功”的验收。
+
+测试：`npm run typecheck`、`npm run test:core`、`npm run build`、`npm run registry:check`
+均通过；新增 `SurfaceCooldown` 退避/硬闸测试、`skipFromSurface` 降级语义测试、
+“超时→冷却期直接快照→清冷却后才重新尝试合成器”测试，以及同 tab 串行/跨 tab 独立测试。
+
+### 7.4 残余结论
+
+- **遮挡窗口的“最新帧”截图仍未实现**，必须等 viz 层“按需一帧”方案（给 DisplayPrivate
+  增加 `needs_draw=true` 的强制帧，或让 `RequestCopyOfOutput` 的 damaged surface 唤醒
+  display）经过一次授权的可见窗口实验验证。
+- 在修复前，产品语义只能是“遮挡窗口截图可能过期，调用方必须尊重 `possiblyStale`”；
+  `possiblyStale=true` 不能作为 P0 的“最新截图成功”验收。
