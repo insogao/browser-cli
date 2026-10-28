@@ -1,0 +1,75 @@
+# Browser CLI — Windows static gates.
+#
+# Scope: checks that need no Chromium checkout and no build. They run on every
+# push and pull request and must stay under a few minutes.
+#
+# The full Windows build (28k ninja targets, ~16 GiB output, hours of CPU) is
+# NOT run here: it needs a machine with VS2026 BuildTools 18.x, Windows SDK
+# 10.0.28000.0, ATL/MFC, Debugging Tools and >= 100 GiB free disk. See
+# .github/workflows/windows-full.yml (self-hosted, manual dispatch) and
+# docs/windows-environment-2026-10-22.md.
+name: windows-static
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax of every script
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do
+            [ -f "$f" ] || continue
+            if ! bash -n "$f"; then
+              echo "syntax error: $f"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Patch manifest integrity (no checkout needed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply-patches.py --check | tee patch-check.log
+          grep -q 'STATE unverified' patch-check.log
+
+      - name: Every patch is LF-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -rlU $'\r' chromium/patches/*.patch; then
+            echo "CRLF found in a patch file; see .gitattributes"
+            exit 1
+          fi
+
+      - name: Windows args are Windows-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'target_cpu = "x64"' chromium/args-windows.gn
+          if grep -qE 'arm64|mac_app_icon_dir|branding_file_path' chromium/args-windows.gn; then
+            echo "chromium/args-windows.gn carries macOS values"
+            exit 1
+          fi
+
+      - name: Script regression suite
+        shell: bash
+        run: bash tests/run-script-tests.sh
+
+      - name: Python tool tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest tests.tools.test_apply_patches tests.tools.test_windows_scripts -v
