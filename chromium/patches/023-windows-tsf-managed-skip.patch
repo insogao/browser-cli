@@ -1,0 +1,96 @@
+diff --git a/ui/base/ime/win/BUILD.gn b/ui/base/ime/win/BUILD.gn
+index 8972a21f..befad31b 100644
+--- a/ui/base/ime/win/BUILD.gn
++++ b/ui/base/ime/win/BUILD.gn
+@@ -31,6 +31,11 @@ component("win") {
+ 
+   defines = [ "IS_UI_BASE_IME_WIN_IMPL" ]
+ 
++  # Browser CLI: tsf_bridge.cc catches a C++ exception raised by third-party
++  # text services inside ITfThreadMgr::Activate, so a broken IME degrades to
++  # "no IME" instead of terminating the browser process.
++  configs += [ "//build/config/compiler:exceptions" ]
++
+   public_deps = [ "//ui/base/ime" ]
+ 
+   deps = [
+diff --git a/ui/base/ime/win/tsf_bridge.cc b/ui/base/ime/win/tsf_bridge.cc
+index 0c980b7e..aa36c9b4 100644
+--- a/ui/base/ime/win/tsf_bridge.cc
++++ b/ui/base/ime/win/tsf_bridge.cc
+@@ -8,6 +8,7 @@
+ 
+ #include <map>
+ 
++#include "base/command_line.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/ref_counted.h"
+@@ -707,6 +708,32 @@ base::ThreadLocalOwnedPointer<TSFBridge>& GetThreadLocalTSFBridge() {
+ 
+ // TsfBridge  -----------------------------------------------------------------
+ 
++namespace {
++
++// Runs the TSF initialization inside an SEH-protected frame. The frame must not
++// hold any C++ object that needs unwinding: __try cannot appear in a function
++// that requires object unwinding, so the bridge construction stays in the
++// caller and only raw COM pointers are touched here.
++//
++// Browser CLI: a TIP that raises a normal exception (SEH or C++ EH that does not
++// swallow it) is turned into "no IME support" instead of unwinding the browser
++// process. This is defense in depth only: a TIP that catches its own exception
++// and calls ExitProcess cannot be stopped here, which is why
++// TSFBridge::Initialize() also skips TSF entirely in managed mode.
++HRESULT InitializeTsfBridgeGuarded(TSFBridgeImpl* bridge, bool* threw) {
++  *threw = false;
++  HRESULT result = E_FAIL;
++  __try {
++    result = bridge->Initialize();
++  } __except (EXCEPTION_EXECUTE_HANDLER) {
++    *threw = true;
++    result = E_FAIL;
++  }
++  return result;
++}
++
++}  // namespace
++
+ // static
+ HRESULT TSFBridge::Initialize() {
+   TRACE_EVENT0("ime", "TSFBridge::Initialize");
+@@ -718,8 +745,33 @@ HRESULT TSFBridge::Initialize() {
+     return S_OK;
+   }
+ 
++  // Browser CLI: managed (background/agent) runs must not let third-party text
++  // services decide whether the browser process survives startup. Some IMEs
++  // (observed: Sogou's SogouPY/SogouTSF text service) terminate the process from
++  // inside TSF activation, which no caller-side guard can stop because the IME
++  // handles the exception itself and then calls ExitProcess. Skip TSF entirely
++  // in that mode: ui::InputMethodWinTSF already tolerates a null bridge, and the
++  // browser runs without IME support instead of dying before it starts.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "browser-cli-background-presentation")) {
++    LOG(INFO) << "BROWSER_CLI_IME stage=tsf decision=skip"
++                 " reason=managed-mode-avoids-third-party-tip";
++    return E_FAIL;
++  }
++
++  // Browser CLI: an unusable IME must degrade to "no IME support" instead of
++  // terminating the browser process. See InitializeTsfBridgeGuarded().
+   auto delegate = std::make_unique<TSFBridgeImpl>();
+-  HRESULT hr = delegate->Initialize();
++  bool ime_threw = false;
++  HRESULT hr = InitializeTsfBridgeGuarded(delegate.get(), &ime_threw);
++  if (ime_threw) {
++    LOG(WARNING) << "The active TIP raised an exception during TSF "
++                    "initialization; continuing without IME support.";
++    // Never publish a partially initialized bridge.
++    GetThreadLocalTSFBridge().Set(nullptr);
++    return hr;
++  }
++
+   if (SUCCEEDED(hr)) {
+     ReplaceThreadLocalTSFBridge(std::move(delegate));
+   }
