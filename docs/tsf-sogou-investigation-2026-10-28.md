@@ -11,12 +11,14 @@
 
 1. **启动时 exit 3 不是 Chromium 崩溃，是搜狗主动调用了 `ExitProcess(3)`。** 已取得连续调用栈，调用点位于 `SogouPY.ime` 内部，且在它自己的 C++ 异常处理器里。
 2. **与 browser-cli 的移植无关。** 未经任何修改的上游 Chromium 151 在同一台机器上产生**逐帧相同、偏移相同**的调用栈。
-3. **此前"签名是根因"的假设已被推翻**（那是我的错误推断，仅基于相关性）。真正与结果同向变化的变量是**沙箱开关**：
-   - 我们的构建 + 沙箱 → Sogou 组件一个都不加载 → 抛异常 → `ExitProcess(3)`
-   - 我们的构建 + `--no-sandbox` → 加载与 Chrome 相同的 5 个组件 → 正常
-   - 官方 Chrome + 沙箱（含便携路径）→ 加载全部组件 → 正常
-4. **仍未确定的一环**：为什么沙箱开启时，非官方构建里的搜狗在加载自身组件之前就放弃，而官方 Chrome 不会。这是唯一剩下的未知，第 5 节给出四个候选假设与各自的实验设计。
-5. **patch 023 机制有效但耦合错误**：它用一个*展示策略*开关控制*输入法*行为，并且代价是 managed 模式下**完全没有输入法**（不是降级）。第 6 节给出必须修改项。
+3. **"签名是根因"的假设已被推翻**（那是我的错误推断，仅基于相关性），而且是用零成本方式推翻的：给官方 Chrome 副本尾部追加 27 字节使 Authenticode 失效、代码一字未改，它**照样加载全部搜狗组件**。**因此不需要申请或安装任何证书。**
+4. **沙箱在这里不是"权限"，而是"进程拓扑"的代理变量。** 冻结在 `TSFBridge::Initialize` 实测：浏览器主进程在沙箱 ON/OFF 下的安全上下文**逐项相同**（Medium 完整性、非 AppContainer、0 个受限 SID、同样 5 个特权、不在 Job、同样的 mitigation、TSF 前模块集仅差 `KBDUS.DLL`）。真正与结果同向变化的内部差异是：**是否存在独立的 GPU 进程**——
+   - 沙箱 ON + 独立 GPU 进程 → exit 3（5/5）
+   - 沙箱 ON + `--in-process-gpu` → 正常（3/3）
+   - 沙箱 OFF（任意变体）→ 正常（5/5）
+   - `--disable-gpu` / `--disable-gpu-sandbox` / `--disable-gpu-compositing` / `--single-process` 均无效
+5. **仍未确定的一环**：在安全上下文完全相同的前提下，为什么"独立 GPU 进程 + 全局沙箱"会让搜狗在加载自身组件前放弃。第 5 节给出 H5（对比 `--in-process-gpu` 与基线的进程内部状态）与 H1（`is_official_build` 实验构建）两个候选，H5 优先。
+6. **patch 023 机制有效但耦合错误**：它用一个*展示策略*开关控制*输入法*行为，并且代价是 managed 模式下**完全没有输入法**（不是降级）。第 6 节给出必须修改项。
 
 ---
 
@@ -38,6 +40,10 @@
 | F12 | 本 revision **没有 IMM32 实现**；`InputMethodWinTSF` 的每个入口都以 `if (!TSFBridge::GetInstance())` 提前返回 → bridge 缺席时**完全没有输入法**，不是降级 | `ls ui/base/ime/win/`（无 `imm32_manager`）；`grep -c` 7 处空指针守卫 |
 | F13 | 旧栈里那个 `chrome!DllMain+0x30` 是 Chromium 自己的 `CrashOnProcessDetach()`：`ExitProcess` 触发 DLL detach → `ShouldCrashOnProcessDetach()` 仍为 true → 故意空指针写入 0x356。它**是退出过程中的副作用，不是崩溃原因**，也正是它把真实调用链掩盖了一层 | `D:\c\logs\tsf-throw2.log`；`base/win/dllmain.cc` |
 | F14 | 抛出的 C++ 对象是搜狗内部类型：vtable 位于 `SogouPY.ime` 地址区间（`0x7ffae262f198`），对象内**没有消息字符串**，只有两个小整数（0x0e、0x28） | `D:\c\logs\tsf-throw2.log`（`---obj---` 段） |
+| F15 | **签名不是门槛**：官方 Chrome 副本尾部追加 27 字节使 Authenticode 失效（`Status: NotSigned`）、代码未改，仍加载全部 5 个搜狗组件且正常 | `D:\c\logs\chrome-tampered.log` |
+| F16 | **浏览器进程安全上下文与沙箱开关无关**：冻结在 `TSFBridge::Initialize` 实测 ON/OFF 的完整性级别、AppContainer、受限 SID、5 项特权名称与状态、Job、mitigation 全部相同 | `D:\c\logs\snap-ON.log`、`snap-OFF.log`；`snapshot-tsf.ps1` |
+| F17 | **独立 GPU 进程是必要条件**：沙箱 ON 时 `--in-process-gpu` 稳定通过（3/3），而 `--disable-gpu`、`--disable-gpu-sandbox`、`--disable-gpu-compositing`、`--disable-software-rasterizer`、`--use-gl=disabled`、`--single-process`、`--no-zygote` 均仍 exit 3 | 见 3.3 |
+| F18 | Microsoft Edge 156（微软签名、非 Google 品牌、产品名不同）在沙箱下加载 **6** 个搜狗组件且正常，排除"Google 专有逻辑"与"产品名白名单中的单一名字" | `D:\c\logs\edge.log` |
 
 ### 2.1 退出调用栈（原文摘录，`D:\c\logs\tsf-n1.log`）
 
@@ -83,26 +89,59 @@ content!content::BrowserMainRunnerImpl::Initialize+0x23f
 
 全部为 headless + 独立临时 `--user-data-dir`；同一 Windows 用户、同一会话、同一搜狗版本（16.6.0.4207）。
 
-| # | 宿主 | 版本 | 签名 | 沙箱 | 搜狗组件加载数 | 结果 |
-| --- | --- | --- | --- | --- | --- | --- |
-| E1 | Google Chrome | 156.0.8078.48 | Valid（Google LLC） | ON | 5 | 正常 |
-| E2 | Google Chrome（便携副本） | 156.0.8078.48 | Valid | ON | 5 | 正常 |
-| E3 | 上游 Chromium（Playwright） | 151.0.7922.34 | NotSigned | ON | 2 | exit 3 |
-| E4 | browser-cli（patch 023 前） | 156.0.8067.0 | NotSigned | ON | 2 | exit 3 |
-| E5 | browser-cli（patch 023） | 156.0.8067.0 | NotSigned | ON | —（跳过 TSF） | 正常 |
-| E6 | browser-cli | 156.0.8067.0 | NotSigned | **OFF** | 5 | 正常 |
+### 3.1 浏览器身份维度
+
+| # | 宿主 | 版本 | 签名 | 官方构建 | 沙箱 | 搜狗组件 | 结果 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E1 | Google Chrome | 156.0.8078.48 | Google，有效 | 是 | ON | 5 | 正常 |
+| E2 | Google Chrome（复制到 `D:\c\logs` 便携运行） | 同上 | 有效 | 是 | ON | 5 | 正常 |
+| E3 | Google Chrome（**末尾追加 27 字节，签名失效**） | 同上 | **NotSigned** | 是 | ON | 5 | **正常** |
+| E4 | Microsoft Edge | 156.0.4314.42 | Microsoft，有效 | 是 | ON | 6 | 正常 |
+| E5 | 上游 Chromium（Playwright） | 151.0.7922.34 | NotSigned | 否 | ON | 0 | exit 3 |
+| E6 | browser-cli（patch 023 前） | 156.0.8067.0 | NotSigned | 否 | ON | 0 | exit 3 |
+| E7 | browser-cli（patch 023） | 156.0.8067.0 | NotSigned | 否 | ON | —（跳过 TSF） | 正常 |
+| E8 | browser-cli | 156.0.8067.0 | NotSigned | 否 | **OFF** | 5 | 正常 |
+
+### 3.2 浏览器进程安全上下文（冻结在 `TSFBridge::Initialize` 时测量）
+
+| 维度 | 沙箱 ON | 沙箱 OFF |
+| --- | --- | --- |
+| 完整性级别 | Medium (8192) | Medium (8192) |
+| AppContainer | 否 | 否 |
+| ElevationType | 3 (Default) | 3 (Default) |
+| 受限 SID 数 | 0 | 0 |
+| 特权列表 | `SeShutdownPrivilege=off, SeChangeNotifyPrivilege=on, SeUndockPrivilege=off, SeIncreaseWorkingSetPrivilege=off, SeTimeZonePrivilege=off` | **逐项相同** |
+| 是否在 Job（调用者视角） | 否 | 否 |
+| 缓解策略 | 仅 `ExtensionPoint=0x3333333333333303` | 相同 |
+| TSF 初始化前已加载模块 | 550 | 549（差异仅 `KBDUS.DLL`） |
+| 窗口站创建 vs TSF 初始化顺序 | 前者在前 | 无窗口站创建 |
+
+### 3.3 GPU 进程拓扑（browser-cli，沙箱 ON）
+
+| 变体 | 结果 |
+| --- | --- |
+| 基线 | exit 3（5/5 确定性） |
+| `--disable-gpu` | exit 3 |
+| `--disable-gpu-sandbox` | exit 3 |
+| `--disable-gpu-compositing` | exit 3 |
+| `--disable-software-rasterizer` | exit 3 |
+| `--use-gl=disabled` | exit 3 |
+| `--disable-features=Vulkan` | exit 3 |
+| `--single-process` | exit 3 |
+| `--no-zygote` | exit 3 |
+| **`--in-process-gpu`** | **rc=0（3/3 确定性）** |
+| 沙箱 OFF（任意变体） | rc=0（5/5 确定性） |
 
 判读：
 
-- **E1 vs E4** 排除"Chromium 156 的 TSF 路径本身有问题"。
-- **E2 vs E1** 排除安装路径、注册、安装状态。
-- **E3 vs E4** 排除 browser-cli 的任何 patch。
-- **E6 vs E4** 把变量收敛到沙箱。
-- **E1 vs E6** 说明沙箱**单独**不足以解释：官方构建在沙箱下正常。
+- **E1 vs E6 / E5** 排除"Chromium 的 TSF 路径本身有问题"。
+- **E2** 排除安装路径、注册、安装状态。
+- **E3（关键）** 排除**代码签名**：同一份官方二进制只追加尾部字节使 Authenticode 失效，代码未变，仍然正常。**H2 因此不需要证书即可关闭。**
+- **E4** 排除发布者、产品名与 Google 专有逻辑：Edge 与 Chrome 的产品名、发布者、品牌均不同，都正常。
+- **E8 vs E6** 把差异收敛到"沙箱开关"；但 3.2 表明浏览器进程的安全上下文**完全没变**，所以沙箱在这里不是"权限"，而是**内部代码路径/进程拓扑**的代理变量。
+- **3.3** 把机制进一步收敛：**只要 GPU 服务跑在独立进程里且全局沙箱开启就会崩；把 GPU 放进浏览器进程（`--in-process-gpu`）就正常**。单独取消 GPU 进程的沙箱（`--disable-gpu-sandbox`）无效，说明不是 GPU 子进程的权限问题。
 
-因此结论只能是：**"沙箱 + 非官方构建"这个组合**才触发。签名只是与"官方构建"高度相关，被 E6 单独推翻（未签名 + 无沙箱 = 正常）。
-
-日志：`tsf-n1.log`、`tsf-ex.log`、`ours-nosandbox.log`、`chrome-under-cdb.log`、`chrome-portable.log`、`pw-exit.log`。脚本：`check-crash-events.ps1`、`compare-mitigations.ps1`（均在 `D:\c\logs`）。
+日志：`tsf-n1.log`、`tsf-ex.log`、`tsf-throw2.log`、`ours-nosandbox.log`、`chrome-under-cdb.log`、`chrome-portable.log`、`chrome-tampered.log`、`edge.log`、`pw-exit.log`、`imm32-ON/OFF.log`、`kbdus-ON/chrome.log`、`snap-ON/OFF.log`。脚本：`check-crash-events.ps1`、`compare-mitigations.ps1`、`snapshot-tsf.ps1`、`freeze-snapshot.sh`（均在 `D:\c\logs`）。
 
 ---
 
@@ -110,42 +149,48 @@ content!content::BrowserMainRunnerImpl::Initialize+0x23f
 
 | 假设 | 推翻依据 |
 | --- | --- |
-| 签名是根因（本人先前推断） | E6：未签名 + 无沙箱完全正常。签名只是相关变量 |
-| 安装路径 / 注册状态 | E2：官方 Chrome 复制到 `D:\c\logs` 仍正常 |
-| 进程缓解策略差异 | F8：两边快照一致 |
-| Chromium 版本 | E3/E4 两个不同版本同一崩溃点；E1/E4 同为 156 结果相反 |
-| browser-cli 的展示策略 / patch 引入 | E3：上游未改动构建同样崩溃 |
+| 签名是根因（本人先前推断） | **E3**：官方 Chrome 只追加尾部字节使签名失效，代码未变，仍然正常加载全部组件 |
+| 安装路径 / 注册状态 | **E2**：复制到 `D:\c\logs` 便携运行仍正常 |
+| 发布者 / 产品名 / Google 专有逻辑 | **E4**：Edge（微软签名、不同产品名、不同品牌）同样正常 |
+| **进程令牌 / 完整性级别 / AppContainer / 受限 SID / 特权** | **3.2**：ON 与 OFF 逐项相同 |
+| **Job 对象** | **3.2**：两者均不在调用者 Job 中；源码中 `AssignProcessToJobObject` 只用于子进程 |
+| **进程缓解策略** | **3.2**：两者仅 `ExtensionPoint`，值相同 |
+| **模块加载环境** | **3.2**：TSF 初始化前 550 vs 549，唯一差异 `KBDUS.DLL`；而 Chrome/Edge 也加载它 |
+| **初始化顺序（窗口站 vs TSF）** | Chrome/Edge 与我们同为"窗口站在前"，结果相反 |
+| **GPU 子进程的沙箱** | `--disable-gpu-sandbox` 仍 exit 3 |
+| Chromium 版本 | E5/E6 两个不同版本同一崩溃点；E1/E6 同为 156 结果相反 |
+| browser-cli 的展示策略 / patch 引入 | E5：上游未改动构建同样崩溃 |
 | SEH/C++ 捕获写得更"对"就能解决 | F9：退出发生在搜狗自己的处理器里，调用侧没有介入点 |
-
----
+| 只是竞态/偶发 | 沙箱 ON 5/5 exit 3，OFF 5/5 正常；`--in-process-gpu` 3/3 正常 |
 
 ## 5. 尚未确定的一环
 
-**问题**：沙箱开启时，非官方构建里的搜狗为什么在**加载自身组件之前**就放弃，而官方 Chrome 会继续加载？
+**问题**：在**同一个、安全上下文完全相同**的浏览器进程里，为什么"有独立 GPU 进程 + 全局沙箱开启"会让搜狗在加载自身组件之前放弃，而官方 Chrome/Edge 不会？
 
-已知的边界条件很窄：同一用户、同一 IME 版本、同一 mitigation 策略、同一 Chromium 版本区间、同一沙箱代码。差异只可能来自"宿主可被搜狗观测到的属性"或"沙箱在浏览器进程里的实际副作用"。
+现在已经能确定它不是权限、不是策略、不是签名、不是产品身份、不是模块集合、不是窗口站顺序。它随**进程拓扑与内部初始化**变化（`--in-process-gpu` 可稳定规避）。
 
-### H1（推荐优先）官方构建标志差异
-`is_official_build` / `dcheck_always_on` / `is_component_build` 会改变编译定义与部分运行时代码路径。
-- 实验：以 `is_official_build = true` 构建一次（**不需要证书**），在沙箱下观察搜狗组件是否加载。
-- 成本：一次全量构建（数小时）。风险：低（不改代码）。
-- 若成立 → P0 级修复：调整构建参数，不动 IME 代码。
+### H5（下一步首选，成本低）GPU 进程存在时，浏览器进程内部多了什么
+`--in-process-gpu` 是唯一有效的规避手段，因此对比它与基线的**进程内部状态**最有信息量：
+- TSF 初始化时主线程度量：COM apartment（`CoGetApartmentType`）、当前线程桌面/窗口站、主线程序列化状态；
+- 句柄表差异（尤其是命名对象、`ALPC` 端口、共享内存节）；
+- 是否已创建隐藏窗口（`EnumThreadWindows`）。
 
-### H2 可执行文件签名
-- 实验：对现有二进制做**测试签名**后复测。
-- **阻塞**：需要创建/安装证书，属"不得在未授权情况下安装证书或修改系统级设置"。**需要你明确授权**，且必须说明测试签名并不等价于 Google 的可信签名，若搜狗校验发布者名称则无效。
+判据：找出只在"独立 GPU 进程"情形下存在、且与 TSF/IMM32 相关的状态对象。
 
-### H3 沙箱在浏览器进程中的具体副作用
-沙箱关闭会同时关闭多项机制（job 对象、部分 mitigation 安装、`Sandbox::Initialize` 路径）。
-- 实验：在 `sandbox::Sandbox::Initialize` / job 分配点逐个插桩（仅本地实验构建，不进 patch 系列），找出哪一项使搜狗放弃。
-- 成本：中等；需要 2–3 次实验构建。风险：低（不改产品代码）。
+### H1（成本高，但现在是唯一能解释"官方构建"差异的实验）
+官方构建（Chrome/Edge）与非官方构建（Playwright/browser-cli）在 `is_official_build` 上不同，而签名、品牌、发布者已被排除。构建侧核查结果：
+- `chrome_pgo_phase` 默认 **0**，因此**不需要 PGO profile**；
+- `BUILDCONFIG.gn:175` 只禁止 `is_debug && is_official_build` 组合；
+- 未发现强制静态的 assert，但官方构建惯例为静态 + thin-LTO，链接成本高（本机此前静态构建曾触发页文件不足）。
 
-### H4 搜狗内部判据 —— **已执行，收益有限**
-- 结果：抛出的对象是搜狗内部异常类（vtable 在 `SogouPY.ime`），**不含消息字符串**，只有两个小整数（0x0e、0x28）。没有 `std::exception::what()` 可用，也没有 HRESULT。
-- 结论：**无法从异常对象反推失败原因**。该路径已关闭，不要再投入。
-- 副作用收益：确认了旧栈里 `chrome!DllMain+0x30` 是 `CrashOnProcessDetach()`（F13），即"看起来像 Chromium 自己在崩溃"是退出过程的产物，不是原因。
+建议先做 H5；若 H5 仍不能定位，再做 `is_official_build=true` 的实验构建（`out/WinExp`，**不写入** `chromium/args-windows.gn`）。
 
-**推荐顺序（已更新）：H1 → H3 → H2（需授权）**。
+### H2 签名 —— **已用零成本方式关闭，无需证书**
+E3 证明破坏签名不影响结果。除非后续证据反转，不再需要测试证书授权。
+
+**推荐顺序：H5 → H1**。
+
+已关闭：H4（dump 抛出对象）——见 F14，搜狗内部异常类且无消息，无法反推原因。
 
 ---
 
@@ -201,15 +246,18 @@ HRESULT TSFBridge::Initialize() {
 
 | 优先级 | 方案 | 预估成本 | 兼容性 | 风险 | 推荐 |
 | --- | --- | --- | --- | --- | --- |
-| **P0-A** | 定位沙箱下搜狗放弃的判据（H4→H1→H3），从构建/环境侧修复，不改 IME 代码 | 2–5 天（含 1–2 次全量构建） | 最好：不动 Chromium IME 逻辑 | 低（实验构建不进 patch 系列） | **首选** |
-| **P0-B** | 若 H1 成立：调整构建参数（如 `is_official_build`、关闭 `dcheck_always_on`） | 1 次构建 + 验证 | 好 | 中：官方构建标志会影响性能/体积，需评估 | 视 H1 结果 |
+| **P0-A** | H5：对比"独立 GPU 进程 vs `--in-process-gpu`"时浏览器进程的内部状态，定位搜狗真正读到的信号 | 1–2 天 | 最好：目标是不改 IME 代码 | 低 | **首选** |
+| **P0-B** | H1：`is_official_build=true` 实验构建（无需 PGO），验证官方构建是否根因 | 1 次全量静态+LTO 构建 | 好 | 中：构建时间长、本机页文件曾不足 | H5 无效时执行 |
 | **P1** | `ITfThreadMgrEx::ActivateEx(TF_TMAE_NOACTIVATETIP)` 延迟 TIP 激活 | 3–5 天 | 中 | **高**：崩溃点很可能只是推迟到"首次聚焦输入框"，即用户真正想打字时；必须做焦点后复测 | 备选 |
 | **P1'** | 丢弃半初始化 bridge 前显式 `Deactivate()` | 0.5 天 | 好 | 低 | 建议随任一方案一起做 |
-| **P2** | 独立开关 `--browser-cli-tsf=default\|deferred\|disabled`（`disabled` 仅诊断/特殊自动化） | 1 天 | 好 | 低 | **中期必备**，但不能替代修复 |
+| **P2** | 独立开关 `--browser-cli-tsf=default\|deferred\|disabled`（`disabled` 仅诊断） | 1 天 | 好 | 低 | **中期必备**，但不能替代修复 |
 
-不推荐：移植旧 IMM32（本 revision 已删除该实现，工作量大且回退上游方向）；独立 IME 代理进程（复杂度与稳定性风险远超收益）。
+**明确不作为修复手段**：
 
-**关于 P1 的预判（需实测确认）**：崩溃点在 `MSCTF!CTip::Activate` 内部。`TF_TMAE_NOACTIVATETIP` 只是把这一步推迟到需要输入法时，届时同样会进入 `CTip::Activate`。因此它大概率**不解决问题，只是把 exit 3 从启动时挪到用户点击输入框时**——那比现在更糟。除非实测证明延迟后搜狗走了不同分支，否则不建议投入。
+- `--no-sandbox`：你已明确禁止，且本轮证明它与问题无因果（浏览器进程安全上下文不变）。
+- `--in-process-gpu`：可稳定规避（3/3），但它把 GPU 服务搬进浏览器进程，改变渲染架构与稳定性边界，只能作为**诊断杠杆**，不能作为产品默认。
+
+不推荐：移植旧 IMM32（本 revision 已删除该实现）；独立 IME 代理进程。
 
 ---
 
@@ -218,11 +266,8 @@ HRESULT TSFBridge::Initialize() {
 ### 阶段 1（本报告之后，立即可以做的只读实验）
 
 1. ~~**H4**：dump 抛出对象取错误串~~ —— **已执行并关闭**（F14：搜狗内部异常类，无消息）。
-2. **H1**：在一次实验构建中加 `is_official_build = true`（`out/WinExp/args.gn`，**不写入 `chromium/args-windows.gn`**），观察：
-   - 搜狗组件加载数（cdb ModLoad 计数）
-   - 启动退出码
-   - 若加载数变为 5 → H1 成立。
-3. **H3 的前置**：在一次实验构建里，把 `--no-sandbox` 打开的几项机制分别单独关闭（job 对象 / `Sandbox::Initialize` 子步骤），观察哪一项单独就能恢复搜狗组件加载。这一步能直接把 H3 从"候选"变成"定位"。
+2. **H5（首选）**：对比"基线（崩）"与 `--in-process-gpu`（正常）在 `TSFBridge::Initialize` 时刻的进程内部状态：COM apartment、当前线程桌面/窗口站、隐藏窗口、句柄表（命名对象 / ALPC / 共享节）。目标不是猜，而是找出**只在独立 GPU 进程存在时出现、且与 TSF/IMM32 相关**的对象。
+3. **H1（H5 无效时）**：`is_official_build = true` 实验构建（`out/WinExp/args.gn`，**不写入** `chromium/args-windows.gn`；`chrome_pgo_phase=0` 已默认，无需 PGO profile），观察搜狗组件加载数与退出码。
 
 ### 阶段 2（按实验结果二选一）
 
@@ -270,10 +315,11 @@ HRESULT TSFBridge::Initialize() {
 
 | 项 | 阻塞原因 | 需要什么 |
 | --- | --- | --- |
-| H2 签名实验 | 需创建/安装测试证书 | 你的明确授权；且需接受"测试签名 ≠ Google 签名"的局限 |
-| 切换系统默认输入法做对照 | 会改用户 IME 配置 | 你的授权，或提供一台可自由改配置的测试机 |
+| 切换系统默认输入法做对照 | 会改用户 IME 配置 | 你的授权，或一台可自由改配置的测试机 |
 | 干净 Windows VM 复现 | 本机无法排除机器特性 | 一台干净 VM（无第三方 IME / 安全软件） |
-| `is_official_build` 实验构建 | 全量构建数小时 + 磁盘 | 无需授权，但需你确认可以占用构建时间 |
+| H1 实验构建 | 全量静态 + thin-LTO，数小时；本机曾因页文件不足失败 | 你的确认（不改任何产品文件，产物在 `out/WinExp`） |
+
+**已解除**：H2 签名实验不再需要——E3 用"破坏签名的官方 Chrome"零成本推翻了签名假设，因此**不需要测试证书，也不需要授权安装证书**。
 
 ---
 

@@ -51,6 +51,46 @@ cdb -G -cf 03-dll-loads.cdb chrome.exe --headless=new ...
 共 5 个 DLL，而崩溃的非官方构建一个都不会尝试——说明搜狗在更早处就放弃了，
 不是某个 DLL 加载失败。
 
+## 04-module-load-stack.cdb —— 某个模块是谁加载的
+
+```sh
+cdb -G -cf 04-module-load-stack.cdb chrome.exe --headless=new ...
+```
+
+脚本里把 `ld:<module>` 换成目标模块名（例如 `ld:kbdus`、`ld:imm32`），
+在模块加载的第一时间打印调用栈。本机用它确认了 `KBDUS.DLL` 出自
+`USER32!CommonCreateWindowStation`（沙箱子进程会创建独立窗口站）。
+
+## snapshot-process-context.ps1 + freeze-at-tsf.sh —— 安全上下文快照
+
+```sh
+tests/tools/tsf-diagnostics/freeze-at-tsf.sh ON
+tests/tools/tsf-diagnostics/freeze-at-tsf.sh OFF --no-sandbox
+```
+
+在 `ui_base_ime_win!ui::TSFBridge::Initialize` 停住浏览器，然后从外部读取
+目标进程的完整性级别、AppContainer、ElevationType、受限 SID 数、**特权名称与状态**、
+是否在 Job、缓解策略。冻结在 TSF 入口是为了避免崩溃过程中途改变进程状态。
+
+本机结论：沙箱 ON 与 OFF 的上述各项**逐项相同**，因此"沙箱"在这里不是权限差异。
+
+注意两个实现坑（都踩过）：
+
+- `GetSidSubAuthorityCount` 返回的是 `PUCHAR`（指向计数的指针），按值声明会读到野指针；
+- 子进程会继承未知开关，所以按 `--browser-cli-diag-target` 找进程时必须排除含 `--type=`
+  的项，否则抓到的是渲染/GPU 子进程（完整性级别 Untrusted，看起来像"浏览器被沙箱化了"）。
+
+## 已用这些脚本得出的结论（避免重复劳动）
+
+| 结论 | 依据 |
+| --- | --- |
+| 退出由 `SogouPY.ime` 调用 `ExitProcess(3)` | 01 的栈 |
+| 异常由搜狗自己抛出、自己处理 | 02 的 `.exr -1`（Parameter[3] = SogouPY 基址） |
+| 搜狗在沙箱下**从未尝试**加载自身组件 | 03 的 LDR 日志里没有 isgpet/picface/ichat 等 |
+| 签名不是门槛 | 破坏签名后的官方 Chrome 仍正常 |
+| 浏览器进程安全上下文与沙箱开关无关 | snapshot 的 ON/OFF 对比 |
+| 独立 GPU 进程是必要条件 | 沙箱 ON 下 `--in-process-gpu` 通过，其余 GPU 开关均无效 |
+
 ## 已知坑（都踩过）
 
 | 现象 | 原因 |
