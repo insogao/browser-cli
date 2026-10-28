@@ -1,0 +1,15 @@
+DISK_MIN_FRESH_GIB=24 (< runtime) rejected
+DISK_MIN_GIB=0 DISK_MIN_FRESH_GIB=0 rejected
+DISK_MIN_GIB=24 rejected
+DISK_MIN_GIB=30 DISK_MIN_FRESH_GIB=29 rejected
+DISK_MIN_GIB=abc rejected
+check-only fails on HEAD != VERSION
+dry-run does not document HEAD mismatch FAIL
+dry-run missing checkout --detach <VERSION rev>
+dry-run missing revision-aware gclient sync
+dry-run missing with_proxy
+generate-icons --dry-run plan
+missing app did not fail closed
+prepare refuses a missing/ad-hoc app (Developer ID preflight)
+quoted paths do not round-trip to the exact argv
+resume on tip-like checkout rejected

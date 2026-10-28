@@ -731,8 +731,12 @@ python3 tests/tools/omnibox-everywhere-origin-check.py --self-test   # 8 个 fix
 - `scripts/generate-icons.sh` 的 `.icns` + `Assets.car` 计划；
 - `scripts/prepare-app.sh` 的 Developer ID 预检。
 
-这些脚本在非 macOS 上主动拒绝执行，属于设计行为。Windows 侧的对应门禁是
-`tests/tools/test_windows_scripts.py`（24 项）与 `scripts/verify-windows.sh`（6 步），两者都必须全绿。
+这些脚本在非 macOS 上主动拒绝执行，属于设计行为。失败清单被逐条记录在
+`tests/windows-host-failures.txt`，CI 的 `windows-static` 会做**精确比对**：新增失败或多出
+未记录项都会让流水线变红，因此这份基线不会掩盖回归。
+
+Windows 侧的对应门禁是 `tests/tools/test_windows_scripts.py`（24 项）与
+`scripts/verify-windows.sh`（6 步），两者都必须全绿。
 若 `python3` 在 PATH 中指向 Chromium 自带的 hermetic 解释器（无第三方包），
 请用系统 Python 运行 Python 测试；`scripts/configure-windows.sh` 会自行挑选能 `import PIL` 的
 解释器来生成图标。
