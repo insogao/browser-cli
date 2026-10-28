@@ -1,5 +1,5 @@
 diff --git a/ui/base/ime/win/BUILD.gn b/ui/base/ime/win/BUILD.gn
-index 8972a21f..befad31b 100644
+index 8972a21f80fe8662afee39dfd270bd5d8774f696..befad31be9e390982bf54ff07607d6cf3e11cffc 100644
 --- a/ui/base/ime/win/BUILD.gn
 +++ b/ui/base/ime/win/BUILD.gn
 @@ -31,6 +31,11 @@ component("win") {
@@ -15,7 +15,7 @@ index 8972a21f..befad31b 100644
  
    deps = [
 diff --git a/ui/base/ime/win/tsf_bridge.cc b/ui/base/ime/win/tsf_bridge.cc
-index 0c980b7e..aa36c9b4 100644
+index 0c980b7eb8b21375c7832054ef2f2931e9dedf43..bd8ae6cd4b67d6ed08247845cb811b4ed980d0da 100644
 --- a/ui/base/ime/win/tsf_bridge.cc
 +++ b/ui/base/ime/win/tsf_bridge.cc
 @@ -8,6 +8,7 @@
@@ -59,21 +59,25 @@ index 0c980b7e..aa36c9b4 100644
  // static
  HRESULT TSFBridge::Initialize() {
    TRACE_EVENT0("ime", "TSFBridge::Initialize");
-@@ -718,8 +745,33 @@ HRESULT TSFBridge::Initialize() {
+@@ -718,8 +745,37 @@ HRESULT TSFBridge::Initialize() {
      return S_OK;
    }
  
-+  // Browser CLI: managed (background/agent) runs must not let third-party text
-+  // services decide whether the browser process survives startup. Some IMEs
-+  // (observed: Sogou's SogouPY/SogouTSF text service) terminate the process from
-+  // inside TSF activation, which no caller-side guard can stop because the IME
-+  // handles the exception itself and then calls ExitProcess. Skip TSF entirely
-+  // in that mode: ui::InputMethodWinTSF already tolerates a null bridge, and the
-+  // browser runs without IME support instead of dying before it starts.
-+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-+          "browser-cli-background-presentation")) {
++  // Browser CLI: TSF stays enabled in every mode, including managed background
++  // runs. A managed window can be handed to the user at any moment (HUMAN /
++  // ASSIST), and at that point the user must be able to type in their own
++  // language; this revision has no IMM32 fallback, so skipping TSF means no
++  // input method at all.
++  //
++  // Disabling it is now an explicit diagnostic switch and nothing else:
++  //   --browser-cli-tsf=disabled
++  // It exists so the "does this IME break startup" question can still be
++  // answered on a suspect machine. It must never be tied to a window
++  // presentation switch again: those two concerns are independent.
++  if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "browser-cli-tsf") == "disabled") {
 +    LOG(INFO) << "BROWSER_CLI_IME stage=tsf decision=skip"
-+                 " reason=managed-mode-avoids-third-party-tip";
++                 " reason=diagnostic-switch";
 +    return E_FAIL;
 +  }
 +

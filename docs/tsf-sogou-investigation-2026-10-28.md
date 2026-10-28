@@ -407,3 +407,51 @@ HRESULT TSFBridge::Initialize() {
 ## 11. 对产品的一句话结论
 
 搜狗在"沙箱 + 非官方构建"下会主动结束宿主进程，这是它的缺陷；但我们不能等它修。在找到那个可被我们控制的触发条件之前，**managed 模式没有中文输入法是不可接受的**，因此这条调查必须继续，不能以"能启动、能跑 CDP"作为收尾。
+
+---
+
+## 12. Windows 临时兼容方案（2026-10-28 落地）
+
+根因仍未确定（第 5 节），但"managed 模式没有输入法"不能继续存在。因此先落地一个**明确标注的临时方案**，同时把"没有输入法"这个问题彻底移除。
+
+### 12.1 改了什么
+
+| 项目 | 改动 |
+| --- | --- |
+| **输入法** | `TSFBridge::Initialize()` **不再**因为窗口管理开关而跳过 TSF。managed/stock/human/assist 全部启用 TSF。 |
+| **诊断开关** | 新增 `--browser-cli-tsf=disabled`（**仅诊断**）。日志为 `BROWSER_CLI_IME stage=tsf decision=skip reason=diagnostic-switch`。窗口管理开关与输入法**彻底解耦**。 |
+| **开发启动脚本** | `scripts/verify-windows.sh` 的两个 smoke 与 `tests/tools/browser-cli-capability-cdp-check.py` 的 `launch()` 在 Windows 上加 `--in-process-gpu`。**发布配置未改**。 |
+| **验收判据** | 反转：第 4 步从"必须出现 TSF skip 日志"改为"**不得**出现 skip 日志（TSF 必须真启用）"；第 5 步 stock 模式也要求启动成功并返回 DOM。 |
+| **patch** | `023-windows-tsf-managed-skip.patch` → `023-windows-tsf-ime-support.patch`，sha256 `01a6b329a7dad3380f89eeb9a1755943f0a63b2e429d3676530d80c6ff20c392`。 |
+
+### 12.2 真实 GUI 验收（沙箱全程开启，未使用 `--no-sandbox`）
+
+用 Computer Use 通过**真实 Windows 输入栈**逐键输入（`pressKey` 单字符），并经 CDP 从 DOM 读回，**不以截图或 rc=0 作为通过依据**。
+
+| 场景 | 证据 | 结果 |
+| --- | --- | --- |
+| stock 窗口 · `<textarea>` | `compositionstart` → `compositionupdate("ihaonihao")` → `input.inputType=insertCompositionText` → `compositionend("你好你好")`，`textarea.value="你好你好"` | **PASS** |
+| stock 窗口 · `<input type=text>` | `input.value="你好"` | **PASS** |
+| stock 窗口 · `contenteditable` | `ce.textContent="我"`（输入 `wo`） | **PASS** |
+| 地址栏（omnibox） | AX `textfield 地址和搜索栏` 的 value = `"你好"` | **PASS** |
+| 退格 | `"你好你好"` → `"你好"`（两次 BackSpace） | **PASS** |
+| **managed + HUMAN**（CLI `--browser-cli-user-explicit-show`） | 日志 `human-ownership-granted` / `reason=existing-window-presented`；`textarea.value="你好"` | **PASS** |
+| **managed + ASSIST**（`--browser-cli-foreground-assist --reason=login --window=<hwnd>`） | 日志 `lease-granted-and-presented` / `state=assist leased=yes`；`textarea.value="你好"` | **PASS** |
+| 策略正确性 | 对 HUMAN 窗口申请 assist 被拒：`result=denied reason=target-human-owned` | **PASS**（符合不变量 5.3） |
+| 渲染 | CDP `Page.captureScreenshot`（窗口前置后）得到正确页面帧，四个控件齐全 | **PASS** |
+| GPU / WebGL | `WebGL 2.0`，renderer `ANGLE (NVIDIA RTX 4060 Laptop GPU, D3D11)`，`readPixels` 返回 `[0,255,0,255]` | **PASS** |
+| 后台并发 | 追加 2 个窗口后 `state=background`（拒绝上屏），进程存活 16 个 | **PASS** |
+| 主进程崩溃 | 全流程无退出、无 WER 事件 | **PASS** |
+| headless 回归 | `verify-windows.sh` **16/16 PASS**（含能力 API 与 page-driving） | **PASS** |
+
+踩到的两个测量陷阱，记录以免误判：
+
+1. **窗口未前置时 Chrome 不产帧**：`Page.captureScreenshot` 会一直等待，CUA/屏幕抓图也只会拿到黑帧或别的内容。**看起来像渲染坏了，其实是被遮挡**。判定渲染必须先把窗口前置（`Page.bringToFront`）并确认 `document.hasFocus() === true`。
+2. **焦点可能在浏览器 UI 而非网页**：managed 窗口 show 之后，注入按键可能落进地址栏并触发搜索。必须先 `Page.bringToFront` + `element.focus()`，并**读回 `document.hasFocus()` 与 `document.activeElement`** 再输入。
+
+### 12.3 已知风险（必须随方案一起记住）
+
+1. **这是诊断杠杆，不是修复。** `--in-process-gpu` 把 GPU 服务搬进浏览器主进程，因此开发运行**失去了 GPU 进程隔离**：GPU 侧的崩溃/资源耗尽会直接作用于浏览器主进程，而不是只死一个可重启的 GPU 进程。发布配置不使用它。
+2. **根因未定位。** 沙箱开启 + 独立 GPU 进程 + 该搜狗版本仍会让浏览器在 TSF 激活时退出。换机、升级搜狗或去掉该开关后问题会复现。
+3. **发布前必须重新评估。** 一旦 H1/H5 找到真正的触发条件，应移除 `--in-process-gpu` 并把 patch 023 收敛为"仅诊断开关"。
+4. **没有输入法在补丁层面已不可能发生**：TSF 现在始终启用；`--browser-cli-tsf=disabled` 是唯一关闭途径，且命名与日志都标明是诊断用。

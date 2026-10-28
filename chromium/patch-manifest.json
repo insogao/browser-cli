@@ -116,8 +116,8 @@
     },
     {
       "order": 23,
-      "file": "023-windows-tsf-managed-skip.patch",
-      "sha256": "d9ec9381be6507f7fe9e15e57d69b5efc3dafd16da7e33aaf3c70f1c36fe5111"
+      "file": "023-windows-tsf-ime-support.patch",
+      "sha256": "01a6b329a7dad3380f89eeb9a1755943f0a63b2e429d3676530d80c6ff20c392"
     },
     {
       "order": 24,

@@ -196,14 +196,19 @@ fi
 if [ "$SKIP_SMOKE" -eq 1 ]; then
   step "4/6 managed smoke SKIPPED (--skip-smoke is not acceptance)"
 else
-  step "4/6 managed-mode smoke (no --no-sandbox)"
+  step "4/6 managed-mode smoke (no --no-sandbox, TSF enabled)"
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] would run chrome.exe --headless=new --browser-cli-background-presentation --dump-dom about:blank\n'
+    printf '[dry-run] would run chrome.exe --headless=new --in-process-gpu --browser-cli-background-presentation --dump-dom\n'
   else
     PROFILE="$(mktemp -d)"
     SMOKE_LOG="$LOG_DIR/verify-windows-managed.log"
     set +e
-    timeout 120 "$CHROME_EXE" --headless=new --disable-gpu \
+    # --in-process-gpu is the documented temporary compatibility flag for Windows
+    # development hosts: with a separate GPU process and the sandbox on, some
+    # third-party IMEs (observed: Sogou) terminate the browser during TSF
+    # activation. It is a dev-only mitigation, never a release default; see
+    # docs/tsf-sogou-investigation-2026-10-28.md.
+    timeout 120 "$CHROME_EXE" --headless=new --disable-gpu --in-process-gpu \
       --user-data-dir="$PROFILE" \
       --browser-cli-background-presentation \
       --no-first-run --no-default-browser-check \
@@ -214,11 +219,14 @@ else
     set -e
     rm -rf "$PROFILE"
     [ "$rc" -eq 0 ] || fail "managed smoke exited $rc (see $SMOKE_LOG); this is not a --no-sandbox run"
-    grep -qa "BROWSER_CLI_IME stage=tsf decision=skip" "$SMOKE_LOG" || \
-      fail "managed smoke did not log the TSF skip decision (see $SMOKE_LOG)"
+    # TSF must be ENABLED now: a skip log here means the IME was disabled, which
+    # is exactly what this acceptance no longer allows.
+    if grep -qa "BROWSER_CLI_IME stage=tsf decision=skip" "$SMOKE_LOG"; then
+      fail "managed smoke skipped TSF; IME must stay enabled (see $SMOKE_LOG)"
+    fi
     grep -qa "<h1>verify</h1>" "$LOG_DIR/verify-windows-managed.out" || \
       fail "managed smoke did not return the expected DOM"
-    printf 'PASS managed smoke (exit 0, TSF skipped, DOM returned)\n'
+    printf 'PASS managed smoke (exit 0, TSF enabled, DOM returned)\n'
   fi
 fi
 
@@ -226,26 +234,30 @@ fi
 if [ "$SKIP_SMOKE" -eq 1 ]; then
   step "5/6 stock smoke SKIPPED"
 else
-  step "5/6 stock behaviour unchanged (no managed switch)"
+  step "5/6 stock mode starts with TSF enabled (no managed switch)"
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] would run chrome.exe --headless=new (stock) and require no BROWSER_CLI_IME skip log\n'
+    printf '[dry-run] would run chrome.exe --headless=new --in-process-gpu (stock) and require no BROWSER_CLI_IME skip log\n'
   else
     PROFILE="$(mktemp -d)"
     STOCK_LOG="$LOG_DIR/verify-windows-stock.log"
     set +e
-    timeout 60 "$CHROME_EXE" --headless=new --disable-gpu \
+    timeout 60 "$CHROME_EXE" --headless=new --disable-gpu --in-process-gpu \
       --user-data-dir="$PROFILE" \
       --no-first-run --no-default-browser-check \
-      --enable-logging=stderr --v=0 about:blank >/dev/null 2>"$STOCK_LOG"
+      --enable-logging=stderr --v=0 --dump-dom "data:text/html,<h1>stock</h1>" \
+      >"$LOG_DIR/verify-windows-stock.out" 2>"$STOCK_LOG"
+    rc=$?
     set -e
     rm -rf "$PROFILE"
-    # Stock mode must not take the Browser CLI shortcut. On a host with a broken
-    # third-party TIP stock may fail to start at all; that is the machine's
-    # condition, not a Browser CLI regression, so only the log is asserted.
+    # Stock mode must not take any Browser CLI IME shortcut, and with the
+    # development compatibility flag it must also start on this host.
     if grep -qa "BROWSER_CLI_IME" "$STOCK_LOG"; then
-      fail "stock run logged BROWSER_CLI_IME; the managed switch leaked into stock mode"
+      fail "stock run logged BROWSER_CLI_IME; the diagnostic IME switch leaked into stock mode"
     fi
-    printf 'PASS stock mode does not take the managed IME shortcut\n'
+    [ "$rc" -eq 0 ] || fail "stock smoke exited $rc (see $STOCK_LOG)"
+    grep -qa "<h1>stock</h1>" "$LOG_DIR/verify-windows-stock.out" || \
+      fail "stock smoke did not return the expected DOM"
+    printf 'PASS stock mode starts with TSF enabled and no Browser CLI IME shortcut\n'
   fi
 fi
 

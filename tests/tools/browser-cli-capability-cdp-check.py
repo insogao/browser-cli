@@ -129,22 +129,31 @@ class WebSocket:
         self._sock.sendall(bytes(header) + masked)
 
     def recv(self):
-        first, second = self._recv_exact(2)
-        opcode = first & 0x0F
-        length = second & 0x7F
-        if length == 126:
-            length = int.from_bytes(self._recv_exact(2), "big")
-        elif length == 127:
-            length = int.from_bytes(self._recv_exact(8), "big")
-        masked = bool(second & 0x80)
-        mask = self._recv_exact(4) if masked else None
-        payload = self._recv_exact(length)
-        if masked:
-            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        if opcode == 0x8:
-            raise CheckError("WebSocket closed by peer")
-        if opcode in (0x9,):
-            return self.recv()
+        # Reassemble fragmented messages: a large CDP reply (Page.captureScreenshot
+        # returns a base64 PNG) arrives as one initial frame plus continuation
+        # frames, and reading only the first frame desynchronises the stream.
+        payload = b""
+        while True:
+            first, second = self._recv_exact(2)
+            fin = first & 0x80
+            opcode = first & 0x0F
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(self._recv_exact(2), "big")
+            elif length == 127:
+                length = int.from_bytes(self._recv_exact(8), "big")
+            masked = bool(second & 0x80)
+            mask = self._recv_exact(4) if masked else None
+            chunk = self._recv_exact(length)
+            if masked:
+                chunk = bytes(b ^ mask[i % 4] for i, b in enumerate(chunk))
+            if opcode == 0x8:
+                raise CheckError("WebSocket closed by peer")
+            if opcode == 0x9:
+                continue
+            payload += chunk
+            if fin:
+                break
         return payload.decode("utf-8")
 
     def close(self):
@@ -233,6 +242,11 @@ def launch(chrome, profile, port, extension_dir, managed, extra_switches):
     ]
     if managed:
         args.insert(1, "--browser-cli-background-presentation")
+        # Windows development compatibility: with a separate GPU process and the
+        # sandbox on, some third-party IMEs (observed: Sogou) terminate the
+        # browser during TSF activation. Dev only; see
+        # docs/tsf-sogou-investigation-2026-10-28.md.
+        args.insert(2, "--in-process-gpu")
     args.extend(extra_switches)
     log("launching: %s" % " ".join(args[:6] + ["..."]))
     return subprocess.Popen(

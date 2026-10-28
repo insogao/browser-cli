@@ -256,6 +256,14 @@ Chromium 加载 IME 阶段，早于任何 Browser CLI patch 的执行路径。
 3. 新增 patch 在 `TSFBridgeImpl::Initialize()` 外做异常保护并降级为“无 IME”，
    属于新行为，需评审且仍标 REVIEW。
 
+## 临时兼容方案（2026-10-28）
+
+`023-windows-tsf-managed-skip.patch` 的"managed 模式跳过 TSF"已**撤销**：它等于没有输入法，
+而 managed 窗口随时可能交给用户。现在 TSF 始终启用，`--browser-cli-tsf=disabled` 仅作诊断；
+Windows 开发/验收运行需带 `--in-process-gpu`（临时兼容，发布配置不使用）。
+完整验收证据、测量陷阱与 GPU 进程隔离风险见
+`docs/tsf-sogou-investigation-2026-10-28.md` §12。
+
 ## exit 3 的对照实验（2026-10-28）
 
 当时有一个合理的质疑：如果这是普遍问题，网上应该有大量记录。为回答它，在同一台机器、
