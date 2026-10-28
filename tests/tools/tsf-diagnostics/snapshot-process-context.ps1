@@ -139,6 +139,20 @@ Write-Output ("restricted_sid_count = {0}" -f ([Tok]::CountEntries($procId, 11))
 Write-Output ("privileges           = {0}" -f ([Tok]::PrivilegeList($procId)))
 Write-Output ("in_job               = {0}  (1=yes)" -f ([Tok]::InJob($procId)))
 Write-Output ("session_id           = {0}" -f $proc.SessionId)
+Write-Output ("thread_count         = {0}" -f $proc.ThreadCount)
+Write-Output ("handle_count         = {0}" -f $proc.HandleCount)
+
+# Children alive at this instant: answers "does a GPU process already exist when
+# TSF initializes?" without inferring it from module order.
+$kids = Get-CimInstance Win32_Process -Filter "ParentProcessId=$procId" -ErrorAction SilentlyContinue
+$types = @()
+foreach ($k in $kids) {
+  if ($k.CommandLine -match '--type=([a-z-]+)') { $types += $Matches[1] }
+  else { $types += 'browser-ish' }
+}
+$types = $types | Sort-Object
+Write-Output ("child_count          = {0}" -f @($kids).Count)
+Write-Output ("child_types          = {0}" -f ($(if ($types.Count) { $types -join ',' } else { '<none>' })))
 
 $policies = [ordered]@{ 'DEP'=0; 'ASLR'=1; 'DynamicCode'=2; 'StrictHandle'=3; 'SystemCallFilter'=4;
   'ExtensionPoint'=5; 'BinarySignature'=8; 'ImageLoad'=9; 'ControlFlowGuard'=11;

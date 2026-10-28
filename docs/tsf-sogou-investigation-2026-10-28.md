@@ -12,13 +12,10 @@
 1. **启动时 exit 3 不是 Chromium 崩溃，是搜狗主动调用了 `ExitProcess(3)`。** 已取得连续调用栈，调用点位于 `SogouPY.ime` 内部，且在它自己的 C++ 异常处理器里。
 2. **与 browser-cli 的移植无关。** 未经任何修改的上游 Chromium 151 在同一台机器上产生**逐帧相同、偏移相同**的调用栈。
 3. **"签名是根因"的假设已被推翻**（那是我的错误推断，仅基于相关性），而且是用零成本方式推翻的：给官方 Chrome 副本尾部追加 27 字节使 Authenticode 失效、代码一字未改，它**照样加载全部搜狗组件**。**因此不需要申请或安装任何证书。**
-4. **沙箱在这里不是"权限"，而是"进程拓扑"的代理变量。** 冻结在 `TSFBridge::Initialize` 实测：浏览器主进程在沙箱 ON/OFF 下的安全上下文**逐项相同**（Medium 完整性、非 AppContainer、0 个受限 SID、同样 5 个特权、不在 Job、同样的 mitigation、TSF 前模块集仅差 `KBDUS.DLL`）。真正与结果同向变化的内部差异是：**是否存在独立的 GPU 进程**——
-   - 沙箱 ON + 独立 GPU 进程 → exit 3（5/5）
-   - 沙箱 ON + `--in-process-gpu` → 正常（3/3）
-   - 沙箱 OFF（任意变体）→ 正常（5/5）
-   - `--disable-gpu` / `--disable-gpu-sandbox` / `--disable-gpu-compositing` / `--single-process` 均无效
-5. **仍未确定的一环**：在安全上下文完全相同的前提下，为什么"独立 GPU 进程 + 全局沙箱"会让搜狗在加载自身组件前放弃。第 5 节给出 H5（对比 `--in-process-gpu` 与基线的进程内部状态）与 H1（`is_official_build` 实验构建）两个候选，H5 优先。
-6. **patch 023 机制有效但耦合错误**：它用一个*展示策略*开关控制*输入法*行为，并且代价是 managed 模式下**完全没有输入法**（不是降级）。第 6 节给出必须修改项。
+4. **沙箱在这里不是"权限"，而是"内部初始化路径"的代理变量。** 冻结在 `TSFBridge::Initialize` 实测：浏览器主进程在沙箱 ON/OFF 下的安全上下文**逐项相同**（Medium 完整性、非 AppContainer、0 个受限 SID、同样 5 个特权、不在 Job、同样的 mitigation、TSF 前模块集仅差 `KBDUS.DLL`）。
+5. **`--in-process-gpu` 能让启动成功，但原因不是 GPU 进程**（H5-A 已证）：TSF 初始化时 GPU 进程**尚未创建**，`GpuProcessHost::LaunchGpuProcess()` 与 `GpuMain` 都还没运行（各 3/3）；用隔离构建强制 `InitializeSkia()`（`--in-process-gpu` 唯一的前置分支差异）**仍然崩溃**（3/3）。TSF 之前确实存在稳定的小差异：**+1 线程 / +7 句柄**，具体对象尚未识别。
+6. **仍未确定的一环**：那个早期状态差异里，究竟是哪一个对象让搜狗在加载自身组件前放弃。下一步是枚举新增句柄并取对象名。
+7. **patch 023 机制有效但耦合错误**：它用一个*展示策略*开关控制*输入法*行为，并且代价是 managed 模式下**完全没有输入法**（不是降级）。第 6 节给出必须修改项。
 
 ---
 
@@ -139,9 +136,70 @@ content!content::BrowserMainRunnerImpl::Initialize+0x23f
 - **E3（关键）** 排除**代码签名**：同一份官方二进制只追加尾部字节使 Authenticode 失效，代码未变，仍然正常。**H2 因此不需要证书即可关闭。**
 - **E4** 排除发布者、产品名与 Google 专有逻辑：Edge 与 Chrome 的产品名、发布者、品牌均不同，都正常。
 - **E8 vs E6** 把差异收敛到"沙箱开关"；但 3.2 表明浏览器进程的安全上下文**完全没变**，所以沙箱在这里不是"权限"，而是**内部代码路径/进程拓扑**的代理变量。
-- **3.3** 把机制进一步收敛：**只要 GPU 服务跑在独立进程里且全局沙箱开启就会崩；把 GPU 放进浏览器进程（`--in-process-gpu`）就正常**。单独取消 GPU 进程的沙箱（`--disable-gpu-sandbox`）无效，说明不是 GPU 子进程的权限问题。
+- **3.3** 把机制进一步收敛到"沙箱开启时 `--in-process-gpu` 可规避"。**注意**：这不等于"独立 GPU 进程导致崩溃"——3.4 证明 TSF 时 GPU 进程尚未创建。
 
 日志：`tsf-n1.log`、`tsf-ex.log`、`tsf-throw2.log`、`ours-nosandbox.log`、`chrome-under-cdb.log`、`chrome-portable.log`、`chrome-tampered.log`、`edge.log`、`pw-exit.log`、`imm32-ON/OFF.log`、`kbdus-ON/chrome.log`、`snap-ON/OFF.log`。脚本：`check-crash-events.ps1`、`compare-mitigations.ps1`、`snapshot-tsf.ps1`、`freeze-snapshot.sh`（均在 `D:\c\logs`）。
+
+### 3.4 H5-A：三项隔离实验（同日第二组）
+
+**先修正 3.3 的过度归因**：`--in-process-gpu` 能让启动成功，但**不能**据此说"独立 GPU 进程导致崩溃"——下面实验 1 证明 TSF 初始化时 GPU 进程根本还没创建。
+
+#### 实验 1：时间顺序（每项 3 次）
+
+| 观测 | 方法 | 结果 |
+| --- | --- | --- |
+| TSF 时刻是否存在 `--type=gpu-process` 子进程 | 断点冻结后枚举 `ParentProcessId == browser` | **不存在**。3/3 都只有 `crashpad-handler` |
+| `GpuProcessHost::LaunchGpuProcess()` 是否已执行 | `bu content!content::GpuProcessHost::LaunchGpuProcess` + `bu …TSFBridge::Initialize` | **未执行**。3/3 只命中 TSF；两个断点均已成功解析（日志无 `could not be resolved`） |
+| `--in-process-gpu` 下 `content::GpuMain` 是否先运行 | `bu content!content::GpuMain` | **未运行**。两种模式下都只命中 TSF |
+
+→ **崩溃时 GPU 进程不存在、GPU 服务也未启动。**"GPU 子进程"不可能是原因。
+
+#### 实验 2：隔离 Skia 初始化分支
+
+代码核实（本 revision，非记忆）：
+- `content/browser/browser_main_runner_impl.cc`：`PostCreateMainMessageLoop()`(133) → `ui::InitializeInputMethod()`(139) → `CreateStartupTasks()`(141)；
+- `browser_main_loop.cc:759`：`if (UsingInProcessGpu()) InitializeSkia(); else InitializeSkiaLite();`
+- `UsingInProcessGpu()` = `--single-process` **或** `--in-process-gpu`；
+- `InitializeSkia()` 多做 `SkGraphics::Init()`、`SkGraphics::SetFontCacheLimit()`、**`skia::InitializeFontRendering()`**；Lite 只做 kill-switch 与内存 dump provider。
+
+分支实测（断点计数，排除 cdb 命令回显）：
+
+| 模式 | 实际分支 | 退出码 |
+| --- | --- | --- |
+| 基线 | **LITE** | 3 |
+| `--in-process-gpu` | **FULL** | 0 |
+| `--single-process` | **FULL** | 3（该模式本身不受支持，且调试器下未走到同一退出路径，仅作旁证） |
+
+隔离构建（**临时修改，已还原**）：在 `browser_main_loop.cc` 加 `--browser-cli-exp-full-skia` 开关，使**普通模式（独立 GPU 进程）也走 `InitializeSkia()`**：
+
+| 变体 | 结果 |
+| --- | --- |
+| 基线（LITE） | rc=3（3/3） |
+| `--browser-cli-exp-full-skia`（FULL，独立 GPU） | **rc=3（3/3）** |
+| `--in-process-gpu` | rc=0（3/3） |
+
+→ **Skia 分支被排除**：强制 FULL 并不能修复。还原后：源码与补丁链一致（`STATE applied`），基线 rc=3（3/3），实验开关失效（rc=3）。
+
+#### 实验 3：TSF 时刻的其余状态（每项 3 次，逐项一致）
+
+| 指标 | 基线（LITE） | `--in-process-gpu` |
+| --- | --- | --- |
+| 线程数 | **21** | **22** |
+| 句柄数 | **371** | **378** |
+| 子进程 | 仅 `crashpad-handler` | 仅 `crashpad-handler` |
+| 完整性级别 | Medium | Medium |
+
+→ TSF 之前确实存在一个小而稳定的差异：**+1 个线程、+7 个句柄**。该线程尚未进入 `GpuMain`（实验 1 已验证），最可能是 `CreateThreads()` 提前创建的 GPU 线程以及为其准备的对象；另一个已知的早期差异是 `content_main_runner_impl.cc:577` 在 `--in-process-gpu` 下会提前创建 `ContentGpuClient`。
+
+#### H5-A 小结
+
+| 假设 | 结论 |
+| --- | --- |
+| GPU 子进程存在导致崩溃 | **排除**（TSF 时不存在，也未 launch） |
+| `InitializeSkia()` vs `InitializeSkiaLite()` | **排除**（隔离构建强制 FULL 仍崩） |
+| TSF 前存在其他状态差异 | **确认存在**：+1 线程 / +7 句柄；具体对象未识别 |
+
+下一步（实验 3 续）：枚举那 7 个新增句柄并取对象名（`SystemExtendedHandleInformation` + 复制句柄取 `ObjectName`，同用户无需提权），据此判断是纯 GPU 线程配套对象，还是某个会改变 COM/桌面状态的对象。
 
 ---
 
