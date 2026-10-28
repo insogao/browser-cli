@@ -10,6 +10,8 @@ therefore separates three native states that are easy to conflate:
   hidden    - native window hidden (ShowWindow(SW_HIDE)); this is what managed
               background presentation leaves behind
   minimized - native window minimized
+  inactive  - window visible, but the probe tab is not the active tab (a sibling
+              tab was opened in the same window)
 
 For each window and state it records the DOM/rAF/timer counters, the canvas and
 WebGL pixels, document.visibilityState, and a CDP screenshot with a hard
@@ -17,9 +19,10 @@ timeout. Screenshots are validated, not just counted:
 
   * PNG decodes and has the expected size;
   * it is not a uniform/black frame;
-  * the 24x24 marker block encodes the frame counter as a colour, so the picture
-    is matched against the DOM frame number instead of being trusted blindly;
-  * two captures one second apart must differ, otherwise the frame is stale.
+  * the picture is matched against the DOM frame number instead of being trusted
+    blindly;
+  * after an explicit DOM repaint (__bump, no rAF), the next capture must show
+    the new frame number, otherwise the frame is stale.
 
 Usage:
   background-render-cdp-check.py --chrome PATH --scenario hidden --windows 3 \
@@ -328,7 +331,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--chrome", required=True)
     parser.add_argument("--scenario", required=True,
-                        choices=["normal", "occluded", "hidden", "minimized"])
+                        choices=["normal", "occluded", "hidden", "minimized", "inactive"])
     parser.add_argument("--windows", type=int, default=3)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--managed", action="store_true")
@@ -371,13 +374,31 @@ def main():
         hwnds = [title_to_hwnd.get(pid_) for pid_, _ in created]
 
         # Apply the requested native state to every window.
-        for index, hwnd in enumerate(hwnds):
+        for index, (probe_id, target_id) in enumerate(created):
+            hwnd = title_to_hwnd.get(probe_id)
             if hwnd is None:
                 continue
             if args.scenario == "normal":
                 show(hwnd, SW_RESTORE)
                 raise_window(hwnd)
                 time.sleep(0.4)
+            elif args.scenario == "inactive":
+                # Keep the window visible; make the probe tab non-active by opening a
+                # sibling tab in the same window. The probe page keeps its DOM but
+                # stops rAF, exactly like a background tab in a visible window.
+                show(hwnd, SW_RESTORE)
+                raise_window(hwnd)
+                time.sleep(0.3)
+                _ws, session = sessions[probe_id]
+                try:
+                    session.call("Target.activateTarget", {"targetId": target_id}, 10)
+                    time.sleep(0.2)
+                    session.call("Target.createTarget",
+                                 {"url": "about:blank", "newWindow": False}, 10)
+                    time.sleep(0.3)
+                except Exception as error:
+                    report.setdefault("setup_errors", []).append(
+                        "%s: %s" % (probe_id, error))
             elif args.scenario == "occluded":
                 # Stack every window on the same rect; the last one raised
                 # covers all the others.
@@ -427,6 +448,11 @@ def main():
         label = sample["label"]
         if "error" in sample:
             timeouts.append("%s: %s" % (label, sample["error"]))
+            continue
+        if args.scenario == "inactive" and sample.get("visibility_state") != "hidden":
+            timeouts.append(
+                "%s: probe tab is still %s (not an inactive tab; setup failed)"
+                % (label, sample.get("visibility_state")))
             continue
         plain = sample.get("capture_plain") or {}
         bump = sample.get("capture_after_bump") or {}
