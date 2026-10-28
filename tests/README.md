@@ -715,11 +715,36 @@ python3 tests/tools/omnibox-everywhere-origin-check.py --self-test   # 8 个 fix
   与隔离临时 `--user-data-dir`，并由 `check-browser-launch-hygiene.sh` 强制；出现一次弹窗即 FAIL。
 - 后续 Gate A/B/C 测试必须能判定「全程零可见」；禁止把 watchdog 事后隐藏当作成功（设计 §5.1、§14）。
 - smoke 允许短暂运行 Chromium 进程（无窗口）；如不希望出现 Dock 图标，请在用户明确授权后再运行。
-- `check-browser-launch-hygiene.sh` 允许**仅启动 Windows 二进制**的入口显式声明豁免：在源文件里写
-  一行注释 `# browser-launch-hygiene: windows-only (no keychain)`。理由：`AGENTS.md` §1 的
-  `--use-mock-keychain` 是 macOS 钥匙串 ACL 的绕过手段，Windows 用 DPAPI，该开关在那里既无意义、
-  生产环境又被禁止（§1.5）。声明是显式且可评审的，不做启发式推断；**隔离临时 profile 的要求
-  对 Windows 入口同样强制**，并由 fixture 保证「不声明仍会被拦」「声明了但缺 profile 仍会被拦」。
+- `check-browser-launch-hygiene.sh` 做的是**平台适配**，不是放宽 macOS 规则：任何启动浏览器的入口
+  都必须使用隔离临时 profile；**只有** macOS app bundle 的启动额外要求 `--use-mock-keychain`
+  （它绕过 ad-hoc 签名下失效的钥匙串 ACL）。Windows 用 DPAPI、没有 login keychain，该开关在那里
+  没有意义且生产环境被禁止（`AGENTS.md` §1.5），所以仅启动 Windows 二进制的入口在源文件里写一行
+  注释 `# browser-launch-hygiene: windows-only (no keychain)` 显式声明。声明是可评审的，不做启发式
+  推断；fixture 保证「不声明仍会被拦」「声明了但缺 profile 仍会被拦」。
+
+## `chrome.browserCli` allowlist 漂移检查
+
+`tests/check-extension-allowlist.py` 用来回答一个很容易踩、且失败时毫无提示的问题：
+**插件的 manifest `key` 变了之后，内核里的 allowlist 还匹配吗？**
+
+Chromium 的 `allowlist` 比较的是扩展 ID 的 SHA-1/SHA-256 大写 hex，而不是 ID 字符串；
+ID 又由 manifest 的 `key` 派生。`key` 一变，接口就从插件视野里消失，表现和"功能没实现"完全一样。
+
+```sh
+# 拿插件仓库的 manifest 直接核对 patch 里的 allowlist
+python3 tests/check-extension-allowlist.py --manifest ../BrowserPilot/manifest.json
+
+# 或者核对 checkout 里已经应用好的 _api_features.json
+python3 tests/check-extension-allowlist.py --manifest ../BrowserPilot/manifest.json \
+  --features D:/c/src/chrome/common/extensions/api/_api_features.json
+
+# 自带 fixture 自检（由 run-script-tests.sh 第 99 组执行）
+python3 tests/check-extension-allowlist.py --self-test
+```
+
+它在三种情况下 fail closed：缺失 SHA-1、缺失 SHA-256、allowlist 里写了原始 ID（Chromium
+永远匹配不上）。manifest 没有 `key` 时也直接拒绝——未打包扩展的 ID 由路径派生，换台机器就变，
+任何 allowlist 都不可能命中。
 
 ## Windows 宿主机上的已知差异
 

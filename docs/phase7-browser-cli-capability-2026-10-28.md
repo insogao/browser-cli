@@ -293,9 +293,12 @@ Enhanced 实测返回值：
    版本，两者都来自 `version_info::GetVersionNumber()`；等 Phase 9 引入独立版本号后
    再拆分字段（`protocolVersion` 已为此预留）。
 3. **allowlist 是硬编码的 ID 哈希。** BrowserPilot 的 manifest `key` 若变更，扩展 ID
-   随之改变，接口会静默消失。`tests/tools/test_windows_scripts.py` 有守卫断言哈希存在
-   且不得出现原始 ID，但**无法自动发现 key 变更**——变更 key 时必须同步更新
-   `_api_features.json`（已在该 patch 的 README 条目中标注）。
+   随之改变，接口会静默消失，表现与"功能未实现"完全一致。为此提供了单命令漂移检查
+   `tests/check-extension-allowlist.py`（见 §8）：它从 manifest 重新推导 ID 与两个哈希并与
+   patch / 已应用的 `_api_features.json` 比对，缺任一哈希、或把原始 ID 写进 allowlist 都
+   fail closed。`tests/tools/test_windows_scripts.py` 另有静态守卫（哈希必须存在、原始 ID
+   不得出现）。**仍未自动化的是"什么时候该跑它"**——换 key 时必须记得执行，或在 CI 里
+   接入插件仓库。
 4. **普通模式（无 managed 开关）在本机仍会 exit 3。** 这是既有的 Sogou TSF 崩溃问题
    （patch 023 只在 managed 模式跳过 TSF），与本次改动无关；因此"同名二进制不带开关"
    这一降级分支只能靠离线单测覆盖，实机降级证明改用真实上游 Chromium。
@@ -336,6 +339,9 @@ python3 tests/tools/browserpilot-page-drive-cdp-check.py \
   --chrome "D:/c/src/out/WinDev/chrome.exe" \
   --extension-dir "D:/work/BrowserPilot/dist" \
   --result-json D:/c/logs/phase7b-drive.json
+
+# allowlist 漂移检查（插件 manifest key 变更后必须跑）
+python3 tests/check-extension-allowlist.py --manifest D:/work/BrowserPilot/manifest.json
 ```
 
 ---

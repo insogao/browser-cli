@@ -1637,6 +1637,26 @@ else
 fi
 
 echo
+echo "== 99. chrome.browserCli allowlist contract =="
+ALLOWLIST_CHECK="$REPO_ROOT/tests/check-extension-allowlist.py"
+if [ -f "$ALLOWLIST_CHECK" ] && command -v python3 >/dev/null 2>&1; then
+  # Self-test only: the real manifest lives in another repository, so CI checks
+  # the derivations and the failure modes rather than a live extension id.
+  if python3 "$ALLOWLIST_CHECK" --self-test >"$TMP/out.txt" 2>&1; then
+    ok "allowlist checker self-test (id derivation + hash form + failure modes)"
+  else
+    bad "allowlist checker self-test"
+    sed 's/^/      /' "$TMP/out.txt" | tail -6
+  fi
+else
+  if [ ! -f "$ALLOWLIST_CHECK" ]; then
+    bad "allowlist checker script is missing"
+  else
+    printf 'SKIP  allowlist checker self-test (python3 unavailable)\n'
+  fi
+fi
+
+echo
 echo "== summary: ${PASS} passed, ${FAIL} failed =="
 if [ "$FAIL" -gt 0 ]; then
   exit 1
