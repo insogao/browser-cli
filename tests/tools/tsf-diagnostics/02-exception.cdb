@@ -1,0 +1,4 @@
+; Stop at the first-chance exception and print its record.
+; The C++ EH parameters identify the throwing module: Parameter[3] is its base.
+sxe -c "kb 18; .exr -1; q" eh
+g

@@ -1,0 +1,8 @@
+; Break at the single funnel every ExitProcess goes through and dump the caller.
+; Use with:  cdb -G -cf 01-exit-stack.cdb <chrome.exe> --headless=new ...
+;
+; ntdll is used instead of KERNELBASE because KERNELBASE is not loaded yet when
+; the -cf script runs, so `bp KERNELBASE!ExitProcess` fails to resolve and cdb
+; reports "Couldn't resolve error".
+bp ntdll!RtlExitUserProcess "kb 45; q"
+g

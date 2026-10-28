@@ -1,0 +1,6 @@
+; Log every DLL load attempt (LdrLoadDll is the funnel for LoadLibrary*).
+; Useful to see whether a plugin/IME component was even attempted before a crash.
+; UNICODE_STRING at r8: Length, MaximumLength, then Buffer at offset 8.
+bp ntdll!LdrLoadDll ".printf \"LDR %mu\n\", poi(@r8+8); g"
+sxe -c "kb 6; q" eh
+g
