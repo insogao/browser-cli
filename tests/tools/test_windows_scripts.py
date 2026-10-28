@@ -46,6 +46,18 @@ GN_STUB = """#!/bin/sh
 } >> "$BCLI_STUB_LOG"
 """
 
+PYTHON_STUB = """#!/bin/sh
+# Stands in for a Pillow-capable interpreter: `python -c "import PIL"` must
+# succeed so configure-windows.sh selects it, and the icon generator call must
+# be a no-op. Pixel correctness is covered on a real host, not here.
+{
+  printf 'python-argv='
+  printf '%s ' "$@"
+  printf '\\n'
+} >> "$BCLI_STUB_LOG"
+exit 0
+"""
+
 NINJA_STUB = """#!/bin/sh
 {
   printf 'cwd=%s\\n' "$PWD"
@@ -79,6 +91,11 @@ class WindowsScriptsTest(unittest.TestCase):
         self.stub_bin = self.root / "stub-bin"
         self.stub_bin.mkdir()
         self._write_executable(self.stub_bin / "uname", UNAME_STUB)
+        # configure-windows.sh picks the first interpreter that can `import PIL`
+        # to generate the .ico assets, and dies when none can. Pillow is not a
+        # dependency of this repo, so provide a stub that claims to have it: the
+        # assertions below are about what gn/ninja receive, not about pixels.
+        self._write_executable(self.stub_bin / "python", PYTHON_STUB)
 
         # Fake VS BuildTools: VC/Tools/MSVC/<version> present.
         self.vs = self.root / "VS 2026 BuildTools"
