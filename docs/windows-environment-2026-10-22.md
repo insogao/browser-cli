@@ -256,6 +256,38 @@ Chromium 加载 IME 阶段，早于任何 Browser CLI patch 的执行路径。
 3. 新增 patch 在 `TSFBridgeImpl::Initialize()` 外做异常保护并降级为“无 IME”，
    属于新行为，需评审且仍标 REVIEW。
 
+## exit 3 的对照实验（2026-10-28）
+
+当时有一个合理的质疑：如果这是普遍问题，网上应该有大量记录。为回答它，在同一台机器、
+同一会话、同一搜狗版本下用四个宿主做对照（全部 `--headless=new`、独立临时 profile）：
+
+| 宿主 | 版本 | 代码签名 | 沙箱 | 结果 |
+| --- | --- | --- | --- | --- |
+| Google Chrome | 156.0.8078.48 | Valid（Google LLC） | 开 | **exit 0** |
+| 上游 Chromium（Playwright 构建） | 151.0.7922.34 | NotSigned | 开 | exit 3 |
+| Browser CLI（patch 023 之前） | 156.0.8067.0 | NotSigned | 开 | exit 3 |
+| Browser CLI（patch 023 之后） | 156.0.8067.0 | NotSigned | 开 | exit 0（跳过 TSF） |
+| Browser CLI | 156.0.8067.0 | NotSigned | 关 | exit 0 |
+
+**结论**：与我们的移植无关（未改动一行的上游 Chromium 同样失败），也与 Chromium 版本
+无关（同为 156 的官方 Chrome 正常）。本机上唯一与结果同向变化的变量是**是否由 Google
+签名并正式安装**。这只说明相关性，机制仍未知（Sogou TIP 可能在不受信任的宿主里主动
+放弃初始化）；要证明因果需要一个签名后的构建复测，属 Phase 9 范围。
+
+**为什么网上搜不到**（四点，均在本机验证过）：
+
+1. 受影响人群很小：只有“在装有该版本搜狗的机器上自行编译 Chromium”的开发者；
+2. 症状是静默的：搜狗自己调用 `ExitProcess`，Windows 记录为正常退出。
+   实测 `Application` 日志在该时间窗内 **Application Error / Windows Error Reporting
+   事件数为 0**，既没有崩溃弹窗也没有 dump；
+3. 默认调试看不到真实路径：`cdb -G` 只显示
+   `ExitProcess → chrome!DllMain → CrashOnProcessDetach`，指向 Chromium 自己的 DllMain，
+   极易误判成“构建坏了”；必须 `sxe eh` 才能看到 14 层 `SogouPY!ImeExtension`；
+4. 中文 IME 厂商的这类缺陷很少进 crbug，搜索只会命中下载页与营销页面。
+
+本轮检索（Bing / 中文 Bing）确实没有找到描述该症状的公开记录；这与上述人群规模一致，
+不能作为“问题不存在”的证据。
+
 ## cdb 补充证据（2026-10-24）
 
 以下是最初用 `cdb -G` 抓到的退出栈，用于说明 exit 3 不是普通 sandbox 返回值：
