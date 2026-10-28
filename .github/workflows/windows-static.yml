@@ -87,7 +87,7 @@ jobs:
           grep '^FAIL' suite.log | sed 's/^FAIL  //' \
             | sed -E 's/ \(rc=[0-9]+, .*\)$//; s/ \(rc=[0-9]+\)$//; s/ \(want=[a-z]+ rc=[0-9]+\)$//' \
             | sort -u > actual-failures.txt
-          sort -u tests/windows-host-failures.txt > expected-failures.txt
+          sort -u tests/windows-host-failures.txt | tr -d '\r' > expected-failures.txt
           if ! diff -u expected-failures.txt actual-failures.txt; then
             echo "::error::script suite failures differ from tests/windows-host-failures.txt"
             exit 1

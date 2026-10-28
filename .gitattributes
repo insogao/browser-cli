@@ -11,3 +11,7 @@ chromium/patches/*.patch -text
 *.json text eol=lf
 *.gn text eol=lf
 *.gni text eol=lf
+
+# Exact-match fixtures: a CRLF checkout would make every line differ when CI
+# compares a generated list against this file.
+tests/windows-host-failures.txt text eol=lf
