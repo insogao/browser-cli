@@ -65,7 +65,7 @@ for f in "$SCRIPTS"/*.sh "$SCRIPTS"/lib/*.sh; do
 done
 
 echo "== 2. --help =="
-for s in preflight checkout configure build verify-phase1; do
+for s in preflight checkout configure build verify-phase1 configure-windows build-windows verify-windows; do
   expect_rc 0 "$s --help" -- "$SCRIPTS/$s.sh" --help
 done
 
@@ -169,6 +169,40 @@ PROFILE="$(mktemp -d)"
 "/nonexistent/Chromium.app/Contents/MacOS/Chromium" --use-mock-keychain --user-data-dir="$PROFILE"
 EOF
 expect_rc 0 "compliant launch entry accepted" -- "$HYGIENE" --root "$GOOD_ROOT"
+
+# AGENTS.md §1 is conditioned on macOS: --use-mock-keychain is the keychain-ACL
+# workaround for ad-hoc-signed Mac builds. A windows-only entry point declares
+# itself with an explicit comment and then needs no keychain flag — but it must
+# still isolate the profile, and an undeclared entry must still be rejected.
+WIN_ROOT="$TMP/hygiene-win"
+mkdir -p "$WIN_ROOT/tests"
+cat > "$WIN_ROOT/tests/win-smoke.py" <<'EOF'
+# browser-launch-hygiene: windows-only (no keychain)
+import subprocess, tempfile
+profile = tempfile.mkdtemp()
+subprocess.run(["chrome.exe", "--remote-debugging-port=9222",
+                "--user-data-dir=%s" % profile])
+EOF
+expect_rc 0 "declared windows-only entry accepted without mock keychain" -- "$HYGIENE" --root "$WIN_ROOT"
+
+WIN_UNDECLARED_ROOT="$TMP/hygiene-win-undeclared"
+mkdir -p "$WIN_UNDECLARED_ROOT/tests"
+cat > "$WIN_UNDECLARED_ROOT/tests/win-undeclared.py" <<'EOF'
+import subprocess, tempfile
+profile = tempfile.mkdtemp()
+subprocess.run(["chrome.exe", "--remote-debugging-port=9222",
+                "--user-data-dir=%s" % profile])
+EOF
+expect_fail_msg "undeclared entry still requires mock keychain" "use-mock-keychain" -- "$HYGIENE" --root "$WIN_UNDECLARED_ROOT"
+
+WIN_NOPROFILE_ROOT="$TMP/hygiene-win-noprofile"
+mkdir -p "$WIN_NOPROFILE_ROOT/tests"
+cat > "$WIN_NOPROFILE_ROOT/tests/win-bad.py" <<'EOF'
+# browser-launch-hygiene: windows-only (no keychain)
+import subprocess
+subprocess.run(["chrome.exe", "--remote-debugging-port=9222"])
+EOF
+expect_fail_msg "declared windows-only entry without an isolated profile still rejected" "user-data-dir" -- "$HYGIENE" --root "$WIN_NOPROFILE_ROOT"
 
 echo "== 14. product identity + signature tooling (static) =="
 IDENTITY_CHECK="$REPO_ROOT/tests/check-identity-consistency.sh"
@@ -1514,6 +1548,92 @@ if [ -d "$TEST_CHROMIUM_SRC/.git" ]; then
     "$ARBITRATION_CHECK" checkout 'COMMAND-LINE-INTENT-ARBITRATION: OK \([0-9]+ checks, 0 failed\)' "$TEST_CHROMIUM_SRC"
 else
   printf 'SKIP  command-line intent arbitration --checkout (no checkout at %s)\n' "$TEST_CHROMIUM_SRC"
+fi
+
+echo "== 30. Windows build/configure entry points (static; no build, no browser) =="
+# These scripts are cross-platform to *inspect*: --help and --dry-run do not
+# assert the Windows host, so they can be checked on the macOS developer host
+# too. Only a real run needs Windows, and this suite never performs one.
+WIN_CONFIGURE_OUT="$TMP/win-configure-plan.txt"
+"$SCRIPTS/configure-windows.sh" --checkout "$TMP/no-such-checkout" --dry-run >"$WIN_CONFIGURE_OUT" 2>&1
+WIN_CONFIGURE_RC=$?
+if [ "$WIN_CONFIGURE_RC" -eq 0 ] \
+   && grep -q 'gen out/WinDev' "$WIN_CONFIGURE_OUT" \
+   && grep -q 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' "$WIN_CONFIGURE_OUT" \
+   && grep -q 'vs2026_install=' "$WIN_CONFIGURE_OUT" \
+   && grep -q 'nothing executed' "$WIN_CONFIGURE_OUT"; then
+  ok "configure-windows --dry-run prints gn gen + toolchain env (rc=0)"
+else
+  bad "configure-windows --dry-run plan (rc=$WIN_CONFIGURE_RC)"
+fi
+if [ -e "$TMP/no-such-checkout" ]; then
+  bad "configure-windows --dry-run created its checkout/out dir"
+else
+  ok "configure-windows --dry-run writes nothing"
+fi
+WIN_LOG_DIR_PRE=0
+[ -d "$REPO_ROOT/build-logs" ] && WIN_LOG_DIR_PRE=1
+WIN_BUILD_OUT="$TMP/win-build-plan.txt"
+"$SCRIPTS/build-windows.sh" --checkout "$TMP/no-such-checkout" --dry-run >"$WIN_BUILD_OUT" 2>&1
+WIN_BUILD_RC=$?
+if [ "$WIN_BUILD_RC" -eq 0 ] \
+   && grep -q -- '-j 6 chrome' "$WIN_BUILD_OUT" \
+   && grep -q 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' "$WIN_BUILD_OUT" \
+   && grep -q 'does NOT sign, package or launch' "$WIN_BUILD_OUT" \
+   && grep -q 'nothing executed' "$WIN_BUILD_OUT"; then
+  ok "build-windows --dry-run prints -j 6 chrome and no signing/launch (rc=0)"
+else
+  bad "build-windows --dry-run plan (rc=$WIN_BUILD_RC)"
+fi
+WIN_LOG_DIR_POST=0
+[ -d "$REPO_ROOT/build-logs" ] && WIN_LOG_DIR_POST=1
+if [ -e "$TMP/no-such-checkout" ] || [ "$WIN_LOG_DIR_POST" != "$WIN_LOG_DIR_PRE" ]; then
+  bad "build-windows --dry-run wrote something"
+else
+  ok "build-windows --dry-run writes nothing"
+fi
+expect_fail_msg "build-windows --jobs 12 rejected without --allow-more-jobs" \
+  "allow-more-jobs" -- "$SCRIPTS/build-windows.sh" --checkout "$TMP/no-such-checkout" --jobs 12 --dry-run
+expect_rc 0 "build-windows --jobs 12 accepted with --allow-more-jobs (dry-run)" -- \
+  "$SCRIPTS/build-windows.sh" --checkout "$TMP/no-such-checkout" --jobs 12 --allow-more-jobs --dry-run
+expect_fail_msg "configure-windows rejects an unknown argument" "unknown argument" -- \
+  "$SCRIPTS/configure-windows.sh" --no-such-flag
+# --checkout defaults from BROWSER_CLI_CHROMIUM_SRC; --dry-run must stay rc=0
+# on a host with no checkout at all.
+WIN_ENV_FRESH="$TMP/win-fresh-host/src"
+for s in configure-windows build-windows verify-windows; do
+  BROWSER_CLI_CHROMIUM_SRC="$WIN_ENV_FRESH" "$SCRIPTS/$s.sh" --dry-run >"$TMP/out.txt" 2>&1
+  WIN_ENV_RC=$?
+  if [ "$WIN_ENV_RC" -eq 0 ] && grep -q 'nothing executed' "$TMP/out.txt"; then
+    ok "$s --dry-run defaults --checkout from BROWSER_CLI_CHROMIUM_SRC (rc=0)"
+  else
+    bad "$s --dry-run BROWSER_CLI_CHROMIUM_SRC default (rc=$WIN_ENV_RC)"
+    sed 's/^/      /' "$TMP/out.txt" | head -4
+  fi
+done
+if [ -e "$WIN_ENV_FRESH" ]; then
+  bad "Windows dry-run created the env-var checkout"
+else
+  ok "Windows dry-run leaves the env-var checkout absent"
+fi
+grep -v '^[[:space:]]*#' "$REPO_ROOT/chromium/args-windows.gn" >"$TMP/args-windows-active.gn" 2>/dev/null || true
+if grep -q 'WINDOWS ONLY' "$REPO_ROOT/chromium/args-windows.gn" \
+   && grep -q 'target_cpu = "x64"' "$TMP/args-windows-active.gn" \
+   && ! grep -qE 'arm64|mac_app_icon_dir' "$TMP/args-windows-active.gn"    && grep -q 'branding_file_path = "//chrome/app/theme/browser_cli/BRANDING"' "$TMP/args-windows-active.gn"; then
+  ok "chromium/args-windows.gn is Windows-only (x64, no macOS icon/CPU values, shared BRANDING)"
+else
+  bad "chromium/args-windows.gn carries macOS icon/CPU values, lacks the x64 marker, or does not point branding at the shared BRANDING file"
+fi
+if python3 -c 'import sys' >/dev/null 2>&1; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" \
+       "$REPO_ROOT/tests/tools/test_windows_scripts.py" 2>"$TMP/out.txt"; then
+    ok "python syntax test_windows_scripts.py"
+  else
+    bad "python syntax test_windows_scripts.py"
+    sed 's/^/      /' "$TMP/out.txt"
+  fi
+else
+  printf 'SKIP  python syntax test_windows_scripts.py (python3 unavailable)\n'
 fi
 
 echo

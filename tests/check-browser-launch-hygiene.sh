@@ -65,6 +65,18 @@ EXCLUDE_NAMES=(check-browser-launch-hygiene.sh run-script-tests.sh sign-browser-
 # (`.../Contents/MacOS/...` or `$APP_BIN` / `$PRODUCT_APP_BIN`), plus explicit
 # remote-debugging launches (covers launchers that receive the app path).
 LAUNCH_RE='Contents/MacOS/|Backlight\.app|\$APP_BIN|\$PRODUCT_APP_BIN|--remote-debugging-(pipe|port)'
+# Explicit opt-out, in a comment, for entry points that only ever launch a
+# non-macOS binary:
+#
+#   # browser-launch-hygiene: windows-only (no keychain)
+#
+# AGENTS.md §1 (--use-mock-keychain) is conditioned on macOS: it works around the
+# login-keychain ACL of ad-hoc-signed Mac builds. Windows keeps secrets in DPAPI,
+# so the flag is inapplicable there and must not be cargo-culted onto it. This is
+# an explicit, reviewable annotation rather than an inference, so a macOS
+# launcher can never drift out of the rule by accident. Profile isolation
+# (--user-data-dir + mktemp/tempfile) still applies to every entry point.
+WINDOWS_ONLY_MARK='browser-launch-hygiene: windows-only'
 
 VIOLATIONS=0
 CHECKED=0
@@ -83,7 +95,15 @@ for dir in "${SCAN_DIRS[@]}"; do
     CHECKED=$((CHECKED + 1))
 
     missing=""
-    if ! grep -q -- '--use-mock-keychain' "$file"; then
+    # AGENTS.md §1 is macOS-specific. An entry point that declares itself
+    # windows-only must not be forced to carry --use-mock-keychain: Windows has
+    # no login keychain, and the flag is forbidden in production (§1.5). The
+    # declaration is an explicit comment so it stays reviewable.
+    windows_only=0
+    if grep -qF "$WINDOWS_ONLY_MARK" "$file"; then
+      windows_only=1
+    fi
+    if [ "$windows_only" -eq 0 ] && ! grep -q -- '--use-mock-keychain' "$file"; then
       missing="${missing} --use-mock-keychain"
     fi
     # Require an explicit --user-data-dir plus real temp-directory creation in
@@ -104,6 +124,8 @@ for dir in "${SCAN_DIRS[@]}"; do
     if [ -n "$missing" ]; then
       VIOLATIONS=$((VIOLATIONS + 1))
       printf 'VIOLATION %s: browser launch entry missing:%s\n' "${file#"$ROOT"/}" "$missing"
+    elif [ "$windows_only" -eq 1 ]; then
+      printf 'OK        %s (declared windows-only: no keychain involved)\n' "${file#"$ROOT"/}"
     else
       printf 'OK        %s\n' "${file#"$ROOT"/}"
     fi

@@ -715,3 +715,24 @@ python3 tests/tools/omnibox-everywhere-origin-check.py --self-test   # 8 个 fix
   与隔离临时 `--user-data-dir`，并由 `check-browser-launch-hygiene.sh` 强制；出现一次弹窗即 FAIL。
 - 后续 Gate A/B/C 测试必须能判定「全程零可见」；禁止把 watchdog 事后隐藏当作成功（设计 §5.1、§14）。
 - smoke 允许短暂运行 Chromium 进程（无窗口）；如不希望出现 Dock 图标，请在用户明确授权后再运行。
+- `check-browser-launch-hygiene.sh` 允许**仅启动 Windows 二进制**的入口显式声明豁免：在源文件里写
+  一行注释 `# browser-launch-hygiene: windows-only (no keychain)`。理由：`AGENTS.md` §1 的
+  `--use-mock-keychain` 是 macOS 钥匙串 ACL 的绕过手段，Windows 用 DPAPI，该开关在那里既无意义、
+  生产环境又被禁止（§1.5）。声明是显式且可评审的，不做启发式推断；**隔离临时 profile 的要求
+  对 Windows 入口同样强制**，并由 fixture 保证「不声明仍会被拦」「声明了但缺 profile 仍会被拦」。
+
+## Windows 宿主机上的已知差异
+
+`tests/run-script-tests.sh` 在 Windows（Git Bash）上会有 15 项 FAIL，全部来自 **macOS 专属脚本**，
+与 Windows 移植无关：
+
+- `scripts/setup-mac.sh` 的 dry-run 断言（gclient sync / `--detach` / 代理）；
+- `scripts/preflight.sh` 的磁盘熔断阈值；
+- `scripts/generate-icons.sh` 的 `.icns` + `Assets.car` 计划；
+- `scripts/prepare-app.sh` 的 Developer ID 预检。
+
+这些脚本在非 macOS 上主动拒绝执行，属于设计行为。Windows 侧的对应门禁是
+`tests/tools/test_windows_scripts.py`（24 项）与 `scripts/verify-windows.sh`（6 步），两者都必须全绿。
+若 `python3` 在 PATH 中指向 Chromium 自带的 hermetic 解释器（无第三方包），
+请用系统 Python 运行 Python 测试；`scripts/configure-windows.sh` 会自行挑选能 `import PIL` 的
+解释器来生成图标。
