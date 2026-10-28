@@ -352,7 +352,7 @@ else
   sed 's/^/      /' "$TMP/out.txt"
 fi
 for tool in "$CDP_TOOL" "$PAGE_TOOL" "$REPO_ROOT/tests/tools/cdp_pipe_lib.py"; do
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$tool" 2>"$TMP/out.txt"; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$tool" 2>"$TMP/out.txt"; then
     ok "python syntax $(basename "$tool")"
   else
     bad "python syntax $(basename "$tool")"
@@ -401,7 +401,7 @@ else
   bad "bash -n phase2-window-open-popup.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$WOPEN_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$WOPEN_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax window-open-cdp-check.py"
 else
   bad "python syntax window-open-cdp-check.py"
@@ -442,7 +442,7 @@ else
   bad "bash -n phase2-extension-window-focus.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$EXTFOCUS_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$EXTFOCUS_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax extension-window-focus-cdp-check.py"
 else
   bad "python syntax extension-window-focus-cdp-check.py"
@@ -520,7 +520,7 @@ else
   bad "bash -n phase2-session-restore.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$RESTORE_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$RESTORE_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax session-restore-cdp-check.py"
 else
   bad "python syntax session-restore-cdp-check.py"
@@ -575,7 +575,7 @@ else
   bad "bash -n phase2-restart-crash-visibility.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$RESTART_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$RESTART_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax restart-cycles-cdp-check.py"
 else
   bad "python syntax restart-cycles-cdp-check.py"
@@ -680,7 +680,7 @@ else
   sed 's/^/      /' "$TMP/out.txt"
 fi
 for tool in "$HUMAN_COLLECT" "$HUMAN_SINK"; do
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$tool" 2>"$TMP/out.txt"; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$tool" 2>"$TMP/out.txt"; then
     ok "python syntax $(basename "$tool")"
   else
     bad "python syntax $(basename "$tool")"
@@ -934,13 +934,13 @@ else
   bad "bash -n phase4-foreground-assist-manual.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ASSIST_COLLECT" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$ASSIST_COLLECT" 2>"$TMP/out.txt"; then
   ok "foreground-assist-collect.py syntax"
 else
   bad "foreground-assist-collect.py syntax"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ASSIST_SERVER" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$ASSIST_SERVER" 2>"$TMP/out.txt"; then
   ok "assist-page-server.py syntax"
 else
   bad "assist-page-server.py syntax"
@@ -1238,7 +1238,7 @@ else
   bad "bash -n phase5-background-capture.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$CAPTURE_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$CAPTURE_TOOL" 2>"$TMP/out.txt"; then
   ok "capture-evidence-check.py syntax"
 else
   bad "capture-evidence-check.py syntax"
@@ -1362,7 +1362,7 @@ else
   bad "bash -n phase6-parallel-windows.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$PARALLEL_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$PARALLEL_TOOL" 2>"$TMP/out.txt"; then
   ok "parallel-evidence-check.py syntax"
 else
   bad "parallel-evidence-check.py syntax"
@@ -1504,7 +1504,7 @@ run_origin_checker() { # <label> <tool> <self-test|checkout> <summary-regex> [ch
 }
 
 for tool in "$USER_MENU_CHECK" "$OMNIBOX_CHECK"; do
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$tool" 2>"$TMP/out.txt"; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$tool" 2>"$TMP/out.txt"; then
     ok "python syntax $(basename "$tool")"
   else
     bad "python syntax $(basename "$tool")"
@@ -1526,7 +1526,7 @@ fi
 
 echo "== 29. command-line intent arbitration checker (static; no browser) =="
 ARBITRATION_CHECK="$REPO_ROOT/tests/tools/command-line-intent-arbitration-check.py"
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ARBITRATION_CHECK" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$ARBITRATION_CHECK" 2>"$TMP/out.txt"; then
   ok "command-line-intent-arbitration-check.py syntax"
 else
   bad "command-line-intent-arbitration-check.py syntax"
@@ -1625,7 +1625,7 @@ else
   bad "chromium/args-windows.gn carries macOS icon/CPU values, lacks the x64 marker, or does not point branding at the shared BRANDING file"
 fi
 if python3 -c 'import sys' >/dev/null 2>&1; then
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" \
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" \
        "$REPO_ROOT/tests/tools/test_windows_scripts.py" 2>"$TMP/out.txt"; then
     ok "python syntax test_windows_scripts.py"
   else

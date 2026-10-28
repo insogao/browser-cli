@@ -723,20 +723,20 @@ python3 tests/tools/omnibox-everywhere-origin-check.py --self-test   # 8 个 fix
 
 ## Windows 宿主机上的已知差异
 
-`tests/run-script-tests.sh` 在 Windows（Git Bash）上会有 15 项 FAIL，全部来自 **macOS 专属脚本**，
-与 Windows 移植无关：
+`tests/run-script-tests.sh` 在 Windows 宿主机上无法全部通过，原因是它同时覆盖 macOS 专属流程
+（`setup-mac` 时代的 gclient sync / `--detach`、`preflight.sh` 的磁盘熔断、`generate-icons.sh`
+的 `.icns` + `Assets.car`、`prepare-app` 的 Developer ID 预检）。
 
-- `scripts/setup-mac.sh` 的 dry-run 断言（gclient sync / `--detach` / 代理）；
-- `scripts/preflight.sh` 的磁盘熔断阈值；
-- `scripts/generate-icons.sh` 的 `.icns` + `Assets.car` 计划；
-- `scripts/prepare-app.sh` 的 Developer ID 预检。
+失败清单以 **CI（`windows-latest`）实测**为准，记录在 `tests/windows-host-failures.txt`。
+`windows-static` 会做精确比对：出现新的失败，或清单里留着一个已经不再失败的条目，都会让流水线变红，
+所以这份基线不会掩盖回归。
 
-这些脚本在非 macOS 上主动拒绝执行，属于设计行为。失败清单被逐条记录在
-`tests/windows-host-failures.txt`，CI 的 `windows-static` 会做**精确比对**：新增失败或多出
-未记录项都会让流水线变红，因此这份基线不会掩盖回归。
+注意：**本机 Git Bash 的失败集与 CI 不同**（典型差异是 `mktemp -d` 返回的 `/tmp/...` 路径在
+Windows 上被解析成另一种形态，导致 `checkout.sh --dry-run` 的计划输出缺失）。判断是否回归请以
+CI 结果为准，不要用本机运行数量去对齐基线。
 
 Windows 侧的对应门禁是 `tests/tools/test_windows_scripts.py`（24 项）与
-`scripts/verify-windows.sh`（6 步），两者都必须全绿。
+`scripts/verify-windows.sh`（6 步），两者都必须全绿，且不依赖上述基线。
 若 `python3` 在 PATH 中指向 Chromium 自带的 hermetic 解释器（无第三方包），
 请用系统 Python 运行 Python 测试；`scripts/configure-windows.sh` 会自行挑选能 `import PIL` 的
 解释器来生成图标。
