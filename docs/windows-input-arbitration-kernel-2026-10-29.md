@@ -602,13 +602,20 @@ API 存在性由 `_api_features.json` + **delegated availability check** 控制
 
 ```
 chrome.debugger.attach({tabId})
-  → extensions::ExtensionDevToolsClientHost（debugger_api.cc 文件内注册表）
-  → 新增 chrome 侧查询 GetExtensionDebuggerClientForTab(context, extension_id, web_contents)
-  → content::DevToolsAgentHost::GetForTab(web_contents)
-  → 新增虚函数 GetInputOwnershipSessionForClient(client)（DevToolsAgentHostImpl 用
+  → DevToolsAgentHost::GetOrCreateFor(web_contents)
+      （WebContents/frame-tree host，不是 tab-target host）
+  → extensions::ExtensionDevToolsClientHost（debugger_api.cc 文件内注册表，持有上面这个 host）
+  → 新增 chrome 侧查询 GetExtensionDebuggerSessionForTab(context, extension_id, web_contents)
+      返回 { ExtensionDevToolsClientHost::agent_host(), client_host }
+  → 该 host 的 GetInputOwnershipSessionForClient(client)（DevToolsAgentHostImpl 用
      SessionByClient() 命中同一个 DevToolsSession*）
   → content::GrantDebuggerInput(web_contents, token, ...)
 ```
+
+**必须使用 client host 自己持有的 `DevToolsAgentHost`**；早期实现用
+`DevToolsAgentHost::GetForTab(web_contents)`，拿到的是 tab-target host（与
+`chrome.debugger.attach` 的 `GetOrCreateFor` 不是同一个对象），`SessionByClient` 永远找不到
+session，`grantInput` 会误报 `NO_DEBUGGER_SESSION`。真实 E2E 的修复与证据见 §13.12。
 
 - token 只以 `const void*` 出现在 public header；chrome 不解析、扩展也拿不到有效指针
   （响应里的 `sessionToken` 目前**不回填**，避免泄漏地址）。
@@ -725,12 +732,12 @@ service worker 的 `source_context_type` 是否为 `kPrivilegedExtension`（若�
 | 项 | 路径 / 值 |
 |---|---|
 | patch 029 | `D:\work\browsercli\chromium\patches\029-input-ownership-api.patch`，**3611 行**，33 个文件段（+3020/−23） |
-| patch sha256 | `b3354b10205adb2d9abba5fc91599fc02f4fbfcc8437526da851a35c058c4f9c` |
+| patch sha256 | `585f6de3e8fd9814ec36e7cdc70ad96a306bd7ece620624c3562939f2cc7d1d5` |
 | 回退校验 | `git apply --check -R` 通过（EXIT=0） |
 | 基线 | 由 patch 001-028 重建到临时树后取 diff，patch 只含本轮 029 改动 |
 | 构建日志 | `/tmp/build-content-final.log`、`/tmp/build-rename2.log`（本机临时） |
-| 单测日志 | `/tmp/final-input-ownership-tests3.log`，51/51 PASS |
-| 真实探针 | `build-logs/029e-probe-input-ownership.js`、`.out`、`029e-probe-*.err` |
+| 单测日志 | `/tmp/final-input-ownership-tests4.log`，51/51 PASS |
+| 真实探针 | `build-logs/029e-probe-input-ownership.js`（可见性）、`build-logs/029g-probe-attach-grant-click.js`（attach→grant→click）、对应 `.out`/`.err` |
 | manifest / commit | `patch-manifest.json` **未修改**；未 commit / push；工作区保留 |
 
 ### 13.11 真实 E2E 根因与命名修订（2026-10-29 第二轮）
@@ -812,5 +819,85 @@ managed hidden 窗口的产品截图失败：`fromSurface=true` 8s 超时；`fro
 `Page.captureScreenshot{fromSurface:true}` 成功（10092 bytes），说明内核能出帧，
 问题在产品截图路径/超时或 cursor policy。归主代理后续处理，本轮未改截图代码。
 
+### 13.12 K2/K3 修复：chrome.debugger 会话映射（2026-10-29 第三轮）
 
+#### 根因
 
+`chrome.debugger.attach({tabId})` 在 `DebuggerFunction::InitAgentHost()`
+（`chrome/browser/extensions/api/debugger/debugger_api.cc`）里使用：
+
+```cpp
+agent_host_ = DevToolsAgentHost::GetOrCreateFor(web_contents);
+```
+
+这是 WebContents/frame-tree 的 agent host。而本轮 API 的 `ResolveDebuggerSession` 早期用
+`DevToolsAgentHost::GetForTab(web_contents)`，返回的是 **tab-target host**
+（`WebContentsDevToolsAgentHost`）——不同对象、不同 `DevToolsSession`。于是
+`agent_host->GetInputOwnershipSessionForClient(client)` 永远返回 nullptr，
+`grantInput`/`beginInputCommand` 误报 `NO_DEBUGGER_SESSION`，即使 L 的 fixture tab
+`chrome.debugger.getTargets` 显示 `attached=true`。
+
+#### 修复
+
+- `chrome/browser/extensions/api/debugger/debugger_api_client_lookup.{h,cc}`：
+  `GetExtensionDebuggerSessionForTab()` 返回
+  `{ client_host->agent_host(), client_host }`（`ExtensionDebuggerSession` 结构），
+  直接使用 `ExtensionDevToolsClientHost` 持有的、`chrome.debugger.attach` 创建的 host。
+- `browser_cli_input_ownership_api.cc::ResolveDebuggerSession()` 改为使用这对
+  (agent_host, client) 调 `GetInputOwnershipSessionForClient()`；
+  `grantInput` / `beginInputCommand` / `endInputCommand` 共用该解析。
+- 未改 `GetForTab` 本身；未改 content 侧 token 语义（仍是同一个 `DevToolsSession*`）。
+
+#### 真实探针（headless + 临时 profile + 真实扩展 attach）
+
+脚本：`build-logs/029g-probe-attach-grant-click.js`，原始输出
+`build-logs/029g-probe-attach-grant-click.out`。受信 popup 中依次执行：
+`grantInput`（未 attach）→ `chrome.debugger.attach` → 无 grant 的 begin → grant →
+begin → `Input.dispatchMouseEvent` press/release → end(ok) → 未知 command end →
+scope 结束后无 grant 的第二次点击 → 新 grant+begin+第二次点击+end。
+
+原始结果（`verdict` 全部 true）：
+
+```json
+{
+  "preAttach": {
+    "grantBeforeAttach": {"granted": false, "reason": "NO_DEBUGGER_SESSION", "actions": 1},
+    "attach": "ok",
+    "beginWithoutGrant": {"ok": false, "reason": "GRANT_REQUIRED"}
+  },
+  "first": {
+    "grant": {"granted": true, "actions": 1, "expiresAt": 1793268210855},
+    "begin": {"ok": true, "scopeId": "1", "grantRemaining": 0, "deadline": 1793268210855},
+    "end": {"closed": true},
+    "unknownEnd": {"closed": false, "reason": "UNKNOWN_COMMAND"}
+  },
+  "clicksAfterFirstCommand": {"clicks": 1},
+  "clicksAfterUnauthorizedClick": {"clicks": 1},
+  "second": {
+    "grant": {"granted": true, "actions": 1},
+    "begin": {"ok": true, "scopeId": "2", "grantRemaining": 0},
+    "end": {"closed": true}
+  },
+  "clicksAfterSecondCommand": {"clicks": 2},
+  "verdict": {
+    "grantBeforeAttachRejected": true,
+    "beginWithoutGrantRejected": true,
+    "attachOk": true,
+    "grantOk": true,
+    "beginOk": true,
+    "endOk": true,
+    "unknownEndRejected": true,
+    "firstClickDelivered": true,
+    "unauthorizedClickDropped": true,
+    "secondClickDelivered": true
+  }
+}
+```
+
+结论：attach 后 `grantInput` 成功；`begin/end` 成功；scope 内一次命令只投递一次点击；
+end 后无 grant 的点击被内核丢弃；新 grant 后第二次点击正常投递。K2/K3 的阻塞项解除。
+
+`endInputCommand` 在未 attach 时仍返回 `NO_DEBUGGER_SESSION`（解析步骤先于 scope 查找），
+attach 后未知 command 返回 `UNKNOWN_COMMAND`，均符合设计。
+
+本轮未修：K4（managed hidden 人类输入无法 PostMessage，环境限制）、F3 截图 P0（见 §13.11）。

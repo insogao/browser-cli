@@ -418,10 +418,10 @@ index 0000000..6a512c9
 +}
 diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
 new file mode 100644
-index 0000000..2ba607b
+index 0000000..2d60756
 --- /dev/null
 +++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
-@@ -0,0 +1,847 @@
+@@ -0,0 +1,845 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -643,31 +643,29 @@ index 0000000..2ba607b
 +// and the DevTools session token the InputHandler will use for its events.
 +// Anything the caller sends (`request.session`) is ignored on purpose: the
 +// binding comes from the ExtensionDevToolsClientHost registry.
++//
++// The agent host must be the one held by the ExtensionDevToolsClientHost (the
++// host `chrome.debugger.attach` created), never
++// `DevToolsAgentHost::GetForTab`: the latter returns the tab-target host, a
++// different object whose session is not the one carrying the extension's CDP
++// commands, so `GetInputOwnershipSessionForClient` would find nothing.
 +bool ResolveDebuggerSession(ExtensionFunction* function,
 +                            content::WebContents* web_contents,
 +                            ResolvedDebuggerSession* out,
 +                            std::string* reason) {
-+  scoped_refptr<content::DevToolsAgentHost> agent_host =
-+      content::DevToolsAgentHost::GetForTab(web_contents);
-+  if (!agent_host) {
-+    *reason = kNoDebuggerSession;
-+    return false;
-+  }
-+  content::DevToolsAgentHostClient* client =
-+      GetExtensionDebuggerClientForTab(function->browser_context(),
-+                                       function->extension()->id(),
-+                                       web_contents);
-+  if (!client) {
++  const ExtensionDebuggerSession session = GetExtensionDebuggerSessionForTab(
++      function->browser_context(), function->extension()->id(), web_contents);
++  if (!session) {
 +    *reason = kNoDebuggerSession;
 +    return false;
 +  }
 +  const content::InputOwnershipSessionToken token =
-+      agent_host->GetInputOwnershipSessionForClient(client);
++      session.agent_host->GetInputOwnershipSessionForClient(session.client);
 +  if (!token) {
 +    *reason = kNoDebuggerSession;
 +    return false;
 +  }
-+  out->client = client;
++  out->client = session.client;
 +  out->token = token;
 +  return true;
 +}
@@ -1420,7 +1418,7 @@ index f8c4936..9fcfc5e 100644
  
    if (is_android) {
 diff --git a/chrome/browser/extensions/api/debugger/debugger_api.cc b/chrome/browser/extensions/api/debugger/debugger_api.cc
-index 4f4153a..d353082 100644
+index 4f4153a..79f5c8d 100644
 --- a/chrome/browser/extensions/api/debugger/debugger_api.cc
 +++ b/chrome/browser/extensions/api/debugger/debugger_api.cc
 @@ -28,6 +28,7 @@
@@ -1439,20 +1437,23 @@ index 4f4153a..d353082 100644
    DevToolsAgentHost* agent_host() { return agent_host_.get(); }
    void RespondDetachedToPendingRequests();
    void Close();
-@@ -1302,4 +1304,31 @@ ExtensionFunction::ResponseAction DebuggerGetTargetsFunction::Run() {
+@@ -1302,4 +1304,36 @@ ExtensionFunction::ResponseAction DebuggerGetTargetsFunction::Run() {
    return RespondNow(WithArguments(std::move(result)));
  }
  
-+content::DevToolsAgentHostClient* GetExtensionDebuggerClientForTab(
++ExtensionDebuggerSession GetExtensionDebuggerSessionForTab(
 +    content::BrowserContext* browser_context,
 +    const ExtensionId& extension_id,
 +    content::WebContents* web_contents) {
 +  // Browser CLI (patch 029): the input ownership API needs the caller's own
-+  // chrome.debugger session to bind an input grant to it. Iterating the
-+  // attached client hosts keeps the mapping authoritative (extension object +
-+  // agent host), instead of trusting anything the extension sends.
++  // chrome.debugger session to bind an input grant to it. The client host owns
++  // the exact DevToolsAgentHost that `chrome.debugger.attach` used, so return
++  // that host together with the client instead of re-resolving the tab through
++  // `DevToolsAgentHost::GetForTab` (which yields the tab-target host, a
++  // different object with a different DevToolsSession).
++  ExtensionDebuggerSession result;
 +  if (!web_contents || !browser_context) {
-+    return nullptr;
++    return result;
 +  }
 +  Profile* profile = Profile::FromBrowserContext(browser_context);
 +  for (ExtensionDevToolsClientHost* client_host : GetAttachedClientHosts()) {
@@ -1465,18 +1466,20 @@ index 4f4153a..d353082 100644
 +    if (client_host->agent_host()->GetWebContents() != web_contents) {
 +      continue;
 +    }
-+    return client_host;
++    result.agent_host = client_host->agent_host();
++    result.client = client_host;
++    return result;
 +  }
-+  return nullptr;
++  return result;
 +}
 +
  }  // namespace extensions
 diff --git a/chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h b/chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h
 new file mode 100644
-index 0000000..6d98d30
+index 0000000..0a1f588
 --- /dev/null
 +++ b/chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1484,6 +1487,9 @@ index 0000000..6d98d30
 +#ifndef CHROME_BROWSER_EXTENSIONS_API_DEBUGGER_DEBUGGER_API_CLIENT_LOOKUP_H_
 +#define CHROME_BROWSER_EXTENSIONS_API_DEBUGGER_DEBUGGER_API_CLIENT_LOOKUP_H_
 +
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "content/public/browser/devtools_agent_host.h"
 +#include "extensions/common/extension_id.h"
 +
 +namespace content {
@@ -1494,17 +1500,28 @@ index 0000000..6d98d30
 +
 +namespace extensions {
 +
-+// Browser CLI (patch 029): resolves the `DevToolsAgentHostClient` that the
-+// chrome.debugger API created for `extension_id` on `web_contents`.
++// Browser CLI (patch 029): the chrome.debugger session of one extension on one
++// tab. `agent_host` is the exact DevToolsAgentHost the extension attached to
++// (a `WebContents`/frame-tree host, NOT the tab-target host returned by
++// `DevToolsAgentHost::GetForTab`), and `client` is the
++// `ExtensionDevToolsClientHost` registered as its client. Passing this pair to
++// `DevToolsAgentHost::GetInputOwnershipSessionForClient()` yields the same
++// `DevToolsSession*` that the extension's CDP commands reach, which is what the
++// input ownership grant has to be keyed by.
++struct ExtensionDebuggerSession {
++  scoped_refptr<content::DevToolsAgentHost> agent_host;
++  raw_ptr<content::DevToolsAgentHostClient> client = nullptr;
++
++  explicit operator bool() const { return agent_host && client; }
++};
++
++// Resolves the chrome.debugger session created by `extension_id` for
++// `web_contents`, or an empty result when the extension is not attached.
 +//
-+// `chrome.debugger` keeps its client hosts in a file-local registry (the
-+// ExtensionDevToolsClientHost objects). The trusted input ownership API needs
-+// the *caller's own* session to bind an input grant to it (design §4), so this
-+// accessor is the single, minimal export point. It never trusts an id supplied
-+// by the caller: the id comes from the verified `ExtensionFunction`.
-+//
-+// Returns nullptr when the extension has no attach on that tab.
-+content::DevToolsAgentHostClient* GetExtensionDebuggerClientForTab(
++// Identity comes exclusively from the ExtensionDevToolsClientHost registry
++// (extension object + agent host); no caller-supplied id or session token is
++// consulted.
++ExtensionDebuggerSession GetExtensionDebuggerSessionForTab(
 +    content::BrowserContext* browser_context,
 +    const ExtensionId& extension_id,
 +    content::WebContents* web_contents);
