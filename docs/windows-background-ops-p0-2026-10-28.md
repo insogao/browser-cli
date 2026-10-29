@@ -229,10 +229,22 @@ DCHECK failed: callbacks.size() <= PresentationTimeCallbackBuffer::kMaxBufferSiz
 均通过；新增 `SurfaceCooldown` 退避/硬闸测试、`skipFromSurface` 降级语义测试、
 “超时→冷却期直接快照→清冷却后才重新尝试合成器”测试，以及同 tab 串行/跨 tab 独立测试。
 
-### 7.4 残余结论
+### 7.4 最终结论（2026-10-29）
 
-- **遮挡窗口的“最新帧”截图仍未实现**，必须等 viz 层“按需一帧”方案（给 DisplayPrivate
-  增加 `needs_draw=true` 的强制帧，或让 `RequestCopyOfOutput` 的 damaged surface 唤醒
-  display）经过一次授权的可见窗口实验验证。
-- 在修复前，产品语义只能是“遮挡窗口截图可能过期，调用方必须尊重 `possiblyStale`”；
-  `possiblyStale=true` 不能作为 P0 的“最新截图成功”验收。
+- **遮挡窗口的“最新帧”截图已实现并通过产品级验收**：patch 027 在
+  `FrameSinkManagerImpl::RequestCopyOfOutput` 入队后强制激活 pending root frame，
+  使 display 聚合一次真实帧并取出 copy 请求。原始 CDP harness 与真实 BrowserPilot
+  `screenshot` 命令均 PASS。
+- 产品级证据（`product-occluded-2026-10-29T01-36-29-073Z.json`，52/52 checks）：
+  - 遮挡窗口 `fromSurface=true`、`possiblyStale=false`，PNG 帧号与 DOM 一致；
+  - 60 次连续截图全部 fresh，marker 5→300 全匹配；无 `layer_tree_view.cc:554`、
+    无 FATAL、无 0xC0000005、无 Crashpad dump；
+  - iframe / Canvas2D / WebGL 像素全部命中；
+  - 3 窗口并发截图全部 fresh，前台 HWND 与各窗口 `GW_HWNDPREV` 前后不变；
+  - HKCU 注册已恢复原值，测试进程按 PID+创建时间+marker+exe 验证后清理。
+- **`possiblyStale=true` 仍然不能作为验收成功**；patch 027 下遮挡截图应返回
+  `possiblyStale=false`，返回 stale 即视为失败。
+- 残余风险：本机目标窗口在遮挡前已被其它顶层窗口覆盖，未覆盖
+  `visible→hidden` 跃迁；遮挡窗口 resize 后 `innerWidth` 滞后（测试用 24px marker
+  自校准）；未做分钟级持续压测；多父 root/tab 拖拽、macOS/Linux、发布签名构建未覆盖。
+
