@@ -133,6 +133,11 @@
       "order": 26,
       "file": "026-browser-cli-capability-api.patch",
       "sha256": "20d83a5d86f5fa8d469bb4817a0ddef9b4d27f5df415cbef98583f16c1d5a9fc"
+    },
+    {
+      "order": 27,
+      "file": "027-viz-activate-pending-root-frame-for-copy.patch",
+      "sha256": "a6e923b6dc9f65cb16a2a7382a4bddc10c6f21c46d73bb7d620c05eab6763c9e"
     }
   ]
 }
