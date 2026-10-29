@@ -1,0 +1,3511 @@
+diff --git a/chrome/browser/extensions/BUILD.gn b/chrome/browser/extensions/BUILD.gn
+index 25029f6..198fe75 100644
+--- a/chrome/browser/extensions/BUILD.gn
++++ b/chrome/browser/extensions/BUILD.gn
+@@ -1905,6 +1905,7 @@ source_set("unit_tests") {
+     "activity_log/fullstream_ui_policy_unittest.cc",
+     "api/activity_log_private/activity_log_private_api_unittest.cc",
+     "api/bookmarks/bookmarks_api_unittest.cc",
++    "api/browser_cli/browser_cli_extension_identity_unittest.cc",
+     "api/browsing_data/browsing_data_unittest.cc",
+     "api/chrome_extensions_api_client_unittest.cc",
+     "api/cookies/cookies_helpers_unittest.cc",
+diff --git a/chrome/browser/extensions/api/BUILD.gn b/chrome/browser/extensions/api/BUILD.gn
+index add5bf9..aca8a6c 100644
+--- a/chrome/browser/extensions/api/BUILD.gn
++++ b/chrome/browser/extensions/api/BUILD.gn
+@@ -71,6 +71,7 @@ group("api_implementations") {
+       "//chrome/browser/extensions/api/autofill_private",
+       "//chrome/browser/extensions/api/braille_display_private",
+       "//chrome/browser/extensions/api/browser_cli",
++      "//chrome/browser/extensions/api/browser_cli_input_ownership",
+       "//chrome/browser/extensions/api/command_line_private",
+       "//chrome/browser/extensions/api/dictation_private",
+       "//chrome/browser/extensions/api/experimental_actor",
+diff --git a/chrome/browser/extensions/api/browser_cli/BUILD.gn b/chrome/browser/extensions/api/browser_cli/BUILD.gn
+index 83044ef..2632e2e 100644
+--- a/chrome/browser/extensions/api/browser_cli/BUILD.gn
++++ b/chrome/browser/extensions/api/browser_cli/BUILD.gn
+@@ -11,13 +11,20 @@ source_set("browser_cli") {
+   sources = [
+     "browser_cli_api.cc",
+     "browser_cli_api.h",
++    "browser_cli_extension_identity.cc",
++    "browser_cli_extension_identity.h",
+   ]
+ 
+   deps = [
+     "//base",
++    "//chrome/browser/extensions",
++    "//chrome/browser/profiles:profile",
+     "//chrome/common/extensions/api",
+     "//components/version_info",
++    "//content/public/browser",
++    "//crypto",
+     "//extensions/browser",
++    "//extensions/common",
+     "//ui/views",
+   ]
+ }
+diff --git a/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.cc b/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.cc
+new file mode 100644
+index 0000000..9394d1c
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.cc
+@@ -0,0 +1,127 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h"
++
++#include <array>
++#include <string_view>
++
++#include "base/containers/span.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/profiles/profile.h"
++#include "crypto/hash.h"
++#include "extensions/browser/extension_function.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/manifest.h"
++#include "extensions/common/mojom/context_type.mojom.h"
++#include "extensions/common/mojom/manifest.mojom.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++
++namespace extensions::browser_cli {
++
++namespace {
++
++// SHA-256 hash of the Browser CLI automation extension id
++// (`nnollghpaggbcdkkgoieneffnlijinio`). Only the hash appears in source, never
++// the plaintext id, so a string replacement cannot redirect the trust anchor.
++// The SHA-256 of the id is independent of the hashed-id rollout feature; the
++// matching SHA-1 entry in `_api_features.json` only covers the feature-layer
++// comparison.
++constexpr std::string_view kTrustedExtensionIdSha256[] = {
++    "0FC2B72BF7525EEFA66518C54DB602118B38EB5E8AE1B2992EEB0E57911C1722",
++};
++
++std::string ToUpperHex(base::span<const uint8_t> raw) {
++  return base::ToUpperASCII(base::HexEncode(raw));
++}
++
++template <typename Range>
++bool Contains(const Range& range, std::string_view value) {
++  for (const std::string_view entry : range) {
++    if (entry == value) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
++bool IsTrustedBrowserCliExtensionIdHash(const ExtensionId& extension_id) {
++  if (extension_id.empty()) {
++    return false;
++  }
++  const std::string sha256 =
++      ToUpperHex(crypto::hash::Sha256(extension_id));
++  return Contains(kTrustedExtensionIdSha256, sha256);
++}
++
++bool IsAllowedBrowserCliManifestLocation(mojom::ManifestLocation location) {
++  switch (location) {
++    case mojom::ManifestLocation::kExternalPref:
++    case mojom::ManifestLocation::kExternalRegistry:
++      return true;
++#if !defined(OFFICIAL_BUILD)
++    // Developer / E2E harness installs. Official builds must ship the extension
++    // through one of the managed install paths above.
++    case mojom::ManifestLocation::kUnpacked:
++    case mojom::ManifestLocation::kCommandLine:
++      return true;
++#endif
++    default:
++      // Everything else (component, internal, policy, unknown) is denied by
++      // default instead of being enumerated.
++      return false;
++  }
++}
++
++bool IsTrustedBrowserCliExtension(const Extension* extension) {
++  if (!extension) {
++    return false;
++  }
++  if (!IsTrustedBrowserCliExtensionIdHash(extension->id())) {
++    return false;
++  }
++  if (!IsAllowedBrowserCliManifestLocation(extension->location())) {
++    return false;
++  }
++  // Off-the-record / split-incognito profiles are rejected by the per-call
++  // check (`IsTrustedBrowserCliCaller`), which sees the browser context.
++  return views::BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled();
++}
++
++bool IsTrustedBrowserCliCaller(ExtensionFunction* function,
++                               std::string* error) {
++  auto deny = [error](const char* reason) {
++    if (error) {
++      *error = reason;
++    }
++    return false;
++  };
++
++  if (!function) {
++    return deny("PERMISSION_DENIED: no extension function context");
++  }
++  const Extension* extension = function->extension();
++  if (!extension) {
++    return deny("PERMISSION_DENIED: not an extension caller");
++  }
++  // Reject content scripts and web pages: the API feature already restricts
++  // `contexts`, this is the second, independent check.
++  if (function->source_context_type() !=
++      mojom::ContextType::kPrivilegedExtension) {
++    return deny("PERMISSION_DENIED: caller is not an extension context");
++  }
++  if (function->browser_context() &&
++      function->browser_context()->IsOffTheRecord()) {
++    return deny("PERMISSION_DENIED: off-the-record profile");
++  }
++  if (!IsTrustedBrowserCliExtension(extension)) {
++    return deny("PERMISSION_DENIED: untrusted extension");
++  }
++  return true;
++}
++
++}  // namespace extensions::browser_cli
+diff --git a/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h b/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h
+new file mode 100644
+index 0000000..b168187
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h
+@@ -0,0 +1,55 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_BROWSER_CLI_EXTENSION_IDENTITY_H_
++#define CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_BROWSER_CLI_EXTENSION_IDENTITY_H_
++
++#include <string>
++
++#include "extensions/common/extension_id.h"
++#include "extensions/common/mojom/manifest.mojom-forward.h"
++
++class ExtensionFunction;
++
++namespace extensions {
++
++class Extension;
++
++namespace browser_cli {
++
++// Browser CLI P3 trust boundary (design §2).
++//
++// Identity comes exclusively from Chromium's `ExtensionFunction` / `Extension`
++// objects; no request field (`extensionId`, `token`, `internal`, ...) is ever
++// consulted. The trusted automation extension is pinned by the hashes of its
++// extension id (which is itself derived from the manifest public key), so
++// replacing `manifest.key` changes the id and fails the check.
++
++// SHA-1/SHA-256 hashes of the trusted extension id. Exposed for unit tests.
++bool IsTrustedBrowserCliExtensionIdHash(const ExtensionId& extension_id);
++
++// Install locations the trusted extension may come from: the product install
++// paths (external prefs / external registry) and, in non-official builds only,
++// an unpacked or command-line loaded extension (developer / E2E harness).
++bool IsAllowedBrowserCliManifestLocation(
++    mojom::ManifestLocation location);
++
++// True when `extension` is the trusted automation extension, installed from an
++// allowed location, not in split-incognito mode, and the browser is in managed
++// mode. Does not look at the calling context (see the overload below).
++bool IsTrustedBrowserCliExtension(const Extension* extension);
++
++// Full per-call check. Returns false (and fills `error` when non-null) for:
++//  - non-extension callers (no `extension()`),
++//  - content script / web page contexts,
++//  - any extension id or install location outside the allowlist,
++//  - OTR / split-incognito profiles,
++//  - a browser that is not in managed mode.
++bool IsTrustedBrowserCliCaller(ExtensionFunction* function,
++                               std::string* error);
++
++}  // namespace browser_cli
++}  // namespace extensions
++
++#endif  // CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_BROWSER_CLI_EXTENSION_IDENTITY_H_
+diff --git a/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity_unittest.cc b/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity_unittest.cc
+new file mode 100644
+index 0000000..f3da6cd
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity_unittest.cc
+@@ -0,0 +1,48 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h"
++
++#include "extensions/common/mojom/manifest.mojom.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace extensions::browser_cli {
++
++TEST(BrowserCliExtensionIdentityTest, TrustedIdIsPinnedBySha256Hash) {
++  // The Browser CLI automation extension (manifest "key").
++  EXPECT_TRUE(
++      IsTrustedBrowserCliExtensionIdHash("nnollghpaggbcdkkgoieneffnlijinio"));
++  // Any other id (including a one-character near miss) is rejected.
++  EXPECT_FALSE(
++      IsTrustedBrowserCliExtensionIdHash("nnollghpaggbcdkkgoienneffnlijinio"));
++  EXPECT_FALSE(IsTrustedBrowserCliExtensionIdHash("abcdefghijklmnop"));
++  EXPECT_FALSE(IsTrustedBrowserCliExtensionIdHash(""));
++}
++
++TEST(BrowserCliExtensionIdentityTest, InstallLocationAllowlist) {
++  EXPECT_TRUE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kExternalPref));
++  EXPECT_TRUE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kExternalRegistry));
++  // Everything else fails closed by default.
++  EXPECT_FALSE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kComponent));
++  EXPECT_FALSE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kExternalComponent));
++  EXPECT_FALSE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kInternal));
++  EXPECT_FALSE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kExternalPolicy));
++  EXPECT_FALSE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kInvalidLocation));
++#if !defined(OFFICIAL_BUILD)
++  // Developer / E2E installs are allowed in non-official builds only.
++  EXPECT_TRUE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kUnpacked));
++  EXPECT_TRUE(IsAllowedBrowserCliManifestLocation(
++      mojom::ManifestLocation::kCommandLine));
++#endif
++}
++
++}  // namespace extensions::browser_cli
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn b/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn
+new file mode 100644
+index 0000000..6a512c9
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn
+@@ -0,0 +1,28 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//extensions/buildflags/buildflags.gni")
++
++assert(enable_extensions,
++       "Cannot depend on extensions because enable_extensions=false.")
++
++source_set("browser_cli_input_ownership") {
++  sources = [
++    "browser_cli_input_ownership_api.cc",
++    "browser_cli_input_ownership_api.h",
++  ]
++
++  deps = [
++    "//base",
++    "//chrome/browser/extensions",
++    "//chrome/browser/extensions/api/browser_cli",
++    "//chrome/browser/extensions/api/debugger",
++    "//chrome/browser/profiles:profile",
++    "//chrome/common/extensions/api",
++    "//content/public/browser",
++    "//extensions/browser",
++    "//extensions/common",
++    "//ui/views",
++  ]
++}
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
+new file mode 100644
+index 0000000..96becc4
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
+@@ -0,0 +1,847 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h"
++
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/no_destructor.h"
++#include "base/time/time.h"
++#include "base/values.h"
++#include "chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h"
++#include "chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/extensions/window_controller.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/common/extensions/api/browser_cli_input_ownership.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/input_ownership.h"
++#include "content/public/browser/web_contents.h"
++#include "extensions/browser/event_router.h"
++#include "extensions/browser/extension_event_histogram_value.h"
++#include "extensions/browser/extension_function.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/constants.h"
++#include "extensions/common/extension.h"
++
++namespace extensions {
++
++namespace {
++
++namespace api_io = api::browser_cli_input_ownership;
++
++// --- Result codes ----------------------------------------------------------
++
++constexpr char kInvalidTarget[] = "INVALID_TARGET";
++constexpr char kInvalidArgument[] = "INVALID_ARGUMENT";
++constexpr char kUnknownTarget[] = "UNKNOWN_TARGET";
++constexpr char kStaleVersion[] = "STALE_VERSION";
++constexpr char kVersionConflict[] = "VERSION_CONFLICT";
++constexpr char kVersionUnknown[] = "VERSION_UNKNOWN";
++constexpr char kNoDebuggerSession[] = "NO_DEBUGGER_SESSION";
++constexpr char kGrantRequired[] = "GRANT_REQUIRED";
++constexpr char kUnknownCommand[] = "UNKNOWN_COMMAND";
++
++std::string ToReason(content::InputOwnershipWriteResult result) {
++  using Result = content::InputOwnershipWriteResult;
++  switch (result) {
++    case Result::kAccepted:
++      return std::string();
++    case Result::kFeatureDisabled:
++      return std::string("FEATURE_DISABLED");
++    case Result::kInvalidArgument:
++      return kInvalidArgument;
++    case Result::kUnknownTarget:
++      return kUnknownTarget;
++    case Result::kStaleVersion:
++      return kStaleVersion;
++    case Result::kVersionConflict:
++      return kVersionConflict;
++    case Result::kVersionUnknown:
++      return kVersionUnknown;
++    case Result::kGrantRequired:
++      return kGrantRequired;
++    case Result::kUnknownCommand:
++      return kUnknownCommand;
++  }
++}
++
++api_io::Mode ToApiMode(content::InputOwnershipMode mode) {
++  switch (mode) {
++    case content::InputOwnershipMode::kAi:
++      return api_io::Mode::kAi;
++    case content::InputOwnershipMode::kAssist:
++      return api_io::Mode::kAssist;
++    case content::InputOwnershipMode::kHuman:
++      return api_io::Mode::kHuman;
++  }
++}
++
++content::InputOwnershipMode ToKernelMode(api_io::Mode mode) {
++  switch (mode) {
++    case api_io::Mode::kNone:
++      // Fail closed: an unspecified mode is never automation-owned.
++      return content::InputOwnershipMode::kAssist;
++    case api_io::Mode::kAi:
++      return content::InputOwnershipMode::kAi;
++    case api_io::Mode::kAssist:
++      return content::InputOwnershipMode::kAssist;
++    case api_io::Mode::kHuman:
++      return content::InputOwnershipMode::kHuman;
++  }
++}
++
++// Versions are exchanged as JSON integers. The generated C++ type is `int`, so
++// versions above INT_MAX are rejected instead of silently wrapping.
++constexpr int64_t kMaxVersion = 0x7fffffff;
++
++int64_t ToEpochMs(base::TimeTicks ticks) {
++  if (ticks.is_null()) {
++    return 0;
++  }
++  // Approximate wall-clock projection for diagnostics only. The authoritative
++  // deadline is always the monotonic one inside content.
++  const base::TimeDelta age = base::TimeTicks::Now() - ticks;
++  return (base::Time::Now() - age - base::Time::UnixEpoch()).InMilliseconds();
++}
++
++// --- Target resolution -----------------------------------------------------
++
++// True when `target` names exactly one of tabId/windowId.
++bool HasExactlyOneTarget(const api_io::Target& target) {
++  return target.tab_id.has_value() != target.window_id.has_value();
++}
++
++bool ResolveTab(content::BrowserContext* browser_context,
++                bool include_incognito,
++                const api_io::Target& target,
++                content::WebContents** web_contents,
++                std::string* reason) {
++  if (!target.tab_id.has_value() || target.window_id.has_value()) {
++    *reason = kInvalidTarget;
++    return false;
++  }
++  if (!ExtensionTabUtil::GetTabById(*target.tab_id, browser_context,
++                                   include_incognito, web_contents)) {
++    *reason = kUnknownTarget;
++    return false;
++  }
++  return true;
++}
++
++bool ResolveWindow(content::BrowserContext* browser_context,
++                   bool include_incognito,
++                   const api_io::Target& target,
++                   WindowController** window,
++                   std::string* reason) {
++  if (!target.window_id.has_value() || target.tab_id.has_value()) {
++    *reason = kInvalidTarget;
++    return false;
++  }
++  *window = ExtensionTabUtil::GetControllerInProfileWithId(
++      Profile::FromBrowserContext(browser_context), *target.window_id,
++      include_incognito, /*error_message=*/nullptr);
++  if (!*window) {
++    *reason = kUnknownTarget;
++    return false;
++  }
++  return true;
++}
++
++// --- Window snapshot ledger ------------------------------------------------
++//
++// The content controller is per WebContents. A window target is expanded into
++// its current tabs (and, at every heartbeat, into the tabs that exist by then).
++// The ledger below remembers the last accepted window snapshot so a tab created
++// after setOwnership() can be bound by the next heartbeat even if the observer
++// path is unavailable. It is a cache, never a second source of truth: content
++// per-tab state wins on every conflicting read.
++struct WindowRecord {
++  content::InputOwnershipMode mode = content::InputOwnershipMode::kAssist;
++  uint64_t version = 0;
++};
++
++using WindowKey = std::pair<content::BrowserContext*, int>;
++
++std::map<WindowKey, WindowRecord>& WindowRecords() {
++  static base::NoDestructor<std::map<WindowKey, WindowRecord>> records;
++  return *records;
++}
++
++// Keeps the ledger bounded if windows come and go without an explicit close
++// (window ids are recycled, so the entry is refreshed on every setOwnership).
++constexpr size_t kMaxWindowRecords = 256;
++
++void StoreWindowRecord(content::BrowserContext* context,
++                       int window_id,
++                       content::InputOwnershipMode mode,
++                       uint64_t version) {
++  auto& records = WindowRecords();
++  if (records.size() >= kMaxWindowRecords &&
++      !records.contains(WindowKey(context, window_id))) {
++    records.erase(records.begin());
++  }
++  records[WindowKey(context, window_id)] = WindowRecord{mode, version};
++}
++
++void EraseWindowRecord(content::BrowserContext* context, int window_id) {
++  WindowRecords().erase(WindowKey(context, window_id));
++}
++
++std::optional<WindowRecord> GetWindowRecord(content::BrowserContext* context,
++                                            int window_id) {
++  auto it = WindowRecords().find(WindowKey(context, window_id));
++  if (it == WindowRecords().end()) {
++    return std::nullopt;
++  }
++  return it->second;
++}
++
++// --- Session resolution (K16) ----------------------------------------------
++
++struct ResolvedDebuggerSession {
++  raw_ptr<content::DevToolsAgentHostClient> client = nullptr;
++  content::InputOwnershipSessionToken token = nullptr;
++};
++
++// Resolves the calling extension's own chrome.debugger session on `web_contents`
++// and the DevTools session token the InputHandler will use for its events.
++// Anything the caller sends (`request.session`) is ignored on purpose: the
++// binding comes from the ExtensionDevToolsClientHost registry.
++bool ResolveDebuggerSession(ExtensionFunction* function,
++                            content::WebContents* web_contents,
++                            ResolvedDebuggerSession* out,
++                            std::string* reason) {
++  scoped_refptr<content::DevToolsAgentHost> agent_host =
++      content::DevToolsAgentHost::GetForTab(web_contents);
++  if (!agent_host) {
++    *reason = kNoDebuggerSession;
++    return false;
++  }
++  content::DevToolsAgentHostClient* client =
++      GetExtensionDebuggerClientForTab(function->browser_context(),
++                                       function->extension()->id(),
++                                       web_contents);
++  if (!client) {
++    *reason = kNoDebuggerSession;
++    return false;
++  }
++  const content::InputOwnershipSessionToken token =
++      agent_host->GetInputOwnershipSessionForClient(client);
++  if (!token) {
++    *reason = kNoDebuggerSession;
++    return false;
++  }
++  out->client = client;
++  out->token = token;
++  return true;
++}
++
++// --- Human presence event bridge (K13) -------------------------------------
++
++std::string PresenceKindToString(
++    content::InputOwnershipHumanPresenceKind kind) {
++  switch (kind) {
++    case content::InputOwnershipHumanPresenceKind::kMouse:
++      return "mouse";
++    case content::InputOwnershipHumanPresenceKind::kWheel:
++      return "wheel";
++    case content::InputOwnershipHumanPresenceKind::kKey:
++      return "key";
++    case content::InputOwnershipHumanPresenceKind::kText:
++      return "text";
++    case content::InputOwnershipHumanPresenceKind::kTouch:
++      return "touch";
++    case content::InputOwnershipHumanPresenceKind::kOther:
++      return "other";
++  }
++}
++
++// Dispatches `browserCli.inputOwnership.onHumanPresence` to every trusted
++// Browser CLI extension installed in the WebContents' profile. It never
++// broadcasts to other extensions.
++void DispatchHumanPresence(content::WebContents* web_contents,
++                           content::InputOwnershipHumanPresenceKind kind,
++                           base::TimeTicks at) {
++  if (!web_contents) {
++    return;
++  }
++  content::BrowserContext* browser_context =
++      web_contents->GetBrowserContext();
++  if (!browser_context || browser_context->IsOffTheRecord()) {
++    return;
++  }
++  Profile* profile = Profile::FromBrowserContext(browser_context);
++  if (!profile) {
++    return;
++  }
++  EventRouter* event_router = EventRouter::Get(profile);
++  if (!event_router) {
++    return;
++  }
++
++  const int tab_id = ExtensionTabUtil::GetTabId(web_contents);
++  const int window_id = ExtensionTabUtil::GetWindowIdOfTab(web_contents);
++  const std::string kind_string = PresenceKindToString(kind);
++  const double at_ms = static_cast<double>(
++      at.is_null() ? (base::Time::Now() - base::Time::UnixEpoch()).InMilliseconds()
++                   : ToEpochMs(at));
++
++  for (const auto& extension :
++       ExtensionRegistry::Get(profile)->enabled_extensions()) {
++    if (!browser_cli::IsTrustedBrowserCliExtension(extension.get())) {
++      continue;
++    }
++    base::DictValue event_args;
++    event_args.Set("tabId", tab_id);
++    if (window_id != extension_misc::kUnknownWindowId) {
++      event_args.Set("windowId", window_id);
++    }
++    event_args.Set("kind", kind_string);
++    event_args.Set("at", at_ms);
++    base::ListValue args;
++    args.Append(std::move(event_args));
++    auto event = std::make_unique<Event>(
++        events::BROWSERCLI_INPUT_OWNERSHIP_ON_HUMAN_PRESENCE,
++        api_io::OnHumanPresence::kEventName, std::move(args), profile);
++    event_router->DispatchEventToExtension(extension->id(), std::move(event));
++  }
++}
++
++void EnsureHumanPresenceBridgeRegistered() {
++  static bool registered = false;
++  if (registered) {
++    return;
++  }
++  registered = true;
++  content::SetInputOwnershipHumanPresenceCallback(
++      base::BindRepeating(&DispatchHumanPresence));
++}
++
++// --- Common request plumbing ----------------------------------------------
++
++// Runs the trust check for `function`; returns true and registers the presence
++// bridge on success.
++bool PrepareCall(ExtensionFunction* function, std::string* error) {
++  if (!browser_cli::IsTrustedBrowserCliCaller(function, error)) {
++    return false;
++  }
++  EnsureHumanPresenceBridgeRegistered();
++  return true;
++}
++
++}  // namespace
++
++// ---------------------------------------------------------------------------
++// setOwnership
++// ---------------------------------------------------------------------------
++
++BrowserCliInputOwnershipSetOwnershipFunction::BrowserCliInputOwnershipSetOwnershipFunction() =
++    default;
++
++BrowserCliInputOwnershipSetOwnershipFunction::
++    ~BrowserCliInputOwnershipSetOwnershipFunction() = default;
++
++ExtensionFunction::ResponseAction
++BrowserCliInputOwnershipSetOwnershipFunction::Run() {
++  std::string trust_error;
++  if (!PrepareCall(this, &trust_error)) {
++    return RespondNow(Error(trust_error));
++  }
++  auto params = api_io::SetOwnership::Params::Create(args());
++  if (!params) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const api_io::Target& target = params->request.target;
++  if (!HasExactlyOneTarget(target)) {
++    return RespondNow(Error(kInvalidTarget));
++  }
++  const int64_t version = params->request.version;
++  if (version <= 0 || version > kMaxVersion) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const content::InputOwnershipMode mode =
++      ToKernelMode(params->request.mode);
++
++  api_io::SetOwnershipResult result;
++  result.mode = ToApiMode(mode);
++  result.version = static_cast<int>(version);
++
++  if (target.tab_id.has_value()) {
++    content::WebContents* web_contents = nullptr;
++    std::string reason;
++    if (!ResolveTab(browser_context(), include_incognito_information(), target,
++                    &web_contents, &reason)) {
++      result.accepted = false;
++      result.reason = reason;
++      return RespondNow(
++          ArgumentList(api_io::SetOwnership::Results::Create(result)));
++    }
++    const content::InputOwnershipApplyResult apply =
++        content::SetInputOwnership(web_contents, mode,
++                                   static_cast<uint64_t>(version));
++    result.accepted =
++        apply.result == content::InputOwnershipWriteResult::kAccepted;
++    result.mode = ToApiMode(apply.snapshot.mode);
++    result.version = static_cast<int>(apply.snapshot.version);
++    if (!result.accepted) {
++      result.reason = ToReason(apply.result);
++    }
++    return RespondNow(
++        ArgumentList(api_io::SetOwnership::Results::Create(result)));
++  }
++
++  WindowController* window = nullptr;
++  std::string reason;
++  if (!ResolveWindow(browser_context(), include_incognito_information(),
++                     target, &window, &reason)) {
++    result.accepted = false;
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::SetOwnership::Results::Create(result)));
++  }
++
++  // Apply to every current tab. A rejection caused by a higher kernel version
++  // is reported back so the extension can adopt it; tabs that already accepted
++  // are idempotent on replay.
++  bool accepted = true;
++  content::InputOwnershipSnapshot highest;
++  for (int i = 0; i < window->GetTabCount(); ++i) {
++    content::WebContents* web_contents = window->GetWebContentsAt(i);
++    if (!web_contents) {
++      continue;
++    }
++    const content::InputOwnershipApplyResult apply =
++        content::SetInputOwnership(web_contents, mode,
++                                   static_cast<uint64_t>(version));
++    if (apply.snapshot.version > highest.version) {
++      highest = apply.snapshot;
++    }
++    if (apply.result != content::InputOwnershipWriteResult::kAccepted) {
++      accepted = false;
++      result.reason = ToReason(apply.result);
++      result.mode = ToApiMode(apply.snapshot.mode);
++      result.version = static_cast<int>(apply.snapshot.version);
++    }
++  }
++
++  result.accepted = accepted;
++  if (accepted) {
++    StoreWindowRecord(browser_context(), *target.window_id, mode,
++                      static_cast<uint64_t>(version));
++    result.mode = ToApiMode(mode);
++    result.version = static_cast<int>(version);
++  }
++  return RespondNow(ArgumentList(api_io::SetOwnership::Results::Create(result)));
++}
++
++// ---------------------------------------------------------------------------
++// heartbeat
++// ---------------------------------------------------------------------------
++
++BrowserCliInputOwnershipHeartbeatFunction::BrowserCliInputOwnershipHeartbeatFunction() =
++    default;
++
++BrowserCliInputOwnershipHeartbeatFunction::
++    ~BrowserCliInputOwnershipHeartbeatFunction() = default;
++
++ExtensionFunction::ResponseAction
++BrowserCliInputOwnershipHeartbeatFunction::Run() {
++  std::string trust_error;
++  if (!PrepareCall(this, &trust_error)) {
++    return RespondNow(Error(trust_error));
++  }
++  auto params = api_io::Heartbeat::Params::Create(args());
++  if (!params) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const api_io::Target& target = params->request.target;
++  if (!HasExactlyOneTarget(target)) {
++    return RespondNow(Error(kInvalidTarget));
++  }
++  const int64_t version = params->request.version;
++  if (version <= 0 || version > kMaxVersion) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++
++  api_io::HeartbeatResult result;
++  result.ok = false;
++  result.mode = api_io::Mode::kAssist;
++  result.version = 0;
++  result.stale = true;
++
++  auto finish = [this, &result]() {
++    return RespondNow(ArgumentList(api_io::Heartbeat::Results::Create(result)));
++  };
++
++  if (target.tab_id.has_value()) {
++    content::WebContents* web_contents = nullptr;
++    std::string reason;
++    if (!ResolveTab(browser_context(), include_incognito_information(), target,
++                    &web_contents, &reason)) {
++      result.reason = reason;
++      return finish();
++    }
++    const content::InputOwnershipApplyResult apply =
++        content::HeartbeatInputOwnership(web_contents,
++                                         static_cast<uint64_t>(version));
++    result.ok =
++        apply.result == content::InputOwnershipWriteResult::kAccepted;
++    result.mode = ToApiMode(apply.snapshot.mode);
++    result.version = static_cast<int>(apply.snapshot.version);
++    result.stale = apply.snapshot.stale;
++    if (!result.ok) {
++      result.reason = ToReason(apply.result);
++    }
++    return finish();
++  }
++
++  WindowController* window = nullptr;
++  std::string reason;
++  if (!ResolveWindow(browser_context(), include_incognito_information(),
++                     target, &window, &reason)) {
++    EraseWindowRecord(browser_context(), *target.window_id);
++    result.reason = reason;
++    return finish();
++  }
++
++  const std::optional<WindowRecord> record =
++      GetWindowRecord(browser_context(), *target.window_id);
++  bool ok = true;
++  content::InputOwnershipSnapshot highest;
++  bool any_tab = false;
++  for (int i = 0; i < window->GetTabCount(); ++i) {
++    content::WebContents* web_contents = window->GetWebContentsAt(i);
++    if (!web_contents) {
++      continue;
++    }
++    any_tab = true;
++    content::InputOwnershipApplyResult apply;
++    const content::InputOwnershipSnapshot before =
++        content::GetInputOwnershipSnapshot(web_contents);
++    if (record) {
++      if (before.version == 0) {
++        // A tab created after setOwnership(): bind it to the window snapshot.
++        apply = content::SetInputOwnership(web_contents, record->mode,
++                                           record->version);
++      } else if (before.version == record->version) {
++        apply = content::HeartbeatInputOwnership(
++            web_contents, static_cast<uint64_t>(version));
++      } else {
++        // A tab-level state that does not match the window snapshot: it was
++        // set through an exact tabId target (which has priority over the
++        // window) or by another window owner. Leave it untouched and do not
++        // fail the window heartbeat.
++        if (before.version > highest.version) {
++          highest = before;
++        }
++        continue;
++      }
++    } else {
++      apply = content::HeartbeatInputOwnership(web_contents,
++                                               static_cast<uint64_t>(version));
++    }
++    if (apply.snapshot.version > highest.version) {
++      highest = apply.snapshot;
++    }
++    if (apply.result != content::InputOwnershipWriteResult::kAccepted) {
++      ok = false;
++      result.reason = ToReason(apply.result);
++    }
++  }
++  if (!any_tab) {
++    EraseWindowRecord(browser_context(), *target.window_id);
++    result.reason = kUnknownTarget;
++    return finish();
++  }
++
++  result.ok = ok;
++  result.mode = ToApiMode(highest.mode);
++  result.version = static_cast<int>(highest.version);
++  result.stale = highest.stale;
++  if (ok) {
++    result.reason = std::nullopt;
++  }
++  return finish();
++}
++
++// ---------------------------------------------------------------------------
++// getOwnership
++// ---------------------------------------------------------------------------
++
++BrowserCliInputOwnershipGetOwnershipFunction::BrowserCliInputOwnershipGetOwnershipFunction() =
++    default;
++
++BrowserCliInputOwnershipGetOwnershipFunction::
++    ~BrowserCliInputOwnershipGetOwnershipFunction() = default;
++
++ExtensionFunction::ResponseAction
++BrowserCliInputOwnershipGetOwnershipFunction::Run() {
++  std::string trust_error;
++  if (!PrepareCall(this, &trust_error)) {
++    return RespondNow(Error(trust_error));
++  }
++  auto params = api_io::GetOwnership::Params::Create(args());
++  if (!params) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const api_io::Target& target = params->request.target;
++  if (!HasExactlyOneTarget(target)) {
++    return RespondNow(Error(kInvalidTarget));
++  }
++
++  content::InputOwnershipSnapshot snapshot;
++  bool found = false;
++  if (target.tab_id.has_value()) {
++    content::WebContents* web_contents = nullptr;
++    std::string reason;
++    if (!ResolveTab(browser_context(), include_incognito_information(), target,
++                    &web_contents, &reason)) {
++      api_io::Snapshot result;
++      result.mode = api_io::Mode::kAssist;
++      result.version = 0;
++      result.stale = true;
++      result.reason = reason;
++      return RespondNow(
++          ArgumentList(api_io::GetOwnership::Results::Create(result)));
++    }
++    snapshot = content::GetInputOwnershipSnapshot(web_contents);
++    found = true;
++  } else {
++    WindowController* window = nullptr;
++    std::string reason;
++    if (!ResolveWindow(browser_context(), include_incognito_information(),
++                       target, &window, &reason)) {
++      api_io::Snapshot result;
++      result.mode = api_io::Mode::kAssist;
++      result.version = 0;
++      result.stale = true;
++      result.reason = reason;
++      return RespondNow(
++          ArgumentList(api_io::GetOwnership::Results::Create(result)));
++    }
++    for (int i = 0; i < window->GetTabCount(); ++i) {
++      content::WebContents* web_contents = window->GetWebContentsAt(i);
++      if (!web_contents) {
++        continue;
++      }
++      snapshot = content::GetInputOwnershipSnapshot(web_contents);
++      found = true;
++      break;
++    }
++  }
++
++  api_io::Snapshot result;
++  result.mode = ToApiMode(snapshot.mode);
++  result.version = static_cast<int>(snapshot.version);
++  result.stale = snapshot.stale;
++  if (!snapshot.last_update.is_null()) {
++    result.last_update_at = static_cast<double>(ToEpochMs(snapshot.last_update));
++  }
++  if (!found) {
++    result.reason = kUnknownTarget;
++  }
++  return RespondNow(ArgumentList(api_io::GetOwnership::Results::Create(result)));
++}
++
++// ---------------------------------------------------------------------------
++// grantInput
++// ---------------------------------------------------------------------------
++
++BrowserCliInputOwnershipGrantInputFunction::BrowserCliInputOwnershipGrantInputFunction() =
++    default;
++
++BrowserCliInputOwnershipGrantInputFunction::
++    ~BrowserCliInputOwnershipGrantInputFunction() = default;
++
++ExtensionFunction::ResponseAction
++BrowserCliInputOwnershipGrantInputFunction::Run() {
++  std::string trust_error;
++  if (!PrepareCall(this, &trust_error)) {
++    return RespondNow(Error(trust_error));
++  }
++  auto params = api_io::GrantInput::Params::Create(args());
++  if (!params) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const api_io::Target& target = params->request.target;
++  if (!target.tab_id.has_value() || target.window_id.has_value()) {
++    return RespondNow(Error(kInvalidTarget));
++  }
++  if (params->request.actions <= 0 || params->request.ttl_ms <= 0) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++
++  api_io::GrantResult result;
++  result.granted = false;
++  result.actions = params->request.actions;
++
++  content::WebContents* web_contents = nullptr;
++  std::string reason;
++  if (!ResolveTab(browser_context(), include_incognito_information(), target,
++                  &web_contents, &reason)) {
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::GrantInput::Results::Create(result)));
++  }
++
++  ResolvedDebuggerSession session;
++  if (!ResolveDebuggerSession(this, web_contents, &session, &reason)) {
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::GrantInput::Results::Create(result)));
++  }
++
++  const content::InputOwnershipGrantInfo grant = content::GrantDebuggerInput(
++      web_contents, session.token, params->request.actions,
++      base::Milliseconds(params->request.ttl_ms));
++  result.granted = grant.granted;
++  result.actions = grant.remaining > 0 ? grant.remaining : result.actions;
++  if (grant.granted) {
++    result.expires_at = static_cast<double>(ToEpochMs(grant.expires_at));
++  } else {
++    result.reason = kInvalidArgument;
++  }
++  return RespondNow(ArgumentList(api_io::GrantInput::Results::Create(result)));
++}
++
++// ---------------------------------------------------------------------------
++// beginInputCommand
++// ---------------------------------------------------------------------------
++
++BrowserCliInputOwnershipBeginInputCommandFunction::BrowserCliInputOwnershipBeginInputCommandFunction() =
++    default;
++
++BrowserCliInputOwnershipBeginInputCommandFunction::
++    ~BrowserCliInputOwnershipBeginInputCommandFunction() = default;
++
++ExtensionFunction::ResponseAction
++BrowserCliInputOwnershipBeginInputCommandFunction::Run() {
++  std::string trust_error;
++  if (!PrepareCall(this, &trust_error)) {
++    return RespondNow(Error(trust_error));
++  }
++  auto params = api_io::BeginInputCommand::Params::Create(args());
++  if (!params) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const api_io::Target& target = params->request.target;
++  if (!target.tab_id.has_value() || target.window_id.has_value()) {
++    return RespondNow(Error(kInvalidTarget));
++  }
++  if (params->request.command_id.empty()) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++
++  api_io::CommandScopeResult result;
++  result.ok = false;
++
++  content::WebContents* web_contents = nullptr;
++  std::string reason;
++  if (!ResolveTab(browser_context(), include_incognito_information(), target,
++                  &web_contents, &reason)) {
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::BeginInputCommand::Results::Create(result)));
++  }
++
++  ResolvedDebuggerSession session;
++  if (!ResolveDebuggerSession(this, web_contents, &session, &reason)) {
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::BeginInputCommand::Results::Create(result)));
++  }
++
++  // The scope duration is decided by the kernel (kind-specific TTL on the
++  // extension side, capped here); the request carries no duration.
++  const content::InputOwnershipCommandScope scope =
++      content::BeginInputOwnershipCommand(web_contents, session.token,
++                                          params->request.command_id,
++                                          base::Minutes(2));
++  result.ok = scope.ok();
++  if (scope.ok()) {
++    if (!scope.scope_id.empty()) {
++      result.scope_id = scope.scope_id;
++    }
++    result.deadline = static_cast<double>(ToEpochMs(scope.deadline));
++    result.grant_remaining = scope.grant_remaining;
++  } else {
++    result.reason = ToReason(scope.result);
++  }
++  return RespondNow(
++      ArgumentList(api_io::BeginInputCommand::Results::Create(result)));
++}
++
++// ---------------------------------------------------------------------------
++// endInputCommand
++// ---------------------------------------------------------------------------
++
++BrowserCliInputOwnershipEndInputCommandFunction::BrowserCliInputOwnershipEndInputCommandFunction() =
++    default;
++
++BrowserCliInputOwnershipEndInputCommandFunction::
++    ~BrowserCliInputOwnershipEndInputCommandFunction() = default;
++
++ExtensionFunction::ResponseAction
++BrowserCliInputOwnershipEndInputCommandFunction::Run() {
++  std::string trust_error;
++  if (!PrepareCall(this, &trust_error)) {
++    return RespondNow(Error(trust_error));
++  }
++  auto params = api_io::EndInputCommand::Params::Create(args());
++  if (!params) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++  const api_io::Target& target = params->request.target;
++  if (!target.tab_id.has_value() || target.window_id.has_value()) {
++    return RespondNow(Error(kInvalidTarget));
++  }
++  if (params->request.command_id.empty()) {
++    return RespondNow(Error(kInvalidArgument));
++  }
++
++  api_io::EndCommandResult result;
++  result.closed = false;
++
++  content::WebContents* web_contents = nullptr;
++  std::string reason;
++  if (!ResolveTab(browser_context(), include_incognito_information(), target,
++                  &web_contents, &reason)) {
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::EndInputCommand::Results::Create(result)));
++  }
++
++  ResolvedDebuggerSession session;
++  if (!ResolveDebuggerSession(this, web_contents, &session, &reason)) {
++    // A detached session cannot own a live scope; report it as an unknown
++    // command instead of failing the whole command result.
++    result.reason = kUnknownCommand;
++    return RespondNow(
++        ArgumentList(api_io::EndInputCommand::Results::Create(result)));
++  }
++
++  const bool cancelled =
++      params->request.outcome == api_io::CommandOutcome::kCancelled;
++  const content::InputOwnershipWriteResult end = content::EndInputOwnershipCommand(
++      web_contents, session.token, params->request.command_id, cancelled);
++  result.closed = end == content::InputOwnershipWriteResult::kAccepted;
++  if (!result.closed) {
++    result.reason = ToReason(end);
++  }
++  return RespondNow(
++      ArgumentList(api_io::EndInputCommand::Results::Create(result)));
++}
++
++}  // namespace extensions
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h
+new file mode 100644
+index 0000000..c38250c
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h
+@@ -0,0 +1,132 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_BROWSER_CLI_INPUT_OWNERSHIP_API_H_
++#define CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_BROWSER_CLI_INPUT_OWNERSHIP_API_H_
++
++#include "extensions/browser/extension_function.h"
++#include "extensions/browser/extension_function_histogram_value.h"
++
++namespace extensions {
++
++// chrome.browserCli.inputOwnership.* (Browser CLI P3, kernel side).
++//
++// Every function below performs the same trust check first
++// (`IsTrustedBrowserCliCaller`): the caller must be the allowlisted automation
++// extension, in a privileged extension context, on a non-OTR profile, while the
++// browser runs in managed mode. The namespace itself is only available when
++// `InputOwnershipEnforcement` is enabled (see the delegated availability check
++// in `browser_cli_input_ownership_availability.cc`), so a stock Chrome never
++// sees it.
++//
++// The extension is the single source of truth for ownership; these functions
++// only mirror its decisions into the content arbitration state.
++
++class BrowserCliInputOwnershipSetOwnershipFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.setOwnership",
++                             BROWSERCLI_INPUTOWNERSHIP_SETOWNERSHIP)
++
++  BrowserCliInputOwnershipSetOwnershipFunction();
++
++  BrowserCliInputOwnershipSetOwnershipFunction(const
++      BrowserCliInputOwnershipSetOwnershipFunction&) = delete;
++  BrowserCliInputOwnershipSetOwnershipFunction& operator=(
++      const BrowserCliInputOwnershipSetOwnershipFunction&) = delete;
++
++ protected:
++  ~BrowserCliInputOwnershipSetOwnershipFunction() override;
++  ResponseAction Run() override;
++};
++
++class BrowserCliInputOwnershipHeartbeatFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.heartbeat",
++                             BROWSERCLI_INPUTOWNERSHIP_HEARTBEAT)
++
++  BrowserCliInputOwnershipHeartbeatFunction();
++
++  BrowserCliInputOwnershipHeartbeatFunction(const
++      BrowserCliInputOwnershipHeartbeatFunction&) = delete;
++  BrowserCliInputOwnershipHeartbeatFunction& operator=(
++      const BrowserCliInputOwnershipHeartbeatFunction&) = delete;
++
++ protected:
++  ~BrowserCliInputOwnershipHeartbeatFunction() override;
++  ResponseAction Run() override;
++};
++
++class BrowserCliInputOwnershipGetOwnershipFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.getOwnership",
++                             BROWSERCLI_INPUTOWNERSHIP_GETOWNERSHIP)
++
++  BrowserCliInputOwnershipGetOwnershipFunction();
++
++  BrowserCliInputOwnershipGetOwnershipFunction(const
++      BrowserCliInputOwnershipGetOwnershipFunction&) = delete;
++  BrowserCliInputOwnershipGetOwnershipFunction& operator=(
++      const BrowserCliInputOwnershipGetOwnershipFunction&) = delete;
++
++ protected:
++  ~BrowserCliInputOwnershipGetOwnershipFunction() override;
++  ResponseAction Run() override;
++};
++
++class BrowserCliInputOwnershipGrantInputFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.grantInput",
++                             BROWSERCLI_INPUTOWNERSHIP_GRANTINPUT)
++
++  BrowserCliInputOwnershipGrantInputFunction();
++
++  BrowserCliInputOwnershipGrantInputFunction(const
++      BrowserCliInputOwnershipGrantInputFunction&) = delete;
++  BrowserCliInputOwnershipGrantInputFunction& operator=(
++      const BrowserCliInputOwnershipGrantInputFunction&) = delete;
++
++ protected:
++  ~BrowserCliInputOwnershipGrantInputFunction() override;
++  ResponseAction Run() override;
++};
++
++class BrowserCliInputOwnershipBeginInputCommandFunction
++    : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.beginInputCommand",
++                             BROWSERCLI_INPUTOWNERSHIP_BEGININPUTCOMMAND)
++
++  BrowserCliInputOwnershipBeginInputCommandFunction();
++
++  BrowserCliInputOwnershipBeginInputCommandFunction(const
++      BrowserCliInputOwnershipBeginInputCommandFunction&) = delete;
++  BrowserCliInputOwnershipBeginInputCommandFunction& operator=(
++      const BrowserCliInputOwnershipBeginInputCommandFunction&) = delete;
++
++ protected:
++  ~BrowserCliInputOwnershipBeginInputCommandFunction() override;
++  ResponseAction Run() override;
++};
++
++class BrowserCliInputOwnershipEndInputCommandFunction
++    : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.endInputCommand",
++                             BROWSERCLI_INPUTOWNERSHIP_ENDINPUTCOMMAND)
++
++  BrowserCliInputOwnershipEndInputCommandFunction();
++
++  BrowserCliInputOwnershipEndInputCommandFunction(const
++      BrowserCliInputOwnershipEndInputCommandFunction&) = delete;
++  BrowserCliInputOwnershipEndInputCommandFunction& operator=(
++      const BrowserCliInputOwnershipEndInputCommandFunction&) = delete;
++
++ protected:
++  ~BrowserCliInputOwnershipEndInputCommandFunction() override;
++  ResponseAction Run() override;
++};
++
++}  // namespace extensions
++
++#endif  // CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_BROWSER_CLI_INPUT_OWNERSHIP_API_H_
+diff --git a/chrome/browser/extensions/api/debugger/BUILD.gn b/chrome/browser/extensions/api/debugger/BUILD.gn
+index f8c4936..9fcfc5e 100644
+--- a/chrome/browser/extensions/api/debugger/BUILD.gn
++++ b/chrome/browser/extensions/api/debugger/BUILD.gn
+@@ -11,6 +11,7 @@ source_set("debugger") {
+   sources = [
+     "debugger_api.cc",
+     "debugger_api.h",
++    "debugger_api_client_lookup.h",
+   ]
+ 
+   if (is_android) {
+diff --git a/chrome/browser/extensions/api/debugger/debugger_api.cc b/chrome/browser/extensions/api/debugger/debugger_api.cc
+index 4f4153a..d353082 100644
+--- a/chrome/browser/extensions/api/debugger/debugger_api.cc
++++ b/chrome/browser/extensions/api/debugger/debugger_api.cc
+@@ -28,6 +28,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/types/optional_util.h"
+ #include "base/values.h"
++#include "chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h"
+ #include "chrome/browser/extensions/extension_service.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/lifetime/termination_notification.h"
+@@ -493,6 +494,7 @@ class ExtensionDevToolsClientHost : public content::DevToolsAgentHostClient,
+   void CreateWarningInfobar();
+ #endif
+   const ExtensionId& extension_id() { return extension_->id(); }
++  Profile* profile() { return profile_; }
+   DevToolsAgentHost* agent_host() { return agent_host_.get(); }
+   void RespondDetachedToPendingRequests();
+   void Close();
+@@ -1302,4 +1304,31 @@ ExtensionFunction::ResponseAction DebuggerGetTargetsFunction::Run() {
+   return RespondNow(WithArguments(std::move(result)));
+ }
+ 
++content::DevToolsAgentHostClient* GetExtensionDebuggerClientForTab(
++    content::BrowserContext* browser_context,
++    const ExtensionId& extension_id,
++    content::WebContents* web_contents) {
++  // Browser CLI (patch 029): the input ownership API needs the caller's own
++  // chrome.debugger session to bind an input grant to it. Iterating the
++  // attached client hosts keeps the mapping authoritative (extension object +
++  // agent host), instead of trusting anything the extension sends.
++  if (!web_contents || !browser_context) {
++    return nullptr;
++  }
++  Profile* profile = Profile::FromBrowserContext(browser_context);
++  for (ExtensionDevToolsClientHost* client_host : GetAttachedClientHosts()) {
++    if (!client_host || client_host->extension_id() != extension_id) {
++      continue;
++    }
++    if (client_host->profile() != profile) {
++      continue;
++    }
++    if (client_host->agent_host()->GetWebContents() != web_contents) {
++      continue;
++    }
++    return client_host;
++  }
++  return nullptr;
++}
++
+ }  // namespace extensions
+diff --git a/chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h b/chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h
+new file mode 100644
+index 0000000..6d98d30
+--- /dev/null
++++ b/chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_EXTENSIONS_API_DEBUGGER_DEBUGGER_API_CLIENT_LOOKUP_H_
++#define CHROME_BROWSER_EXTENSIONS_API_DEBUGGER_DEBUGGER_API_CLIENT_LOOKUP_H_
++
++#include "extensions/common/extension_id.h"
++
++namespace content {
++class BrowserContext;
++class DevToolsAgentHostClient;
++class WebContents;
++}  // namespace content
++
++namespace extensions {
++
++// Browser CLI (patch 029): resolves the `DevToolsAgentHostClient` that the
++// chrome.debugger API created for `extension_id` on `web_contents`.
++//
++// `chrome.debugger` keeps its client hosts in a file-local registry (the
++// ExtensionDevToolsClientHost objects). The trusted input ownership API needs
++// the *caller's own* session to bind an input grant to it (design §4), so this
++// accessor is the single, minimal export point. It never trusts an id supplied
++// by the caller: the id comes from the verified `ExtensionFunction`.
++//
++// Returns nullptr when the extension has no attach on that tab.
++content::DevToolsAgentHostClient* GetExtensionDebuggerClientForTab(
++    content::BrowserContext* browser_context,
++    const ExtensionId& extension_id,
++    content::WebContents* web_contents);
++
++}  // namespace extensions
++
++#endif  // CHROME_BROWSER_EXTENSIONS_API_DEBUGGER_DEBUGGER_API_CLIENT_LOOKUP_H_
+diff --git a/chrome/common/extensions/BUILD.gn b/chrome/common/extensions/BUILD.gn
+index 0a5ad34..e0eaa0d 100644
+--- a/chrome/common/extensions/BUILD.gn
++++ b/chrome/common/extensions/BUILD.gn
+@@ -11,6 +11,7 @@ source_set("extensions") {
+   # The files that can be included from other modules.
+   public = [
+     "activity_log_policy_util.h",
++    "api/browser_cli_input_ownership_availability.h",
+     "api/notifications/notification_style.h",
+     "api/omnibox/omnibox_handler.h",
+     "api/side_panel/side_panel_info.h",
+@@ -31,6 +32,7 @@ source_set("extensions") {
+   # Files that can only be included from here.
+   sources = [
+     "activity_log_policy_util.cc",
++    "api/browser_cli_input_ownership_availability.cc",
+     "api/notifications/notification_style.cc",
+     "api/omnibox/omnibox_handler.cc",
+     "api/side_panel/side_panel_info.cc",
+@@ -80,6 +82,7 @@ source_set("extensions") {
+     "//components/policy/core/common",
+     "//components/url_formatter",
+     "//components/version_info",
++    "//content/public/common",
+     "//extensions:extensions_resources",
+     "//extensions/common",
+     "//extensions/common:common_constants",
+diff --git a/chrome/common/extensions/api/_api_features.json b/chrome/common/extensions/api/_api_features.json
+index eb656bf..fc91e4a 100644
+--- a/chrome/common/extensions/api/_api_features.json
++++ b/chrome/common/extensions/api/_api_features.json
+@@ -327,6 +327,21 @@
+     "dependencies": [],
+     "contexts": ["privileged_extension"]
+   },
++  "browserCli.inputOwnership": {
++    // Browser CLI P3: production write path into the content input ownership
++    // arbitration. Same id-hash allowlist and privileged context as the
++    // capability namespace; `requires_delegated_availability_check` hides the
++    // whole namespace unless the content feature
++    // `InputOwnershipEnforcement` is enabled and managed mode is on, so a
++    // stock Chrome / feature-off build never exposes it at all.
++    "allowlist": [
++      "4E0786F5E275D23D7B66E0B522A104AE22613E3F",  // SHA-1 of BrowserPilot id
++      "0FC2B72BF7525EEFA66518C54DB602118B38EB5E8AE1B2992EEB0E57911C1722"
++    ],
++    "dependencies": [],
++    "contexts": ["privileged_extension"],
++    "requires_delegated_availability_check": true
++  },
+   "commandLinePrivate": {
+     "dependencies": ["permission:commandLinePrivate"],
+     "contexts": ["privileged_extension"]
+diff --git a/chrome/common/extensions/api/api_sources.gni b/chrome/common/extensions/api/api_sources.gni
+index c28f54c..c0670a2 100644
+--- a/chrome/common/extensions/api/api_sources.gni
++++ b/chrome/common/extensions/api/api_sources.gni
+@@ -81,6 +81,7 @@ if (enable_extensions) {
+     "bookmark_manager_private.json",
+     "braille_display_private.webidl",
+     "browser_cli.json",
++    "browser_cli_input_ownership.json",
+     "command_line_private.json",
+     "crash_report_private.webidl",
+     "dictation_private.webidl",
+diff --git a/chrome/common/extensions/api/browser_cli_input_ownership.json b/chrome/common/extensions/api/browser_cli_input_ownership.json
+new file mode 100644
+index 0000000..79c7ac0
+--- /dev/null
++++ b/chrome/common/extensions/api/browser_cli_input_ownership.json
+@@ -0,0 +1,311 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Browser CLI input ownership API (P3, kernel side).
++//
++// This namespace is the production write path into the content-layer input
++// ownership arbitration. It exists only in a Browser CLI build with
++// `--enable-features=InputOwnershipEnforcement` and is additionally restricted
++// to the trusted automation extension (id hash allowlist, privileged extension
++// context, non-OTR profile and managed-mode runtime check), see
++// `_api_features.json` and `browser_cli_extension_identity.cc`.
++//
++// The extension remains the single source of truth for ownership: the kernel
++// stores a per-target `mode` + monotonic `version` snapshot, degrades to
++// kAssist after 30s without a heartbeat (without rewriting the configured
++// mode), and only delivers ASSIST input inside a session-bound grant.
++[
++  {
++    "namespace": "browserCli.inputOwnership",
++    "description": "none",
++    "types": [
++      {
++        "id": "Mode",
++        "type": "string",
++        "enum": ["ai", "assist", "human"],
++        "description": "Ownership mode for one target. \"ai\" lets automation input through, \"assist\" requires a human-granted budget and \"human\" drops automation input entirely."
++      },
++      {
++        "id": "CommandOutcome",
++        "type": "string",
++        "enum": ["ok", "failed", "cancelled"],
++        "description": "How an automation command finished. Cancelling a scope that authorized no input refunds its reserved grant unit."
++      },
++      {
++        "id": "Target",
++        "type": "object",
++        "description": "The target of an ownership operation. Exactly one of tabId or windowId must be set. A window target expands to the window's current tabs and to tabs created later.",
++        "properties": {
++          "tabId": {
++            "type": "integer",
++            "optional": true,
++            "description": "Exact tab target. Required for grantInput, beginInputCommand and endInputCommand."
++          },
++          "windowId": {
++            "type": "integer",
++            "optional": true,
++            "description": "Browser window target. Accepted by setOwnership, heartbeat and getOwnership only."
++          }
++        }
++      },
++      {
++        "id": "SetOwnershipResult",
++        "type": "object",
++        "description": "Answer to setOwnership. On a rejection `mode`/`version` describe the kernel's current truth so the caller can adopt it.",
++        "properties": {
++          "accepted": {"type": "boolean"},
++          "mode": {"$ref": "Mode"},
++          "version": {"type": "integer"},
++          "reason": {
++            "type": "string",
++            "optional": true,
++            "description": "Stable machine code: INVALID_TARGET, INVALID_ARGUMENT, UNKNOWN_TARGET, STALE_VERSION, VERSION_CONFLICT."
++          }
++        }
++      },
++      {
++        "id": "GrantResult",
++        "type": "object",
++        "description": "Answer to grantInput.",
++        "properties": {
++          "granted": {"type": "boolean"},
++          "actions": {"type": "integer", "optional": true},
++          "expiresAt": {
++            "type": "number",
++            "optional": true,
++            "description": "Absolute deadline in milliseconds since the epoch. Never extended by input."
++          },
++          "sessionToken": {
++            "type": "string",
++            "optional": true,
++            "description": "Opaque diagnostic token of the resolved debugger session. Never an authorization input."
++          },
++          "reason": {
++            "type": "string",
++            "optional": true,
++            "description": "Stable machine code: NO_DEBUGGER_SESSION, SESSION_MISMATCH, INVALID_TARGET, INVALID_ARGUMENT."
++          }
++        }
++      },
++      {
++        "id": "CommandScopeResult",
++        "type": "object",
++        "description": "Answer to beginInputCommand.",
++        "properties": {
++          "ok": {"type": "boolean"},
++          "scopeId": {"type": "string", "optional": true},
++          "deadline": {
++            "type": "number",
++            "optional": true,
++            "description": "Absolute scope deadline in milliseconds since the epoch, capped by the grant deadline."
++          },
++          "grantRemaining": {"type": "integer", "optional": true},
++          "reason": {
++            "type": "string",
++            "optional": true,
++            "description": "Stable machine code: GRANT_REQUIRED, INVALID_TARGET, INVALID_ARGUMENT, SESSION_MISMATCH."
++          }
++        }
++      },
++      {
++        "id": "EndCommandResult",
++        "type": "object",
++        "description": "Answer to endInputCommand.",
++        "properties": {
++          "closed": {"type": "boolean"},
++          "reason": {
++            "type": "string",
++            "optional": true,
++            "description": "Stable machine code: UNKNOWN_COMMAND, INVALID_ARGUMENT."
++          }
++        }
++      },
++      {
++        "id": "HeartbeatResult",
++        "type": "object",
++        "description": "Answer to heartbeat.",
++        "properties": {
++          "ok": {"type": "boolean"},
++          "mode": {"$ref": "Mode"},
++          "version": {"type": "integer"},
++          "stale": {"type": "boolean"},
++          "grantRemaining": {"type": "integer", "optional": true},
++          "grantExpiresAt": {"type": "integer", "optional": true},
++          "reason": {
++            "type": "string",
++            "optional": true,
++            "description": "Stable machine code: STALE_VERSION, VERSION_UNKNOWN, UNKNOWN_TARGET, INVALID_TARGET."
++          }
++        }
++      },
++      {
++        "id": "Snapshot",
++        "type": "object",
++        "description": "Read-only kernel view of one target.",
++        "properties": {
++          "mode": {"$ref": "Mode"},
++          "version": {"type": "integer"},
++          "stale": {
++            "type": "boolean",
++            "description": "True when no accepted update arrived for 30s. The effective mode is then assist; the configured mode is kept."
++          },
++          "lastUpdateAt": {
++            "type": "number",
++            "optional": true,
++            "description": "Milliseconds since the epoch of the last accepted setOwnership/heartbeat (approximate; diagnostics only)."
++          },
++          "grantRemaining": {"type": "integer", "optional": true},
++          "grantExpiresAt": {"type": "integer", "optional": true},
++          "reason": {"type": "string", "optional": true}
++        }
++      },
++      {
++        "id": "HumanPresenceEvent",
++        "type": "object",
++        "description": "A human input event was observed on a tab. It never changes the mode by itself.",
++        "properties": {
++          "tabId": {"type": "integer", "optional": true},
++          "windowId": {"type": "integer", "optional": true},
++          "kind": {
++            "type": "string",
++            "description": "mouse, wheel, key, text, touch or other."
++          },
++          "at": {"type": "number", "description": "Milliseconds since the epoch."}
++        }
++      }
++    ],
++    "functions": [
++      {
++        "name": "setOwnership",
++        "type": "function",
++        "description": "Writes the configured mode for a target with a monotonically increasing version.",
++        "parameters": [
++          {
++            "name": "request",
++            "type": "object",
++            "properties": {
++              "target": {"$ref": "Target"},
++              "mode": {"$ref": "Mode"},
++              "version": {"type": "integer", "minimum": 1}
++            }
++          }
++        ],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [{"name": "result", "$ref": "SetOwnershipResult"}]
++        }
++      },
++      {
++        "name": "heartbeat",
++        "type": "function",
++        "description": "Refreshes the liveness deadline of a target without changing its mode or version.",
++        "parameters": [
++          {
++            "name": "request",
++            "type": "object",
++            "properties": {
++              "target": {"$ref": "Target"},
++              "version": {"type": "integer", "minimum": 1}
++            }
++          }
++        ],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [{"name": "result", "$ref": "HeartbeatResult"}]
++        }
++      },
++      {
++        "name": "getOwnership",
++        "type": "function",
++        "description": "Returns the kernel's current view of a target without changing any state.",
++        "parameters": [
++          {
++            "name": "request",
++            "type": "object",
++            "properties": {"target": {"$ref": "Target"}}
++          }
++        ],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [{"name": "result", "$ref": "Snapshot"}]
++        }
++      },
++      {
++        "name": "grantInput",
++        "type": "function",
++        "description": "Issues an ASSIST input budget bound to the caller's own chrome.debugger session on the target tab.",
++        "parameters": [
++          {
++            "name": "request",
++            "type": "object",
++            "properties": {
++              "target": {"$ref": "Target"},
++              "actions": {"type": "integer", "minimum": 1},
++              "ttlMs": {"type": "integer", "minimum": 1},
++              "session": {
++                "type": "string",
++                "optional": true,
++                "description": "Opaque diagnostic token. Authorization always comes from the caller's own debugger session."
++              }
++            }
++          }
++        ],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [{"name": "result", "$ref": "GrantResult"}]
++        }
++      },
++      {
++        "name": "beginInputCommand",
++        "type": "function",
++        "description": "Opens a command scope that bills one grant unit and authorizes every input event of the session until the deadline.",
++        "parameters": [
++          {
++            "name": "request",
++            "type": "object",
++            "properties": {
++              "target": {"$ref": "Target"},
++              "commandId": {"type": "string"},
++              "kind": {"type": "string"},
++              "session": {"type": "string", "optional": true}
++            }
++          }
++        ],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [{"name": "result", "$ref": "CommandScopeResult"}]
++        }
++      },
++      {
++        "name": "endInputCommand",
++        "type": "function",
++        "description": "Closes a command scope. Cancelling a scope that authorized no input refunds its unit.",
++        "parameters": [
++          {
++            "name": "request",
++            "type": "object",
++            "properties": {
++              "target": {"$ref": "Target"},
++              "commandId": {"type": "string"},
++              "outcome": {"$ref": "CommandOutcome", "optional": true},
++              "session": {"type": "string", "optional": true}
++            }
++          }
++        ],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [{"name": "result", "$ref": "EndCommandResult"}]
++        }
++      }
++    ],
++    "events": [
++      {
++        "name": "onHumanPresence",
++        "type": "function",
++        "description": "Fired (debounced to at most one event per 300ms) when human input is observed on a tab. Only delivered to the trusted extension.",
++        "parameters": [{"name": "event", "$ref": "HumanPresenceEvent"}]
++      }
++    ]
++  }
++]
+diff --git a/chrome/common/extensions/api/browser_cli_input_ownership_availability.cc b/chrome/common/extensions/api/browser_cli_input_ownership_availability.cc
+new file mode 100644
+index 0000000..2980989
+--- /dev/null
++++ b/chrome/common/extensions/api/browser_cli_input_ownership_availability.cc
+@@ -0,0 +1,69 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/common/extensions/api/browser_cli_input_ownership_availability.h"
++
++#include <string_view>
++
++#include "base/command_line.h"
++#include "base/feature_list.h"
++#include "content/public/common/content_features.h"
++#include "extensions/common/context_data.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/features/feature.h"
++#include "extensions/common/mojom/context_type.mojom.h"
++#include "url/gurl.h"
++
++namespace extensions::browser_cli_input_ownership_availability {
++
++namespace {
++
++// The feature (namespace) this delegated check applies to.
++constexpr char kInputOwnershipFeature[] = "browserCli.inputOwnership";
++
++// Mirrors `kBrowserCliBackgroundPresentationSwitch` in
++// ui/views/widget/browser_cli_presentation_policy.h. It is duplicated because
++// chrome/common must not depend on //ui/views; if the switch is ever renamed
++// this check simply stops matching and the API stays unavailable (fail closed).
++constexpr char kManagedModeSwitch[] = "browser-cli-background-presentation";
++
++bool AreInputOwnershipFeaturesAvailable(
++    std::string_view api_full_name,
++    const extensions::Extension* extension,
++    extensions::mojom::ContextType context,
++    const GURL& url,
++    extensions::Feature::Platform platform,
++    int context_id,
++    bool check_developer_mode,
++    const extensions::ContextData& context_data) {
++  if (api_full_name != kInputOwnershipFeature) {
++    return false;
++  }
++  // The namespace only exists while the kernel is actually enforcing; the
++  // content write paths fail closed on their own, this keeps the API itself
++  // absent (design §6.2).
++  if (!base::FeatureList::IsEnabled(
++          ::features::kInputOwnershipEnforcement)) {
++    return false;
++  }
++  // Managed mode is the same precondition that makes the capability namespace
++  // report "enhanced"; without it the browser has no presentation gate and the
++  // ownership API is not meaningful.
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kManagedModeSwitch)) {
++    return false;
++  }
++  // The caller must be an extension context, never a content script or a web
++  // page (the id allowlist in `_api_features.json` is checked separately).
++  return context == extensions::mojom::ContextType::kPrivilegedExtension;
++}
++
++}  // namespace
++
++Feature::FeatureDelegatedAvailabilityCheckMap CreateAvailabilityCheckMap() {
++  Feature::FeatureDelegatedAvailabilityCheckMap map;
++  map.emplace(kInputOwnershipFeature, &AreInputOwnershipFeaturesAvailable);
++  return map;
++}
++
++}  // namespace extensions::browser_cli_input_ownership_availability
+diff --git a/chrome/common/extensions/api/browser_cli_input_ownership_availability.h b/chrome/common/extensions/api/browser_cli_input_ownership_availability.h
+new file mode 100644
+index 0000000..0afc314
+--- /dev/null
++++ b/chrome/common/extensions/api/browser_cli_input_ownership_availability.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_COMMON_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_AVAILABILITY_H_
++#define CHROME_COMMON_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_AVAILABILITY_H_
++
++#include "extensions/common/features/feature.h"
++
++namespace extensions::browser_cli_input_ownership_availability {
++
++// Browser CLI P3: returns the delegated availability handler for
++// `browserCli.inputOwnership`. It makes the namespace invisible unless the
++// content feature `InputOwnershipEnforcement` is enabled and the browser runs
++// in managed mode, so a stock Chrome (or a feature-off build) never exposes a
++// half-wired write path to the arbitration state.
++Feature::FeatureDelegatedAvailabilityCheckMap CreateAvailabilityCheckMap();
++
++}  // namespace extensions::browser_cli_input_ownership_availability
++
++#endif  // CHROME_COMMON_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_AVAILABILITY_H_
+diff --git a/chrome/common/scoped_chrome_extensions_client.cc b/chrome/common/scoped_chrome_extensions_client.cc
+index 0c056ab..5a4b061 100644
+--- a/chrome/common/scoped_chrome_extensions_client.cc
++++ b/chrome/common/scoped_chrome_extensions_client.cc
+@@ -10,6 +10,7 @@
+ #include "base/check.h"
+ #include "build/build_config.h"
+ #include "chrome/common/controlled_frame/controlled_frame.h"
++#include "chrome/common/extensions/api/browser_cli_input_ownership_availability.h"
+ #include "chrome/common/extensions/chrome_extensions_client.h"
+ #include "extensions/buildflags/buildflags.h"
+ #include "extensions/common/extensions_client.h"
+@@ -42,6 +43,7 @@ namespace {
+ Feature::FeatureDelegatedAvailabilityCheckMap
+ CombineAllAvailabilityCheckMaps() {
+   Feature::FeatureDelegatedAvailabilityCheckMap map_list[] = {
++      browser_cli_input_ownership_availability::CreateAvailabilityCheckMap(),
+       controlled_frame::CreateAvailabilityCheckMap(),
+       mime_handler_availability::CreateAvailabilityCheckMap(),
+       user_scripts_availability::CreateAvailabilityCheckMap(),
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index d2b1335..dc7ee97 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -1119,6 +1119,7 @@ source_set("browser") {
+     "in_memory_federated_permission_context.h",
+     "indexed_db/indexed_db_internals_ui.cc",
+     "indexed_db/indexed_db_internals_ui.h",
++    "input_ownership/input_ownership_api.cc",
+     "input_ownership/input_ownership_controller.cc",
+     "input_ownership/input_ownership_controller.h",
+     "input_ownership/input_ownership_decider.cc",
+diff --git a/content/browser/devtools/devtools_agent_host_impl.cc b/content/browser/devtools/devtools_agent_host_impl.cc
+index 44ffa91..0e237cb 100644
+--- a/content/browser/devtools/devtools_agent_host_impl.cc
++++ b/content/browser/devtools/devtools_agent_host_impl.cc
+@@ -175,6 +175,13 @@ DevToolsAgentHost::List DevToolsAgentHost::GetAll() {
+   return result;
+ }
+ 
++InputOwnershipSessionToken DevToolsAgentHost::GetInputOwnershipSessionForClient(
++    DevToolsAgentHostClient* client) {
++  // Hosts that do not represent an in-process DevTools session (external
++  // proxies, browser targets) cannot own an input grant.
++  return nullptr;
++}
++
+ // static
+ DevToolsAgentHost::List DevToolsAgentHost::GetOrCreateAll() {
+   List result;
+@@ -380,6 +387,14 @@ bool DevToolsAgentHostImpl::IsAttached() {
+   return !sessions_.empty();
+ }
+ 
++InputOwnershipSessionToken DevToolsAgentHostImpl::GetInputOwnershipSessionForClient(
++    DevToolsAgentHostClient* client) {  // Browser CLI (patch 029): expose the session token of an attached client so
++  // the trusted extension API can bind an input grant to that exact session.
++  // The token is the same opaque `DevToolsSession*` used by InputHandler.
++  DevToolsSession* session = SessionByClient(client);
++  return static_cast<InputOwnershipSessionToken>(session);
++}
++
+ void DevToolsAgentHostImpl::InspectElement(RenderFrameHost* frame_host,
+                                            int x,
+                                            int y) {}
+diff --git a/content/browser/devtools/devtools_agent_host_impl.h b/content/browser/devtools/devtools_agent_host_impl.h
+index 78239ce..75fff8a 100644
+--- a/content/browser/devtools/devtools_agent_host_impl.h
++++ b/content/browser/devtools/devtools_agent_host_impl.h
+@@ -49,6 +49,8 @@ class CONTENT_EXPORT DevToolsAgentHostImpl : public DevToolsAgentHost {
+   void DispatchProtocolMessage(DevToolsAgentHostClient* client,
+                                base::span<const uint8_t> message) override;
+   bool IsAttached() override;
++  InputOwnershipSessionToken GetInputOwnershipSessionForClient(
++      DevToolsAgentHostClient* client) override;
+   void InspectElement(RenderFrameHost* frame_host, int x, int y) override;
+   std::string GetId() override;
+   std::string CreateIOStreamFromData(
+diff --git a/content/browser/input_ownership/input_ownership_api.cc b/content/browser/input_ownership/input_ownership_api.cc
+new file mode 100644
+index 0000000..116441f
+--- /dev/null
++++ b/content/browser/input_ownership/input_ownership_api.cc
+@@ -0,0 +1,129 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Trusted production entry points for input ownership arbitration (Browser CLI
++// K12). The chrome extension API layer is the only caller; it has already
++// authenticated the extension (id hash allowlist + context + location +
++// managed mode) before it reaches these functions. Content therefore performs
++// no extension identity checks here; it only resolves the per-WebContents
++// controller and fails closed when the feature is off or the tab is gone.
++
++#include "content/public/browser/input_ownership.h"
++
++#include "base/feature_list.h"
++#include "content/browser/input_ownership/input_ownership_controller.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/public/common/content_features.h"
++
++namespace content {
++
++namespace {
++
++InputOwnershipController* GetController(WebContents* web_contents) {
++  if (!web_contents) {
++    return nullptr;
++  }
++  if (!base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
++    return nullptr;
++  }
++  // Every browser-process WebContents is a WebContentsImpl. The controller is
++  // only created while the feature is on (WebContentsImpl gate), so the second
++  // feature check above is belt-and-braces.
++  return static_cast<WebContentsImpl*>(web_contents)
++      ->GetInputOwnershipController();
++}
++
++InputOwnershipApplyResult UnknownTarget() {
++  InputOwnershipApplyResult result;
++  result.result = InputOwnershipWriteResult::kUnknownTarget;
++  result.snapshot = InputOwnershipSnapshot();
++  return result;
++}
++
++InputOwnershipWriteResult FeatureDisabledOrUnknownTarget(
++    WebContents* web_contents) {
++  if (!base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
++    return InputOwnershipWriteResult::kFeatureDisabled;
++  }
++  return InputOwnershipWriteResult::kUnknownTarget;
++}
++
++}  // namespace
++
++InputOwnershipApplyResult SetInputOwnership(WebContents* web_contents,
++                                            InputOwnershipMode mode,
++                                            uint64_t version) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    if (base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
++      return UnknownTarget();
++    }
++    InputOwnershipApplyResult result;
++    result.result = InputOwnershipWriteResult::kFeatureDisabled;
++    return result;
++  }
++  return controller->SetOwnership(mode, version);
++}
++
++InputOwnershipApplyResult HeartbeatInputOwnership(WebContents* web_contents,
++                                                  uint64_t version) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    if (base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
++      return UnknownTarget();
++    }
++    InputOwnershipApplyResult result;
++    result.result = InputOwnershipWriteResult::kFeatureDisabled;
++    return result;
++  }
++  return controller->Heartbeat(version);
++}
++
++InputOwnershipGrantInfo GrantDebuggerInput(
++    WebContents* web_contents,
++    InputOwnershipSessionToken session,
++    int actions,
++    base::TimeDelta ttl) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    return InputOwnershipGrantInfo();
++  }
++  return controller->GrantSessionInput(session, actions, ttl);
++}
++
++InputOwnershipCommandScope BeginInputOwnershipCommand(
++    WebContents* web_contents,
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    base::TimeDelta max_duration) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    InputOwnershipCommandScope scope;
++    scope.result = FeatureDisabledOrUnknownTarget(web_contents);
++    return scope;
++  }
++  return controller->BeginSessionCommand(session, command_id, max_duration);
++}
++
++InputOwnershipWriteResult EndInputOwnershipCommand(
++    WebContents* web_contents,
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    bool cancelled) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    return FeatureDisabledOrUnknownTarget(web_contents);
++  }
++  return controller->EndSessionCommand(session, command_id, cancelled);
++}
++
++InputOwnershipSnapshot GetInputOwnershipSnapshot(WebContents* web_contents) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    return InputOwnershipSnapshot();
++  }
++  return controller->SnapshotNow();
++}
++
++}  // namespace content
+diff --git a/content/browser/input_ownership/input_ownership_controller.cc b/content/browser/input_ownership/input_ownership_controller.cc
+index 8cc7180..e6fad03 100644
+--- a/content/browser/input_ownership/input_ownership_controller.cc
++++ b/content/browser/input_ownership/input_ownership_controller.cc
+@@ -4,10 +4,48 @@
+ 
+ #include "content/browser/input_ownership/input_ownership_controller.h"
+ 
++#include "base/no_destructor.h"
++#include "content/public/browser/web_contents.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ 
+ namespace content {
+ 
++namespace {
++
++// Set only by the trusted chrome layer (SetInputOwnershipHumanPresenceCallback)
++// and always on the UI thread.
++InputOwnershipHumanPresenceCallback& HumanPresenceCallback() {
++  static base::NoDestructor<InputOwnershipHumanPresenceCallback> callback;
++  return *callback;
++}
++
++InputOwnershipHumanPresenceKind ClassifyEvent(
++    const blink::WebInputEvent& event) {
++  const blink::WebInputEvent::Type type = event.GetType();
++  if (type == blink::WebInputEvent::Type::kMouseWheel) {
++    return InputOwnershipHumanPresenceKind::kWheel;
++  }
++  if (blink::WebInputEvent::IsMouseEventType(type) ||
++      type == blink::WebInputEvent::Type::kMouseWheel) {
++    return InputOwnershipHumanPresenceKind::kMouse;
++  }
++  if (blink::WebInputEvent::IsKeyboardEventType(type)) {
++    return InputOwnershipHumanPresenceKind::kKey;
++  }
++  if (blink::WebInputEvent::IsTouchEventType(type) ||
++      blink::WebInputEvent::IsGestureEventType(type)) {
++    return InputOwnershipHumanPresenceKind::kTouch;
++  }
++  return InputOwnershipHumanPresenceKind::kOther;
++}
++
++}  // namespace
++
++void SetInputOwnershipHumanPresenceCallback(
++    InputOwnershipHumanPresenceCallback callback) {
++  HumanPresenceCallback() = std::move(callback);
++}
++
+ InputOwnershipController::InputOwnershipController(WebContents* web_contents)
+     : WebContentsUserData<InputOwnershipController>(*web_contents) {}
+ 
+@@ -18,20 +56,42 @@ InputOwnershipController::~InputOwnershipController() {
+   decider_.ClearDebuggerSessions();
+ }
+ 
++void InputOwnershipController::MaybeReportHumanPresence(
++    int previous_count,
++    InputOwnershipHumanPresenceKind kind) {
++  if (decider_.human_presence_count() == previous_count) {
++    return;
++  }
++  const InputOwnershipHumanPresenceCallback& callback = HumanPresenceCallback();
++  if (!callback.is_null()) {
++    callback.Run(&GetWebContents(), kind, base::TimeTicks::Now());
++  }
++}
++
+ bool InputOwnershipController::ShouldDropEvent(
+     const blink::WebInputEvent& event) {
+-  return !decider_.ShouldDeliverEvent(event);
++  const int previous_presence = decider_.human_presence_count();
++  const bool deliver = decider_.ShouldDeliverEvent(event);
++  MaybeReportHumanPresence(previous_presence, ClassifyEvent(event));
++  return !deliver;
+ }
+ 
+ bool InputOwnershipController::ShouldDropSessionEvent(
+     InputOwnershipSessionToken session,
+     const blink::WebInputEvent& event) {
+-  return !decider_.ShouldDeliverDebuggerEvent(session, event);
++  const int previous_presence = decider_.human_presence_count();
++  const bool deliver = decider_.ShouldDeliverDebuggerEvent(session, event);
++  MaybeReportHumanPresence(previous_presence, ClassifyEvent(event));
++  return !deliver;
+ }
+ 
+ bool InputOwnershipController::ShouldDropSessionTextInsert(
+     InputOwnershipSessionToken session) {
+-  return !decider_.ShouldDeliverDebuggerTextInsert(session);
++  const int previous_presence = decider_.human_presence_count();
++  const bool deliver = decider_.ShouldDeliverDebuggerTextInsert(session);
++  MaybeReportHumanPresence(previous_presence,
++                           InputOwnershipHumanPresenceKind::kText);
++  return !deliver;
+ }
+ 
+ bool InputOwnershipController::ShouldDropSessionCommand(
+@@ -64,6 +124,45 @@ void InputOwnershipController::RevokeDebuggerSession(
+   decider_.RevokeDebuggerSession(session);
+ }
+ 
++InputOwnershipApplyResult InputOwnershipController::SetOwnership(
++    InputOwnershipMode mode,
++    uint64_t version) {
++  return decider_.SetOwnership(mode, version, base::TimeTicks::Now());
++}
++
++InputOwnershipApplyResult InputOwnershipController::Heartbeat(
++    uint64_t version) {
++  return decider_.Heartbeat(version, base::TimeTicks::Now());
++}
++
++InputOwnershipGrantInfo InputOwnershipController::GrantSessionInput(
++    InputOwnershipSessionToken session,
++    int actions,
++    base::TimeDelta ttl) {
++  return decider_.GrantDebuggerInput(session, actions, ttl,
++                                     base::TimeTicks::Now());
++}
++
++InputOwnershipCommandScope InputOwnershipController::BeginSessionCommand(
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    base::TimeDelta max_duration) {
++  return decider_.BeginCommand(session, command_id, max_duration,
++                               base::TimeTicks::Now());
++}
++
++InputOwnershipWriteResult InputOwnershipController::EndSessionCommand(
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    bool cancelled) {
++  return decider_.EndCommand(session, command_id, cancelled,
++                             base::TimeTicks::Now());
++}
++
++InputOwnershipSnapshot InputOwnershipController::SnapshotNow() {
++  return decider_.SnapshotAt(base::TimeTicks::Now());
++}
++
+ void InputOwnershipController::SetModeForTesting(InputOwnershipMode mode) {
+   decider_.SetModeForTesting(mode);
+ }
+diff --git a/content/browser/input_ownership/input_ownership_controller.h b/content/browser/input_ownership/input_ownership_controller.h
+index fb71b0e..5b16d92 100644
+--- a/content/browser/input_ownership/input_ownership_controller.h
++++ b/content/browser/input_ownership/input_ownership_controller.h
+@@ -111,6 +111,25 @@ class CONTENT_EXPORT InputOwnershipController
+ 
+   InputOwnershipSnapshot snapshot() const { return decider_.snapshot(); }
+ 
++  // Trusted production writes (only reachable through the free functions in
++  // content/public/browser/input_ownership.h, i.e. from the chrome extension
++  // API after it authenticated the calling extension).
++  InputOwnershipApplyResult SetOwnership(InputOwnershipMode mode,
++                                         uint64_t version);
++  InputOwnershipApplyResult Heartbeat(uint64_t version);
++  InputOwnershipGrantInfo GrantSessionInput(InputOwnershipSessionToken session,
++                                            int actions,
++                                            base::TimeDelta ttl);
++  InputOwnershipCommandScope BeginSessionCommand(
++      InputOwnershipSessionToken session,
++      const std::string& command_id,
++      base::TimeDelta max_duration);
++  InputOwnershipWriteResult EndSessionCommand(
++      InputOwnershipSessionToken session,
++      const std::string& command_id,
++      bool cancelled);
++  InputOwnershipSnapshot SnapshotNow();
++
+   // Testing-only. These deliberately ignore
+   // `features::kInputOwnershipEnforcement` so tests can prove that stored
+   // state alone never changes delivery while the feature is off.
+@@ -135,6 +154,12 @@ class CONTENT_EXPORT InputOwnershipController
+   explicit InputOwnershipController(WebContents* web_contents);
+   friend class WebContentsUserData<InputOwnershipController>;
+ 
++  // Reports a human presence event added by the last decider call (the decider
++  // debounces to at most one per 300ms). `previous_count` is the debounced
++  // counter value observed before the call.
++  void MaybeReportHumanPresence(int previous_count,
++                                InputOwnershipHumanPresenceKind kind);
++
+   InputOwnershipDecider decider_;
+ 
+   // Depth of live ScopedInputOwnershipAuthorization objects. Input dispatch is
+diff --git a/content/browser/input_ownership/input_ownership_controller_unittest.cc b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+index 2c72803..9aa4eee 100644
+--- a/content/browser/input_ownership/input_ownership_controller_unittest.cc
++++ b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+@@ -989,4 +989,352 @@ TEST_F(InputOwnershipControllerTest, AutomationCommandAndWindow) {
+   EXPECT_EQ(2, controller->RemainingGrantForTesting(SessionA()));
+ }
+ 
++// --- Production API (K10-K13) ----------------------------------------------
++
++// K10: a target that stops being refreshed degrades to the effective ASSIST
++// mode after 30s, drops every grant, and keeps the configured mode so one
++// heartbeat restores it without a version bump.
++TEST_F(InputOwnershipDeciderTest, StaleDegradesToAssistWithoutRewritingMode) {
++  EnableFeature();
++  const base::TimeTicks t0 = T0();
++  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 1, t0);
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
++  EXPECT_FALSE(applied.snapshot.stale);
++
++  decider_.GrantDebuggerInput(SessionA(), 3, base::Seconds(60), t0);
++  ASSERT_EQ(3, Remaining(SessionA()));
++
++  // 30s without an accepted update: effective mode is ASSIST.
++  const base::TimeTicks stale_at = t0 + base::Seconds(31);
++  EXPECT_TRUE(decider_.IsStale(stale_at));
++  EXPECT_EQ(InputOwnershipMode::kAssist, decider_.EffectiveMode(stale_at));
++  EXPECT_FALSE(Mouse(Type::kMouseDown, stale_at));
++  EXPECT_EQ(0, Remaining(SessionA()));
++
++  // The configured mode/version are untouched.
++  const InputOwnershipSnapshot snapshot = decider_.SnapshotAt(stale_at);
++  EXPECT_EQ(InputOwnershipMode::kAi, snapshot.mode);
++  EXPECT_EQ(1u, snapshot.version);
++  EXPECT_TRUE(snapshot.stale);
++
++  // One heartbeat restores the configured mode, no version bump.
++  applied = decider_.Heartbeat(1, stale_at);
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_FALSE(applied.snapshot.stale);
++  EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
++  EXPECT_EQ(1u, applied.snapshot.version);
++  EXPECT_TRUE(Mouse(Type::kMouseDown, stale_at));
++
++  // A stale target cannot deliver unattributed or grant-based debugger input.
++  const base::TimeTicks stale_again = stale_at + base::Seconds(31);
++  EXPECT_FALSE(UnattributedDebuggerMouse(Type::kMouseDown, stale_again));
++  EXPECT_FALSE(Mouse(Type::kMouseDown, stale_again));
++}
++
++// K11: version semantics - monotonic; same version/same mode idempotent;
++// same version/different mode conflicts; lower version is stale.
++TEST_F(InputOwnershipDeciderTest, SetOwnershipVersionSemantics) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++
++  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5, now);
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(5u, applied.snapshot.version);
++
++  // Same version, same mode: idempotent and refreshes last_update.
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5,
++                                  now + base::Seconds(10));
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(5u, applied.snapshot.version);
++  EXPECT_EQ(now + base::Seconds(10), applied.snapshot.last_update);
++
++  // Same version, different mode: conflict, state unchanged.
++  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 5, now);
++  EXPECT_EQ(InputOwnershipWriteResult::kVersionConflict, applied.result);
++  EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
++  EXPECT_EQ(5u, applied.snapshot.version);
++
++  // Lower version: stale, state unchanged.
++  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 4, now);
++  EXPECT_EQ(InputOwnershipWriteResult::kStaleVersion, applied.result);
++  EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
++
++  // Higher version wins, even with the same mode, and clears grants.
++  decider_.GrantDebuggerInput(SessionA(), 3, base::Seconds(10), now);
++  ASSERT_EQ(3, Remaining(SessionA()));
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 6, now);
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(6u, applied.snapshot.version);
++  EXPECT_EQ(0, Remaining(SessionA()));
++
++  // Version zero is never valid.
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 0, now);
++  EXPECT_EQ(InputOwnershipWriteResult::kInvalidArgument, applied.result);
++}
++
++// K11/K12: heartbeat must not advance the version, must reject an unknown
++// newer version, and must not clear a grant.
++TEST_F(InputOwnershipDeciderTest, HeartbeatDoesNotBumpVersionOrClearGrant) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 2, now).result);
++  decider_.GrantDebuggerInput(SessionA(), 2, base::Seconds(30), now);
++
++  auto applied = decider_.Heartbeat(2, now + base::Seconds(5));
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(2u, applied.snapshot.version);
++  EXPECT_EQ(2, Remaining(SessionA()));
++
++  applied = decider_.Heartbeat(3, now + base::Seconds(5));
++  EXPECT_EQ(InputOwnershipWriteResult::kVersionUnknown, applied.result);
++  EXPECT_EQ(2u, applied.snapshot.version);
++
++  applied = decider_.Heartbeat(1, now + base::Seconds(5));
++  EXPECT_EQ(InputOwnershipWriteResult::kStaleVersion, applied.result);
++}
++
++// Feature off: the production write entry points report FEATURE_DISABLED and
++// change nothing.
++TEST_F(InputOwnershipDeciderTest, ProductionWritesAreInertWhenFeatureOff) {
++  DisableFeature();
++  const base::TimeTicks now = T0();
++  EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
++            decider_.SetOwnership(InputOwnershipMode::kAi, 1, now).result);
++  EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
++            decider_.Heartbeat(1, now).result);
++  EXPECT_FALSE(
++      decider_.GrantDebuggerInput(SessionA(), 1, base::Seconds(10), now)
++          .granted);
++  EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
++            decider_.BeginCommand(SessionA(), "cmd", base::Seconds(5), now)
++                .result);
++  EXPECT_EQ(0u, decider_.snapshot().version);
++}
++
++// K12: one command scope == one grant, regardless of how many events the
++// command produces. The reserved unit stays spent after end().
++TEST_F(InputOwnershipDeciderTest, CommandScopeAuthorizesEventsForOneUnit) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++  decider_.GrantDebuggerInput(SessionA(), 2, base::Seconds(60), now);
++
++  auto scope = decider_.BeginCommand(SessionA(), "cmd-1", base::Seconds(10),
++                                     now);
++  ASSERT_TRUE(scope.ok());
++  EXPECT_FALSE(scope.scope_id.empty());
++  EXPECT_EQ(1, Remaining(SessionA()));
++
++  // A dblclick (two press/release pairs) and a burst of insertText cost
++  // nothing extra inside the scope.
++  for (int i = 0; i < 2; ++i) {
++    EXPECT_TRUE(Mouse(Type::kMouseDown, now));
++    EXPECT_TRUE(Mouse(Type::kMouseUp, now));
++  }
++  EXPECT_TRUE(Text(now));
++  EXPECT_TRUE(Text(now));
++  EXPECT_EQ(1, Remaining(SessionA()));
++
++  // Idempotent begin for the same command id does not bill again.
++  auto again = decider_.BeginCommand(SessionA(), "cmd-1",
++                                     base::Seconds(10), now);
++  ASSERT_TRUE(again.ok());
++  EXPECT_EQ(scope.scope_id, again.scope_id);
++  EXPECT_EQ(1, Remaining(SessionA()));
++
++  // Ending with outcome ok keeps the unit spent; the remaining unit is billed
++  // by the next press and then the session is exhausted.
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.EndCommand(SessionA(), "cmd-1", /*cancelled=*/false, now));
++  EXPECT_TRUE(Mouse(Type::kMouseDown, now + base::Milliseconds(10)));
++  EXPECT_EQ(0, Remaining(SessionA()));
++  EXPECT_FALSE(Mouse(Type::kMouseDown, now + base::Milliseconds(20)));
++
++  // Unknown command id is idempotent/tolerant.
++  EXPECT_EQ(InputOwnershipWriteResult::kUnknownCommand,
++            decider_.EndCommand(SessionA(), "nope", false, now));
++}
++
++// K12: cancelled scopes refund their reserved unit only when no input was
++// authorized inside them.
++TEST_F(InputOwnershipDeciderTest, CancelledCommandRefundsOnlyUnusedScope) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++  decider_.GrantDebuggerInput(SessionA(), 2, base::Seconds(60), now);
++
++  ASSERT_TRUE(decider_.BeginCommand(SessionA(), "unused", base::Seconds(10),
++                                    now)
++                  .ok());
++  EXPECT_EQ(1, Remaining(SessionA()));
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.EndCommand(SessionA(), "unused", /*cancelled=*/true, now));
++  EXPECT_EQ(2, Remaining(SessionA()));
++
++  ASSERT_TRUE(decider_.BeginCommand(SessionA(), "used", base::Seconds(10), now)
++                  .ok());
++  EXPECT_TRUE(Mouse(Type::kMouseMove, now));
++  EXPECT_EQ(1, Remaining(SessionA()));
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.EndCommand(SessionA(), "used", /*cancelled=*/true, now));
++  EXPECT_EQ(1, Remaining(SessionA()));
++}
++
++// K12: an expired command scope stops authorizing input; the reserved unit
++// stays spent and future events need a new grant.
++TEST_F(InputOwnershipDeciderTest, CommandScopeDeadlineIsAbsolute) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++  decider_.GrantDebuggerInput(SessionA(), 1, base::Seconds(60), now);
++  ASSERT_TRUE(decider_.BeginCommand(SessionA(), "cmd", base::Seconds(2), now)
++                  .ok());
++
++  EXPECT_TRUE(Mouse(Type::kMouseDown, now + base::Milliseconds(1999)));
++  // Scope expired: the next event has no unit left.
++  EXPECT_FALSE(Mouse(Type::kMouseDown, now + base::Seconds(2)));
++  EXPECT_EQ(0, Remaining(SessionA()));
++}
++
++// K12: begin without a grant fails closed; HUMAN never accepts a scope.
++TEST_F(InputOwnershipDeciderTest, BeginRequiresGrantAndRejectsHuman) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++  EXPECT_EQ(InputOwnershipWriteResult::kGrantRequired,
++            decider_.BeginCommand(SessionA(), "cmd", base::Seconds(5), now)
++                .result);
++
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kHuman, 2, now).result);
++  decider_.GrantDebuggerInput(SessionA(), 5, base::Seconds(60), now);
++  EXPECT_EQ(InputOwnershipWriteResult::kGrantRequired,
++            decider_.BeginCommand(SessionA(), "cmd", base::Seconds(5), now)
++                .result);
++  EXPECT_EQ(5, Remaining(SessionA()));
++}
++
++// --- Controller + free-function API tests -----------------------------------
++
++class InputOwnershipApiTest : public RenderViewHostTestHarness {};
++
++// The production free functions resolve the per-WebContents controller and
++// share the same state as the controller entry points.
++TEST_F(InputOwnershipApiTest, FreeFunctionsWriteThroughTheController) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(features::kInputOwnershipEnforcement);
++
++  const base::TimeTicks now = base::TimeTicks::Now();
++  auto applied =
++      SetInputOwnership(web_contents(), InputOwnershipMode::kAssist, 3);
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(InputOwnershipMode::kAssist, applied.snapshot.mode);
++  EXPECT_EQ(3u, applied.snapshot.version);
++
++  blink::WebMouseEvent debugger_mouse(Type::kMouseDown, kDebuggerModifiers,
++                                      now);
++  // ASSIST without a grant fails closed.
++  EXPECT_TRUE(
++      static_cast<WebContentsImpl*>(web_contents())
++          ->GetInputOwnershipController()
++          ->ShouldDropSessionEvent(SessionA(), debugger_mouse));
++
++  // The delivery check above bills one unit (one mouse press); grant a third so
++  // the command scope still has a unit to reserve.
++  const InputOwnershipGrantInfo grant =
++      GrantDebuggerInput(web_contents(), SessionA(), 3, base::Seconds(30));
++  EXPECT_TRUE(grant.granted);
++  EXPECT_EQ(3, grant.remaining);
++  EXPECT_FALSE(
++      static_cast<WebContentsImpl*>(web_contents())
++          ->GetInputOwnershipController()
++          ->ShouldDropSessionEvent(SessionA(), debugger_mouse));
++
++  const InputOwnershipCommandScope scope = BeginInputOwnershipCommand(
++      web_contents(), SessionA(), "cmd", base::Seconds(5));
++  ASSERT_TRUE(scope.ok());
++  EXPECT_EQ(1, scope.grant_remaining);
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            EndInputOwnershipCommand(web_contents(), SessionA(), "cmd", false));
++
++  const InputOwnershipSnapshot snapshot = GetInputOwnershipSnapshot(
++      web_contents());
++  EXPECT_EQ(InputOwnershipMode::kAssist, snapshot.mode);
++  EXPECT_EQ(3u, snapshot.version);
++  EXPECT_FALSE(snapshot.stale);
++}
++
++// Feature off: the free functions never create a controller and report
++// FEATURE_DISABLED / a default fail-closed snapshot.
++TEST_F(InputOwnershipApiTest, FeatureOffFreeFunctionsAreInert) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitWithFeatureState(features::kInputOwnershipEnforcement,
++                                     false);
++  EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
++            SetInputOwnership(web_contents(), InputOwnershipMode::kAi, 1)
++                .result);
++  EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
++            HeartbeatInputOwnership(web_contents(), 1).result);
++  EXPECT_FALSE(GrantDebuggerInput(web_contents(), SessionA(), 1,
++                                  base::Seconds(1))
++                   .granted);
++  const InputOwnershipSnapshot snapshot = GetInputOwnershipSnapshot(
++      web_contents());
++  EXPECT_EQ(InputOwnershipMode::kAssist, snapshot.mode);
++  EXPECT_EQ(0u, snapshot.version);
++}
++
++// K13: the human presence callback fires (debounced) for human events and not
++// for debugger-injected ones.
++TEST_F(InputOwnershipApiTest, HumanPresenceCallbackFiresForHumanInputOnly) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(features::kInputOwnershipEnforcement);
++
++  SetInputOwnership(web_contents(), InputOwnershipMode::kAi, 1);
++
++  int callbacks = 0;
++  InputOwnershipHumanPresenceKind last_kind =
++      InputOwnershipHumanPresenceKind::kOther;
++  SetInputOwnershipHumanPresenceCallback(base::BindRepeating(
++      [](int* callbacks, InputOwnershipHumanPresenceKind* last_kind,
++         WebContents* contents, InputOwnershipHumanPresenceKind kind,
++         base::TimeTicks at) {
++        ++*callbacks;
++        *last_kind = kind;
++        EXPECT_TRUE(contents);
++        EXPECT_FALSE(at.is_null());
++      },
++      &callbacks, &last_kind));
++
++  InputOwnershipController* controller =
++      static_cast<WebContentsImpl*>(web_contents())
++          ->GetInputOwnershipController();
++  ASSERT_TRUE(controller);
++
++  const base::TimeTicks now = base::TimeTicks::Now();
++  blink::WebMouseEvent human_mouse(Type::kMouseDown, kHumanModifiers, now);
++  EXPECT_FALSE(controller->ShouldDropEvent(human_mouse));  // paused, not dropped
++  EXPECT_EQ(1, callbacks);
++  EXPECT_EQ(InputOwnershipHumanPresenceKind::kMouse, last_kind);
++
++  // Debounced within 300ms.
++  EXPECT_FALSE(controller->ShouldDropEvent(human_mouse));
++  EXPECT_EQ(1, callbacks);
++
++  // A debugger event is not human presence.
++  blink::WebMouseEvent debugger_mouse(Type::kMouseDown, kDebuggerModifiers,
++                                      now);
++  controller->ShouldDropSessionEvent(SessionA(), debugger_mouse);
++  EXPECT_EQ(1, callbacks);
++
++  SetInputOwnershipHumanPresenceCallback(
++      InputOwnershipHumanPresenceCallback());
++}
++
+ }  // namespace content
+diff --git a/content/browser/input_ownership/input_ownership_decider.cc b/content/browser/input_ownership/input_ownership_decider.cc
+index 7abe469..de963ca 100644
+--- a/content/browser/input_ownership/input_ownership_decider.cc
++++ b/content/browser/input_ownership/input_ownership_decider.cc
+@@ -7,6 +7,7 @@
+ #include <algorithm>
+ 
+ #include "base/feature_list.h"
++#include "base/strings/string_number_conversions.h"
+ #include "content/public/common/content_features.h"
+ #include "third_party/blink/public/common/input/web_input_event.h"
+ 
+@@ -47,6 +48,20 @@ constexpr base::TimeDelta kHumanPresenceDebounce = base::Milliseconds(300);
+ // keeps a leaked window from lasting forever.
+ constexpr base::TimeDelta kMaxAutomationEventWindow = base::Seconds(5);
+ 
++// A target that has not been refreshed by an accepted setOwnership() or
++// heartbeat() for this long degrades to the effective kAssist mode and drops
++// every grant. The configured mode is kept, so one heartbeat restores it
++// without a version bump (design §3.3).
++constexpr base::TimeDelta kOwnershipStaleAfter = base::Seconds(30);
++
++// Upper bounds for a command scope. A scope never outlives the grant it
++// reserved, and an unreasonable caller-provided duration is clamped.
++constexpr base::TimeDelta kMaxCommandScope = base::Minutes(2);
++
++// A single session may hold only a handful of scopes; this bounds the memory a
++// compromised (or buggy) trusted extension can pin.
++constexpr size_t kMaxCommandScopesPerSession = 8;
++
+ bool IsFeatureEnabled() {
+   return base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement);
+ }
+@@ -61,11 +76,57 @@ bool InputOwnershipDecider::IsDebuggerEvent(
+   return (event.GetModifiers() & blink::WebInputEvent::kFromDebugger) != 0;
+ }
+ 
+-bool InputOwnershipDecider::UnattributedDebuggerAllowed() const {
++bool InputOwnershipDecider::UnattributedDebuggerAllowed(
++    base::TimeTicks now) const {
+   // A debugger event without a session token has no grant bucket to bill, so it
+   // is only acceptable where the whole tab is owned by automation. ASSIST and
+   // HUMAN fail closed.
+-  return mode_ == InputOwnershipMode::kAi;
++  return EffectiveMode(now) == InputOwnershipMode::kAi;
++}
++
++void InputOwnershipDecider::Refresh(base::TimeTicks now) {
++  if (last_update_.is_null()) {
++    // Never refreshed: the target is already in the fail-closed kAssist mode,
++    // there is nothing to degrade.
++    stale_ = false;
++    return;
++  }
++  const bool stale = now - last_update_ > kOwnershipStaleAfter;
++  if (stale && !stale_) {
++    // Entering the stale state drops every grant, scope and the automation
++    // window exactly once (design §3.2/§3.3). `mode_`/`version_` are kept.
++    ClearDebuggerSessions();
++    ClearAutomationEventWindow();
++  }
++  stale_ = stale;
++}
++
++bool InputOwnershipDecider::IsStale(base::TimeTicks now) const {
++  if (last_update_.is_null()) {
++    return false;
++  }
++  return now - last_update_ > kOwnershipStaleAfter;
++}
++
++InputOwnershipMode InputOwnershipDecider::EffectiveMode(
++    base::TimeTicks now) const {
++  return IsStale(now) ? InputOwnershipMode::kAssist : mode_;
++}
++
++InputOwnershipSnapshot InputOwnershipDecider::snapshot() const {
++  InputOwnershipSnapshot snapshot;
++  snapshot.mode = mode_;
++  snapshot.effective_mode =
++      stale_ ? InputOwnershipMode::kAssist : mode_;
++  snapshot.version = version_;
++  snapshot.stale = stale_;
++  snapshot.last_update = last_update_;
++  return snapshot;
++}
++
++InputOwnershipSnapshot InputOwnershipDecider::SnapshotAt(base::TimeTicks now) {
++  Refresh(now);
++  return snapshot();
+ }
+ 
+ bool InputOwnershipDecider::ShouldDeliverEvent(const blink::WebInputEvent& event,
+@@ -83,11 +144,12 @@ bool InputOwnershipDecider::ShouldDeliverEvent(const blink::WebInputEvent& event
+     return true;
+   }
+ 
++  Refresh(now);
+   PurgeExpired(now);
+   if (IsDebuggerInputPaused(now)) {
+     return false;
+   }
+-  return UnattributedDebuggerAllowed();
++  return UnattributedDebuggerAllowed(now);
+ }
+ 
+ bool InputOwnershipDecider::ShouldDeliverDebuggerEvent(
+@@ -106,12 +168,13 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerEvent(
+     return true;
+   }
+ 
++  Refresh(now);
+   PurgeExpired(now);
+   if (IsDebuggerInputPaused(now)) {
+     return false;
+   }
+ 
+-  switch (mode_) {
++  switch (EffectiveMode(now)) {
+     case InputOwnershipMode::kAi:
+       return true;
+     case InputOwnershipMode::kHuman:
+@@ -121,7 +184,7 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerEvent(
+   }
+ 
+   if (session == nullptr) {
+-    return UnattributedDebuggerAllowed();
++    return UnattributedDebuggerAllowed(now);
+   }
+ 
+   DebuggerSessionState* state = FindSession(session);
+@@ -129,6 +192,13 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerEvent(
+     return false;
+   }
+ 
++  // A live command scope authorizes every event of this session for one grant
++  // unit (design §1.4/§5.1): one extension command == one kernel grant.
++  if (state->HasLiveScope(now)) {
++    state->NoteScopeAuthorized(now);
++    return true;
++  }
++
+   const blink::WebInputEvent::Type type = event.GetType();
+ 
+   if (blink::WebInputEvent::IsMouseEventType(type)) {
+@@ -152,12 +222,13 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerTextInsert(
+     return true;
+   }
+ 
++  Refresh(now);
+   PurgeExpired(now);
+   if (IsDebuggerInputPaused(now)) {
+     return false;
+   }
+ 
+-  switch (mode_) {
++  switch (EffectiveMode(now)) {
+     case InputOwnershipMode::kAi:
+       return true;
+     case InputOwnershipMode::kHuman:
+@@ -167,7 +238,7 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerTextInsert(
+   }
+ 
+   if (session == nullptr) {
+-    return UnattributedDebuggerAllowed();
++    return UnattributedDebuggerAllowed(now);
+   }
+ 
+   DebuggerSessionState* state = FindSession(session);
+@@ -175,6 +246,11 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerTextInsert(
+     return false;
+   }
+ 
++  if (state->HasLiveScope(now)) {
++    state->NoteScopeAuthorized(now);
++    return true;
++  }
++
+   // Consecutive insertions are treated as one gesture (typing). The window is
+   // capped by the absolute grant deadline, so a steady stream of insertions can
+   // never keep an expired grant alive.
+@@ -207,12 +283,13 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerCommand(
+     return true;
+   }
+ 
++  Refresh(now);
+   PurgeExpired(now);
+   if (IsDebuggerInputPaused(now)) {
+     return false;
+   }
+ 
+-  switch (mode_) {
++  switch (EffectiveMode(now)) {
+     case InputOwnershipMode::kAi:
+       last_command_kind_ = kind;
+       return true;
+@@ -223,11 +300,21 @@ bool InputOwnershipDecider::ShouldDeliverDebuggerCommand(
+   }
+ 
+   if (session == nullptr) {
+-    return UnattributedDebuggerAllowed();
++    return UnattributedDebuggerAllowed(now);
+   }
+ 
+   DebuggerSessionState* state = FindSession(session);
+-  if (!state || !ConsumeGrant(*state, now)) {
++  if (!state) {
++    return false;
++  }
++
++  if (state->HasLiveScope(now)) {
++    state->NoteScopeAuthorized(now);
++    last_command_kind_ = kind;
++    return true;
++  }
++
++  if (!ConsumeGrant(*state, now)) {
+     return false;
+   }
+   last_command_kind_ = kind;
+@@ -391,6 +478,256 @@ void InputOwnershipDecider::NotifyHumanPresenceForTesting(base::TimeTicks now) {
+   NoteHumanPresence(now);
+ }
+ 
++InputOwnershipApplyResult InputOwnershipDecider::SetOwnership(
++    InputOwnershipMode mode,
++    uint64_t version,
++    base::TimeTicks now) {
++  InputOwnershipApplyResult result;
++  if (!IsFeatureEnabled()) {
++    result.result = InputOwnershipWriteResult::kFeatureDisabled;
++    result.snapshot = snapshot();
++    return result;
++  }
++  Refresh(now);
++  result.snapshot = snapshot();
++
++  if (version == 0) {
++    result.result = InputOwnershipWriteResult::kInvalidArgument;
++    return result;
++  }
++  if (version < version_) {
++    result.result = InputOwnershipWriteResult::kStaleVersion;
++    return result;
++  }
++  if (version == version_) {
++    if (mode != mode_) {
++      result.result = InputOwnershipWriteResult::kVersionConflict;
++      return result;
++    }
++    // Idempotent replay (same version, same mode): only refresh last_update so
++    // a replayed setOwnership() also acts as a heartbeat.
++    last_update_ = now;
++    stale_ = false;
++    result.result = InputOwnershipWriteResult::kAccepted;
++    result.snapshot = snapshot();
++    return result;
++  }
++
++  // A newer version always wins. A mode change clears the grants (and stale
++  // gesture/scope state); a pure version bump also clears them, because the
++  // embedder is re-establishing the whole target state (design §1.2).
++  mode_ = mode;
++  version_ = version;
++  ClearDebuggerSessions();
++  ClearAutomationEventWindow();
++  last_update_ = now;
++  stale_ = false;
++
++  result.result = InputOwnershipWriteResult::kAccepted;
++  result.snapshot = snapshot();
++  return result;
++}
++
++InputOwnershipApplyResult InputOwnershipDecider::Heartbeat(
++    uint64_t version,
++    base::TimeTicks now) {
++  InputOwnershipApplyResult result;
++  if (!IsFeatureEnabled()) {
++    result.result = InputOwnershipWriteResult::kFeatureDisabled;
++    result.snapshot = snapshot();
++    return result;
++  }
++  Refresh(now);
++  result.snapshot = snapshot();
++
++  if (version < version_) {
++    result.result = InputOwnershipWriteResult::kStaleVersion;
++    return result;
++  }
++  if (version > version_) {
++    // Only SetOwnership() may advance the version.
++    result.result = InputOwnershipWriteResult::kVersionUnknown;
++    return result;
++  }
++
++  // A heartbeat never changes the mode, never advances the version and never
++  // clears grants; it only proves the embedder is still alive.
++  last_update_ = now;
++  stale_ = false;
++  result.result = InputOwnershipWriteResult::kAccepted;
++  result.snapshot = snapshot();
++  return result;
++}
++
++InputOwnershipGrantInfo InputOwnershipDecider::GrantDebuggerInput(
++    InputOwnershipSessionToken session,
++    int actions,
++    base::TimeDelta ttl,
++    base::TimeTicks now) {
++  InputOwnershipGrantInfo info;
++  if (!IsFeatureEnabled()) {
++    return info;
++  }
++  if (session == nullptr || actions <= 0 || ttl <= base::TimeDelta()) {
++    RevokeDebuggerSession(session);
++    return info;
++  }
++  Refresh(now);
++  PurgeExpired(now);
++
++  // A grant is a fresh, self-contained budget: it replaces any previous grant
++  // for this session (never accumulates), the deadline is fixed once here and
++  // no subsequent input event can extend it. It does not touch the mode, the
++  // version or last_update.
++  DebuggerSessionState& state = debugger_sessions_[session];
++  state = DebuggerSessionState();
++  state.grant_remaining = std::min(actions, kMaxGrantActions);
++  state.grant_deadline = now + std::min(ttl, kMaxGrantTtl);
++
++  info.granted = true;
++  info.remaining = state.grant_remaining;
++  info.expires_at = state.grant_deadline;
++  return info;
++}
++
++InputOwnershipCommandScope InputOwnershipDecider::BeginCommand(
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    base::TimeDelta max_duration,
++    base::TimeTicks now) {
++  InputOwnershipCommandScope scope;
++  if (!IsFeatureEnabled()) {
++    scope.result = InputOwnershipWriteResult::kFeatureDisabled;
++    return scope;
++  }
++  if (session == nullptr || command_id.empty() ||
++      max_duration <= base::TimeDelta()) {
++    scope.result = InputOwnershipWriteResult::kInvalidArgument;
++    return scope;
++  }
++  Refresh(now);
++  PurgeExpired(now);
++
++  // Idempotent retry: the same command id inside the same session returns the
++  // existing scope without billing another unit.
++  if (DebuggerSessionState* state = FindSession(session)) {
++    auto it = state->command_scopes.find(command_id);
++    if (it != state->command_scopes.end()) {
++      scope.result = InputOwnershipWriteResult::kAccepted;
++      scope.scope_id = it->second.scope_id;
++      scope.deadline = it->second.deadline;
++      scope.grant_remaining = state->grant_remaining;
++      return scope;
++    }
++  }
++
++  switch (EffectiveMode(now)) {
++    case InputOwnershipMode::kAi:
++      // AI needs no budget at all; the scope is implicit.
++      scope.result = InputOwnershipWriteResult::kAccepted;
++      scope.grant_remaining = -1;
++      return scope;
++    case InputOwnershipMode::kHuman:
++      // HUMAN never accepts automation input; the extension must not even try.
++      scope.result = InputOwnershipWriteResult::kGrantRequired;
++      return scope;
++    case InputOwnershipMode::kAssist:
++      break;
++  }
++
++  if (IsDebuggerInputPaused(now)) {
++    scope.result = InputOwnershipWriteResult::kGrantRequired;
++    return scope;
++  }
++
++  DebuggerSessionState* state = FindSession(session);
++  if (!state || state->command_scopes.size() >= kMaxCommandScopesPerSession ||
++      !ConsumeGrant(*state, now)) {
++    scope.result = InputOwnershipWriteResult::kGrantRequired;
++    return scope;
++  }
++
++  // Reserve the unit now; the scope itself is bounded by both the caller's
++  // duration and the absolute grant deadline.
++  const base::TimeTicks deadline =
++      CapToGrant(*state, now + std::min(max_duration, kMaxCommandScope));
++  CommandScopeState& entry = state->command_scopes[command_id];
++  entry.scope_id = base::NumberToString(next_scope_id_++);
++  entry.deadline = deadline;
++
++  scope.result = InputOwnershipWriteResult::kAccepted;
++  scope.scope_id = entry.scope_id;
++  scope.deadline = deadline;
++  scope.grant_remaining = state->grant_remaining;
++  return scope;
++}
++
++InputOwnershipWriteResult InputOwnershipDecider::EndCommand(
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    bool cancelled,
++    base::TimeTicks now) {
++  if (!IsFeatureEnabled()) {
++    return InputOwnershipWriteResult::kFeatureDisabled;
++  }
++  if (session == nullptr || command_id.empty()) {
++    return InputOwnershipWriteResult::kInvalidArgument;
++  }
++  DebuggerSessionState* state = FindSession(session);
++  if (!state) {
++    return InputOwnershipWriteResult::kUnknownCommand;
++  }
++  auto it = state->command_scopes.find(command_id);
++  if (it == state->command_scopes.end()) {
++    return InputOwnershipWriteResult::kUnknownCommand;
++  }
++
++  // `ok` and `failed` keep the reserved unit spent (the delivery attempt was
++  // made). `cancelled` refunds it only when the scope never authorized input
++  // and the grant is still live.
++  const bool refund = cancelled && it->second.authorized_events == 0 &&
++                      state->grant_remaining < kMaxGrantActions &&
++                      !state->grant_deadline.is_null() &&
++                      now < state->grant_deadline;
++  state->command_scopes.erase(it);
++  if (refund) {
++    ++state->grant_remaining;
++  }
++  // `state` may be dangling if the bucket was erased by a nested call; nothing
++  // else touches it.
++  if (state->IsIdle() && state->grant_remaining == 0) {
++    debugger_sessions_.erase(session);
++  }
++  return InputOwnershipWriteResult::kAccepted;
++}
++
++bool InputOwnershipDecider::DebuggerSessionState::HasLiveScope(
++    base::TimeTicks now) const {
++  for (const auto& [id, scope] : command_scopes) {
++    if (now < scope.deadline) {
++      return true;
++    }
++  }
++  return false;
++}
++
++InputOwnershipDecider::CommandScopeState*
++InputOwnershipDecider::DebuggerSessionState::FindLiveScope(base::TimeTicks now) {
++  for (auto& [id, scope] : command_scopes) {
++    if (now < scope.deadline) {
++      return &scope;
++    }
++  }
++  return nullptr;
++}
++
++void InputOwnershipDecider::DebuggerSessionState::NoteScopeAuthorized(
++    base::TimeTicks now) {
++  if (CommandScopeState* scope = FindLiveScope(now)) {
++    ++scope->authorized_events;
++  }
++}
++
+ void InputOwnershipDecider::RevokeDebuggerSession(
+     InputOwnershipSessionToken session) {
+   if (session == nullptr) {
+@@ -454,6 +791,17 @@ void InputOwnershipDecider::PurgeExpired(base::TimeTicks now) {
+       state.text_burst_until = base::TimeTicks();
+     }
+ 
++    // Expired command scopes stop authorizing input. The reserved unit stays
++    // spent (design §1.5.3): only an explicit cancel can refund it.
++    for (auto scope_it = state.command_scopes.begin();
++         scope_it != state.command_scopes.end();) {
++      if (now >= scope_it->second.deadline) {
++        scope_it = state.command_scopes.erase(scope_it);
++      } else {
++        ++scope_it;
++      }
++    }
++
+     // Exhausted and idle: nothing left to remember for this session, so drop
+     // the bucket (this is what keeps a leaked session token from holding an
+     // expired deadline forever).
+diff --git a/content/public/browser/devtools_agent_host.h b/content/public/browser/devtools_agent_host.h
+index f4aa394..71535b0 100644
+--- a/content/public/browser/devtools_agent_host.h
++++ b/content/public/browser/devtools_agent_host.h
+@@ -18,6 +18,7 @@
+ #include "content/common/content_export.h"
+ #include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/devtools_agent_host_observer.h"
++#include "content/public/browser/input_ownership.h"
+ #include "url/gurl.h"
+ 
+ namespace base {
+@@ -178,6 +179,15 @@ class CONTENT_EXPORT DevToolsAgentHost
+   // Returns true if there is a client attached.
+   virtual bool IsAttached() = 0;
+ 
++  // Browser CLI (patch 029): returns the input-ownership session token of
++  // `client`'s session on this host, i.e. the same opaque token that
++  // `InputHandler` uses for its arbitration decisions. Returns nullptr when
++  // `client` is not attached. This is how the trusted extension API binds an
++  // input grant to the exact DevTools session that will inject events, instead
++  // of a process-wide bucket that any other debugger could consume.
++  virtual InputOwnershipSessionToken GetInputOwnershipSessionForClient(
++      DevToolsAgentHostClient* client);
++
+   // Sends |message| from |client| to the agent.
+   virtual void DispatchProtocolMessage(DevToolsAgentHostClient* client,
+                                        base::span<const uint8_t> message) = 0;
+diff --git a/content/public/browser/input_ownership.h b/content/public/browser/input_ownership.h
+index 5220210..a727822 100644
+--- a/content/public/browser/input_ownership.h
++++ b/content/public/browser/input_ownership.h
+@@ -10,7 +10,9 @@
+ 
+ #include <map>
+ #include <optional>
++#include <string>
+ 
++#include "base/functional/callback.h"
+ #include "base/time/time.h"
+ #include "content/common/content_export.h"
+ 
+@@ -21,6 +23,7 @@ class WebInputEvent;
+ namespace content {
+ 
+ class InputOwnershipController;
++class WebContents;
+ 
+ // Browser CLI (patch 028): the mode the trusted embedder (the Browser CLI
+ // extension, via a kernel-only API) has assigned to a WebContents.
+@@ -60,17 +63,153 @@ enum class InputOwnershipCommandKind {
+   kTap,
+ };
+ 
+-// Snapshot of the arbitration state. `version` is monotonically increasing and
+-// is bumped on every accepted mode change.
++// Snapshot of the arbitration state.
+ //
+-// The default mode is kAssist: an embedder that has not (yet) reported a mode
+-// must fail closed. With no grant, kAssist drops all debugger input while
+-// human input keeps working, which matches design §13.1 ("unknown -> ASSIST").
++// `mode` is the *configured* mode written by the trusted embedder and `version`
++// is the monotonically increasing version accepted for the target. They are
++// never rewritten behind the embedder's back.
++//
++// `stale`/`last_update` implement the 30s heartbeat contract: when a target has
++// not been refreshed for 30s the *effective* mode degrades to kAssist (and all
++// grants are dropped) without touching `mode`/`version`, so a single heartbeat
++// restores the configured behaviour without version churn.
+ struct CONTENT_EXPORT InputOwnershipSnapshot {
+   InputOwnershipMode mode = InputOwnershipMode::kAssist;
++  // kAssist while `stale` is true, `mode` otherwise.
++  InputOwnershipMode effective_mode = InputOwnershipMode::kAssist;
+   uint64_t version = 0;
++  bool stale = false;
++  base::TimeTicks last_update;
++};
++
++// Stable result codes shared by the controller and the trusted extension API
++// (the chrome layer maps these to the `reason` strings of the API contract).
++enum class InputOwnershipWriteResult {
++  kAccepted = 0,
++  kFeatureDisabled,
++  kInvalidArgument,
++  kUnknownTarget,
++  kStaleVersion,
++  kVersionConflict,
++  kVersionUnknown,
++  kGrantRequired,
++  kUnknownCommand,
++};
++
++// Result of SetInputOwnership() / HeartbeatInputOwnership(). `snapshot` always
++// describes the state that is in force after the call (before the call when it
++// was rejected), which is what the caller needs to adopt a higher version.
++struct CONTENT_EXPORT InputOwnershipApplyResult {
++  InputOwnershipWriteResult result = InputOwnershipWriteResult::kFeatureDisabled;
++  InputOwnershipSnapshot snapshot;
++};
++
++// Result of GrantDebuggerInput(). `expires_at` is the absolute (monotonic)
++// deadline fixed at issuance; it is never extended.
++struct CONTENT_EXPORT InputOwnershipGrantInfo {
++  bool granted = false;
++  int remaining = 0;
++  base::TimeTicks expires_at;
+ };
+ 
++// Result of BeginInputOwnershipCommand(). A command scope bills one grant unit
++// up front and then authorizes every input event of that session until
++// `deadline`, so one extension command maps to exactly one kernel grant.
++struct CONTENT_EXPORT InputOwnershipCommandScope {
++  InputOwnershipWriteResult result =
++      InputOwnershipWriteResult::kFeatureDisabled;
++  std::string scope_id;
++  base::TimeTicks deadline;
++  int grant_remaining = 0;
++
++  bool ok() const { return result == InputOwnershipWriteResult::kAccepted; }
++};
++
++// Kind of human input reported through the human presence callback. Only used
++// for the `onHumanPresence` event; it never changes the mode by itself.
++enum class InputOwnershipHumanPresenceKind {
++  kMouse,
++  kWheel,
++  kKey,
++  kText,
++  kTouch,
++  kOther,
++};
++
++// Only the trusted chrome layer (the Browser CLI extension API) may register
++// this callback. It fires at most once per 300ms per WebContents.
++using InputOwnershipHumanPresenceCallback = base::RepeatingCallback<void(
++    WebContents*,
++    InputOwnershipHumanPresenceKind,
++    base::TimeTicks)>;
++
++// ---------------------------------------------------------------------------
++// Trusted production entry points (Browser CLI extension API)
++// ---------------------------------------------------------------------------
++//
++// These are the only production write paths into the arbitration state. They
++// are reachable only from the chrome layer function that has already verified
++// the calling extension (id hash allowlist + context + install location +
++// managed mode); content itself performs no extension identity check.
++//
++// Every function fails closed when `features::kInputOwnershipEnforcement` is
++// disabled or when the WebContents has no controller (feature off never creates
++// one), so a half-wired caller cannot grant anything.
++
++// Writes the configured mode for `web_contents` with monotonic `version`
++// semantics (design §1.2):
++//  - version > current: accepted, clears every session grant;
++//  - version == current and same mode: idempotent, only refreshes last_update;
++//  - version == current and different mode: kVersionConflict;
++//  - version < current: kStaleVersion;
++//  - version == 0 or mode invalid: kInvalidArgument.
++CONTENT_EXPORT InputOwnershipApplyResult SetInputOwnership(
++    WebContents* web_contents,
++    InputOwnershipMode mode,
++    uint64_t version);
++
++// Refreshes last_update without changing mode/version (design §1.6). The
++// version must equal the currently accepted one; a higher version is
++// kVersionUnknown because only SetInputOwnership() may advance it.
++CONTENT_EXPORT InputOwnershipApplyResult HeartbeatInputOwnership(
++    WebContents* web_contents,
++    uint64_t version);
++
++// Issues a grant for `session` on `web_contents` (design §1.3). The grant is
++// keyed by the session, so another DevTools session can never consume it. Caps:
++// 1..10000 actions, 1..600000 ms. Does not change mode or last_update.
++CONTENT_EXPORT InputOwnershipGrantInfo GrantDebuggerInput(
++    WebContents* web_contents,
++    InputOwnershipSessionToken session,
++    int actions,
++    base::TimeDelta ttl);
++
++// Opens a command scope that bills one grant unit up front (design §1.4).
++// Repeating the same `command_id` for the same session is idempotent.
++CONTENT_EXPORT InputOwnershipCommandScope BeginInputOwnershipCommand(
++    WebContents* web_contents,
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    base::TimeDelta max_duration);
++
++// Closes a command scope (design §1.5). `cancelled` refunds the reserved unit
++// only when the scope authorized no input at all.
++CONTENT_EXPORT InputOwnershipWriteResult EndInputOwnershipCommand(
++    WebContents* web_contents,
++    InputOwnershipSessionToken session,
++    const std::string& command_id,
++    bool cancelled);
++
++// Read-only snapshot. Refreshes the stale flag first, never delays a deadline.
++CONTENT_EXPORT InputOwnershipSnapshot GetInputOwnershipSnapshot(
++    WebContents* web_contents);
++
++// Registers the human presence callback (K13). Passing a null callback
++// unregisters. Must be called on the UI thread; only the trusted chrome layer
++// calls this.
++CONTENT_EXPORT void SetInputOwnershipHumanPresenceCallback(
++    InputOwnershipHumanPresenceCallback callback);
++
+ // Pure decision engine for input ownership arbitration. It deliberately does
+ // not depend on WebContents, renderers or the DevTools protocol so that it can
+ // be unit tested in isolation. The controller owns one instance per
+@@ -164,7 +303,35 @@ class CONTENT_EXPORT InputOwnershipDecider {
+   bool IsDebuggerInputPaused(
+       base::TimeTicks now = base::TimeTicks::Now()) const;
+ 
+-  InputOwnershipSnapshot snapshot() const { return {mode_, version_}; }
++  InputOwnershipSnapshot snapshot() const;
++  // Refreshes the stale flag at `now` and returns the resulting snapshot.
++  InputOwnershipSnapshot SnapshotAt(base::TimeTicks now);
++
++  // Trusted production writes. These are called by the free functions declared
++  // above, after the chrome layer has authenticated the calling extension.
++  InputOwnershipApplyResult SetOwnership(InputOwnershipMode mode,
++                                         uint64_t version,
++                                         base::TimeTicks now);
++  InputOwnershipApplyResult Heartbeat(uint64_t version, base::TimeTicks now);
++  InputOwnershipGrantInfo GrantDebuggerInput(
++      InputOwnershipSessionToken session,
++      int actions,
++      base::TimeDelta ttl,
++      base::TimeTicks now);
++  InputOwnershipCommandScope BeginCommand(
++      InputOwnershipSessionToken session,
++      const std::string& command_id,
++      base::TimeDelta max_duration,
++      base::TimeTicks now);
++  InputOwnershipWriteResult EndCommand(InputOwnershipSessionToken session,
++                                       const std::string& command_id,
++                                       bool cancelled,
++                                       base::TimeTicks now);
++
++  // True once 30s passed without an accepted setOwnership()/heartbeat().
++  bool IsStale(base::TimeTicks now) const;
++  InputOwnershipMode EffectiveMode(base::TimeTicks now) const;
++  int human_presence_count() const { return human_presence_count_; }
+ 
+   // Testing-only entry points. They are never reachable from a renderer, a
+   // web page or a DevTools client. Production writes go through the trusted
+@@ -197,6 +364,15 @@ class CONTENT_EXPORT InputOwnershipDecider {
+   }
+ 
+  private:
++  struct CommandScopeState {
++    std::string scope_id;
++    // Absolute end of the command scope. Never extended.
++    base::TimeTicks deadline;
++    // Number of input decisions authorized inside this scope. Used to refund
++    // the reserved unit when the command is cancelled before any input.
++    int authorized_events = 0;
++  };
++
+   struct DebuggerSessionState {
+     // Remaining grant units. 0 means "no grant" (or exhausted).
+     int grant_remaining = 0;
+@@ -216,9 +392,18 @@ class CONTENT_EXPORT InputOwnershipDecider {
+     // `grant_deadline`, so a steady stream of insertions cannot extend it.
+     base::TimeTicks text_burst_until;
+ 
++    // Open command scopes keyed by the extension command id. While one is
++    // live, input from this session is authorized without billing a unit.
++    std::map<std::string, CommandScopeState> command_scopes;
++
++    bool HasLiveScope(base::TimeTicks now) const;
++    CommandScopeState* FindLiveScope(base::TimeTicks now);
++    void NoteScopeAuthorized(base::TimeTicks now);
++
+     bool IsIdle() const {
+       return !mouse_gesture_open && !key_gesture_open &&
+-             mouse_grace_until.is_null() && text_burst_until.is_null();
++             mouse_grace_until.is_null() && text_burst_until.is_null() &&
++             command_scopes.empty();
+     }
+   };
+ 
+@@ -226,12 +411,17 @@ class CONTENT_EXPORT InputOwnershipDecider {
+   const DebuggerSessionState* FindSessionForTesting(
+       InputOwnershipSessionToken session) const;
+ 
+-  // Clears expired grants and gesture windows. This is the only place that
+-  // removes expired state, so it runs on every decision.
++  // Recomputes `stale_` at `now`; when the target just became stale it drops
++  // every grant, command scope and the automation window (design §3.3), but it
++  // never rewrites `mode_`/`version_`.
++  void Refresh(base::TimeTicks now);
++
++  // Clears expired grants, command scopes and gesture windows. This is the only
++  // place that removes expired state, so it runs on every decision.
+   void PurgeExpired(base::TimeTicks now);
+ 
+   bool IsDebuggerEvent(const blink::WebInputEvent& event) const;
+-  bool UnattributedDebuggerAllowed() const;
++  bool UnattributedDebuggerAllowed(base::TimeTicks now) const;
+   bool ConsumeGrant(DebuggerSessionState& session, base::TimeTicks now);
+   base::TimeTicks CapToGrant(DebuggerSessionState& session,
+                              base::TimeTicks deadline) const;
+@@ -259,6 +449,13 @@ class CONTENT_EXPORT InputOwnershipDecider {
+   // mode, arbitration must fail closed (no grant => debugger input is dropped).
+   InputOwnershipMode mode_ = InputOwnershipMode::kAssist;
+   uint64_t version_ = 0;
++  // Last accepted setOwnership()/heartbeat(). Null means "never refreshed";
++  // such a target is never stale, it is simply already in kAssist.
++  base::TimeTicks last_update_;
++  // Derived flag: now - last_update_ > 30s. Never writes back into mode_.
++  bool stale_ = false;
++
++  uint64_t next_scope_id_ = 1;
+ 
+   std::map<InputOwnershipSessionToken, DebuggerSessionState> debugger_sessions_;
+ 
+diff --git a/extensions/browser/extension_event_histogram_value.h b/extensions/browser/extension_event_histogram_value.h
+index 593de2a..07e4f4d 100644
+--- a/extensions/browser/extension_event_histogram_value.h
++++ b/extensions/browser/extension_event_histogram_value.h
+@@ -603,6 +603,7 @@ enum HistogramValue {
+   DICTATION_PRIVATE_ON_BROWSER_LOG_EVENT = 578,
+   RUNTIME_ON_ENABLED = 579,
+   ENTERPRISE_WEBRTC_ON_CAPTURE_STOPPED = 580,
++  BROWSERCLI_INPUT_OWNERSHIP_ON_HUMAN_PRESENCE = 581,
+   // Last entry: Add new entries above, then run:
+   // tools/metrics/histograms/update_extension_histograms.py
+   ENUM_BOUNDARY
+diff --git a/extensions/browser/extension_function_histogram_value.h b/extensions/browser/extension_function_histogram_value.h
+index 9d8fab2..debbc5d 100644
+--- a/extensions/browser/extension_function_histogram_value.h
++++ b/extensions/browser/extension_function_histogram_value.h
+@@ -2052,6 +2052,12 @@ enum HistogramValue {
+   ENTERPRISE_WEBRTC_GETCAPTURESTATUS = 1987,
+   ENTERPRISE_WEBRTC_STOPCAPTURE = 1988,
+   BROWSERCLI_GETCAPABILITIES = 1989,
++  BROWSERCLI_INPUTOWNERSHIP_SETOWNERSHIP = 1990,
++  BROWSERCLI_INPUTOWNERSHIP_HEARTBEAT = 1991,
++  BROWSERCLI_INPUTOWNERSHIP_GETOWNERSHIP = 1992,
++  BROWSERCLI_INPUTOWNERSHIP_GRANTINPUT = 1993,
++  BROWSERCLI_INPUTOWNERSHIP_BEGININPUTCOMMAND = 1994,
++  BROWSERCLI_INPUTOWNERSHIP_ENDINPUTCOMMAND = 1995,
+   // Last entry: Add new entries above, then run:
+   // tools/metrics/histograms/update_extension_histograms.py
+   ENUM_BOUNDARY

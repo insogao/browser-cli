@@ -143,6 +143,11 @@
       "order": 28,
       "file": "028-input-ownership-arbitration.patch",
       "sha256": "c129b42baeef335b62e4f6b0ad684db550e21a72078efae07782446f646ea86e"
+    },
+    {
+      "order": 29,
+      "file": "029-input-ownership-api.patch",
+      "sha256": "4db90062f589dade23c0182c00c2e131dd0d0acb88a9d5ee4e3878077228e9ac"
     }
   ]
 }

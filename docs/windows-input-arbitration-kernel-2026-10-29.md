@@ -1,17 +1,20 @@
 # Windows 内核侧输入仲裁（最小集，patch 028）— 2026-10-29（R3 修订）
 
-> 范围：Chromium 内核侧「最小可用输入仲裁」。Feature **默认关闭**，本轮只做源码 + 单元测试，
-> 不实现扩展 API（`chrome.browserCli.inputOwnership`），不更新 `patch-manifest.json`，
-> 不 commit / push。
+> 范围：Chromium 内核侧「最小可用输入仲裁」。Feature **默认关闭**。R1-R3 只做源码 + 单元测试；
+> R4（§13，patch 029）补齐扩展 API `chrome.browserCli.inputOwnership`。
+> 不更新 `patch-manifest.json`，不 commit / push。
 >
 > 修订历史：
 > - R1：patch 028 初版（四入口 + 全局 grant 桶）。
 > - R2：按主代理 5 项审核要求 + 6 项补充要点重做（绝对截止、session 分桶、
 >   人类暂停、拒绝先于 `Focus()`、单次消费、`Runtime.evaluate` 边界）。
-> - **R3（本文档）**：补齐「不经过 `Forward*` / 丢失 `kFromDebugger`」的 CDP 输入旁路：
+> - **R3（本文档主体）**：补齐「不经过 `Forward*` / 丢失 `kFromDebugger`」的 CDP 输入旁路：
 >   `Input.synthesizePinchGesture / synthesizeScrollGesture / synthesizeTapGesture /
 >   emulateTouchFromMouseEvent / dispatchTouchEvent(synthetic pointer actions)`
 >   全部改为命令级前置裁决，并新增 automation event window 防止其内部事件被误判为人类输入。
+> - **R4（§13，patch 029）**：生产输入权 API 落地——content 生产写入口（K10-K13）、
+>   `chrome.browserCli.inputOwnership` 扩展 API（K14）、session 绑定（K16）、
+>   `onHumanPresence` 事件。Feature 仍默认关闭；K15 见 §13.6 缺口说明。
 >
 > 设计依据：`docs/input-ownership-design-2026-10-28.md` §13。
 > 基线：`D:\c\src` HEAD `7d0f28c30d1c0fadbce17ecec0ee2565aef9a940` + patch 001-027，
@@ -552,3 +555,180 @@ git -C /d/c/src apply -R /d/work/browsercli/chromium/patches/028-input-ownership
 | 构建日志 | `build-logs/028d-content-unittests-build.log`、`028c-chrome-build.log` | 已保存 |
 | 单测日志 | `build-logs/028d-input-ownership-tests.log` | 167 行，40/40 PASS |
 | 进程排查记录 | `build-logs/028c-chrome-procs*.txt`、`028c-lock-probe*.txt`、`028d-baseline-status.txt` | 说明 DLL 占用来自其它 agent 的 `out/WinDev/chrome.exe` 探针，未杀进程 |
+
+## 13. Patch 029：生产输入权 API 落地（K10-K14、K16，2026-10-29）
+
+> 本节记录 `chromium/patches/029-input-ownership-api.patch`。它把设计文档
+> `D:\work\BrowserPilot\docs\input-ownership-api-2026-10-29.md` 的 K10-K14/K16 落到
+> `D:\c\src`：content 生产写入口 + `chrome.browserCli.inputOwnership` 扩展 API +
+> session 绑定 + 30s stale + 命令 scope + `onHumanPresence`。
+> Feature 仍 **`FEATURE_DISABLED_BY_DEFAULT`**；`patch-manifest.json` **未修改**，
+> 未 commit / push。patch 001-028 与工作区未 reset/checkout。
+
+### 13.1 落地状态（对照 K10-K18）
+
+| # | 项 | 状态 | 落点 |
+|---|---|---|---|
+| K10 | `stale` / `last_update` / configured-vs-effective | **已实现** | `InputOwnershipSnapshot` 增加 `effective_mode`/`stale`/`last_update`；`InputOwnershipDecider::Refresh()` 在每次决策前重算，`now-last_update>30s` 时一次性清 grant/scope/window，**不覆写** `mode_`/`version_`；心跳恢复立即回到 configured |
+| K11 | 生产 `SetOwnership` 版本语义 | **已实现** | 高 version 接受并清 grant；同 version 同 mode 幂等只刷新 `last_update`；同 version 异 mode → `kVersionConflict`；低 version → `kStaleVersion`；version 0 → `kInvalidArgument` |
+| K12 | `GrantDebuggerInput` / `BeginInputCommand` / `EndInputCommand` | **已实现** | grant 按 `DevToolsSession*` 分桶、绝对 `now+ttl`（≤600s）；begin 预占 1 单位并建立 `min(now+kindTtl, grant_deadline)` scope（内核上限 120s）；scope 内同 session 事件不再扣减；同 `commandId` 幂等；`cancelled` 且 scope 内 0 事件才退回 1 单位；到期由 `PurgeExpired` 关闭且单位保持消耗 |
+| K13 | `SetHumanPresenceCallback` | **已实现** | content 只提供全局回调（仅 chrome 层注册）；controller 在每次决策前后比较去抖计数（300ms）触发；chrome 层通过 `EventRouter::DispatchEventToExtension` 只投递给受信扩展 |
+| K14 | `chrome.browserCli.inputOwnership` | **已实现** | 新 JSON 文件 `chrome/common/extensions/api/browser_cli_input_ownership.json`（6 方法 + `onHumanPresence`）+ `chrome/browser/extensions/api/browser_cli_input_ownership/`；生成注册已进入 `generated_api_registration.cc` |
+| K15 | window → 新 tab 立即继承 | **部分（P1 缺口）** | `setOwnership`/`heartbeat` 都会把窗口快照展开到**当前** tab；heartbeat（≤10s）会把 `setOwnership` 之后新建的 tab 补绑。**未实现** `TabStripModelObserver` 的“创建即继承”，见 §13.6 |
+| K16 | 扩展 session 映射 | **已实现（fail closed）** | `ExtensionDevToolsClientHost`（chrome.debugger 的 client 注册表）→ `DevToolsAgentHost::GetInputOwnershipSessionForClient()` → 同一 `DevToolsSession*` token；找不到 attach 时 `grantInput`/`begin` 返回 `NO_DEBUGGER_SESSION`，**不会**全局放行 |
+| K17 | InputHandler 来源 session 归因 | 028 已具备 | 028 的 `InputHandler` 已在事件/文本/命令三路把 `session()` 作为 token 传入；029 只新增“由 chrome 解析同一个 token”的出口 |
+| K18 | 手势绝对截止 | 028 已具备（数值为 5s/2s/300ms） | 028 决策器已实现鼠标 5s、键盘 2s、文本 burst ≤300ms 且都 cap 到 grant deadline；029 未改这些上限 |
+
+### 13.2 可信调用方校验（每次调用，缺一不可）
+
+`chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.{h,cc}`：
+
+1. `function->extension()` 非空（不是网页/内容脚本调用）；
+2. `source_context_type() == mojom::ContextType::kPrivilegedExtension`；
+3. `sha256(extension_id)` 命中编译期哈希表（源码不含明文 ID；
+   `nnollghpaggbcdkkgoieneffnlijinio` → `0FC2B72B...C1722`）；
+4. `Manifest::Location` ∈ {`kExternalPref`, `kExternalRegistry`}；非 official 构建额外允许
+   `kUnpacked` / `kCommandLine`（E2E harness），official 构建拒绝；
+5. `browser_context()` 不是 OTR；
+6. `views::BrowserCliPresentationPolicy::IsManagedModeEnabled()`（= `--browser-cli-background-presentation`）。
+
+API 存在性由 `_api_features.json` + **delegated availability check** 控制
+（`browser_cli_input_ownership_availability.cc`）：只有 `InputOwnershipEnforcement`
+开启 **且** managed mode 开启 **且** 调用上下文是 privileged extension 时才可见；
+否则命名空间本身不存在（不是“注册后拒绝”）。这与 §2.1 的设计一致。
+
+### 13.3 session 绑定链路（K16）
+
+```
+chrome.debugger.attach({tabId})
+  → extensions::ExtensionDevToolsClientHost（debugger_api.cc 文件内注册表）
+  → 新增 chrome 侧查询 GetExtensionDebuggerClientForTab(context, extension_id, web_contents)
+  → content::DevToolsAgentHost::GetForTab(web_contents)
+  → 新增虚函数 GetInputOwnershipSessionForClient(client)（DevToolsAgentHostImpl 用
+     SessionByClient() 命中同一个 DevToolsSession*）
+  → content::GrantDebuggerInput(web_contents, token, ...)
+```
+
+- token 只以 `const void*` 出现在 public header；chrome 不解析、扩展也拿不到有效指针
+  （响应里的 `sessionToken` 目前**不回填**，避免泄漏地址）。
+- 第三方 CDP 会话没有 grant 桶；无法解析调用方 session → `NO_DEBUGGER_SESSION`（fail closed）。
+- 请求里的可选 `session` 字段按设计忽略：授权只来自“调用方扩展 + tab”解析出的会话。
+
+### 13.4 内核 API（content）
+
+新增 `content/browser/input_ownership/input_ownership_api.cc`，声明在
+`content/public/browser/input_ownership.h`（全部 fail closed）：
+
+```cpp
+InputOwnershipApplyResult SetInputOwnership(WebContents*, InputOwnershipMode, uint64_t version);
+InputOwnershipApplyResult HeartbeatInputOwnership(WebContents*, uint64_t version);
+InputOwnershipGrantInfo GrantDebuggerInput(WebContents*, InputOwnershipSessionToken, int actions, base::TimeDelta ttl);
+InputOwnershipCommandScope BeginInputOwnershipCommand(WebContents*, token, command_id, max_duration);
+InputOwnershipWriteResult EndInputOwnershipCommand(WebContents*, token, command_id, bool cancelled);
+InputOwnershipSnapshot GetInputOwnershipSnapshot(WebContents*);
+void SetInputOwnershipHumanPresenceCallback(InputOwnershipHumanPresenceCallback);
+```
+
+Feature off 或没有 controller 时：`kFeatureDisabled`（Set/Heartbeat）、`granted=false`、
+`Begin.result=kFeatureDisabled`、默认 `kAssist` 快照；**不会创建** WebContentsUserData。
+
+### 13.5 chrome 扩展 API
+
+| 方法/事件 | 说明 |
+|---|---|
+| `setOwnership({target, mode, version})` | tab 或 window；window 展开到当前 tabs 并记录窗口快照（供 heartbeat 补绑） |
+| `heartbeat({target, version})` | 不推进 version、不清 grant；window 目标会把 `version == 0` 的新 tab 补绑到窗口记录，`version` 与窗口记录不一致的 tab（tabId 精确覆盖）保持不动且不使窗口心跳失败 |
+| `getOwnership({target})` | 只读；返回 `mode/version/stale/lastUpdateAt`（window 取第一个 tab 的真值） |
+| `grantInput({target:{tabId}, actions, ttlMs})` | 解析调用方 session；`actions`/`ttlMs` 由内核夹紧（10000 / 600000ms） |
+| `beginInputCommand({target:{tabId}, commandId, kind})` | AI → 直接 ok（不占预算，`grantRemaining=-1`）；ASSIST → 预占 1；HUMAN/无 grant → `GRANT_REQUIRED` |
+| `endInputCommand({target:{tabId}, commandId, outcome})` | `outcome` 缺省 = `ok`；未知 command → `closed:false, UNKNOWN_COMMAND` |
+| `onHumanPresence` | 300ms 去抖后只投递给受信扩展；`kind` ∈ mouse/wheel/key/text/touch/other |
+
+错误码（稳定字符串）与设计 §1.9 对齐：`INVALID_TARGET`、`INVALID_ARGUMENT`、
+`UNKNOWN_TARGET`、`STALE_VERSION`、`VERSION_CONFLICT`、`VERSION_UNKNOWN`、
+`NO_DEBUGGER_SESSION`、`GRANT_REQUIRED`、`UNKNOWN_COMMAND`。
+权限失败返回 `PERMISSION_DENIED: ...`（正常路径下 API 不可见）。
+
+版本/时间戳限制：生成代码把 JSON `integer` 映射为 32 位 `int`，因此
+`version` 上限 `INT_MAX`（超出 `INVALID_ARGUMENT`）；`expiresAt`/`deadline`/`lastUpdateAt`/`at`
+在 JSON 中用 `number`（double，精确到 2^53）承载 epoch 毫秒。
+
+### 13.6 K15 缺口与临时行为
+
+- 未实现 `TabStripModelObserver`：`setOwnership({windowId})` 之后新建的 tab **不会立即**继承窗口快照。
+- 临时行为：新 tab 保持默认 `kAssist`（fail closed，AI 命令会被内核丢弃但不影响人类），
+  下一次 `heartbeat`（扩展每 10s）按窗口记录补绑；`setOwnership` 也会补绑。
+- 精确下一步：在 `browser_cli_input_ownership_window_binding.{h,cc}` 中按窗口挂
+  `TabStripModelObserver::OnTabStripModelChanged`（inserted → `SetInputOwnership(wc, record.mode,
+  record.version)`），用 `BrowserCollectionObserver::OnBrowserClosed` 在窗口销毁前 `RemoveObserver`；
+  记录键用 `(BrowserContext*, window_id)` + `BrowserWindowInterface` 弱校验，避免 window id 复用。
+
+### 13.7 构建与单测（原始输出）
+
+```bash
+cd /d/c/src
+export DEPOT_TOOLS_WIN_TOOLCHAIN=0
+export vs2026_install="C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools"
+export PATH="/d/c/src/third_party/cpython3/host/bin:$PATH"
+third_party/ninja/ninja.exe -C out/WinDev -j 6 chrome content_unittests
+out/WinDev/content_unittests.exe --gtest_filter=InputOwnership*
+third_party/ninja/ninja.exe -C out/WinDev -n chrome content_unittests
+```
+
+- `content_unittests`：EXIT=0；`chrome`：EXIT=0（`[432/434] LINK(DLL) chrome.dll`）。
+- 最终 `ninja -n`：`ninja: no work to do.`
+- `--gtest_filter=InputOwnership*`：**51/51 PASS**（harness 分片执行，各分片均 `PASSED`；
+  0 FAILED）。新增覆盖：stale 降级/恢复、版本幂等/冲突/低版本、grant/begin/end 与 scope
+  绝对截止、cancel 退费、Feature off 惰性、free-function 贯通、human presence 回调去抖。
+- `chrome.browserCli.inputOwnership` 的生成注册已出现在
+  `gen/chrome/browser/extensions/api/generated_api_registration.cc`（6 个 Function），
+  `api_features.cc` 含 `browserCli.inputOwnership`。
+- 新增 chrome 单测 `browser_cli_extension_identity_unittest.cc` 已编译进 `unit_tests`
+  目标对象（`obj/chrome/browser/extensions/unit_tests/...obj`，EXIT=0）；**未链接/运行
+  `unit_tests`**（成本高，按任务约定以“可编译 + content 全量单测”为准）。
+
+### 13.8 现在可以跑的真实 E2E（L 的 harness）
+
+前置：`--enable-features=InputOwnershipEnforcement` + `--browser-cli-background-presentation`，
+安装 allowlisted 扩展（非 official 构建可用 unpacked）。
+
+- `input_status` 的 `kernel.state === "ready"`、`version >= 1`；
+- `setOwnership/heartbeat/getOwnership` 三件套 + 版本冲突回退；
+- `grantInput` 在 attach 后可解析 session；未 attach → `NO_DEBUGGER_SESSION`；
+- `withKernelInputScope`（AI：begin 返回 ok 不占预算；ASSIST：1 命令 1 grant）；
+- HUMAN 下第三方 CDP 注入被丢弃、AI 下放行；
+- 30s 停心跳后 effective ASSIST（AI 注入被内核丢弃），恢复心跳后回到 configured；
+- `onHumanPresence` 事件到达扩展（300ms 去抖），扩展侧再 500ms 去抖进入 ASSIST。
+
+**仍不可跑**：K15 的“新 tab 立即继承”（需等下一次 heartbeat）；以及未在真实浏览器里验证
+service worker 的 `source_context_type` 是否为 `kPrivilegedExtension`（若为 `kUnspecified`，
+所有调用会返回 `PERMISSION_DENIED`——这是本轮最需要 E2E 首先确认的点）。
+
+### 13.9 本轮未覆盖 / 新风险
+
+1. **K15**：见 §13.6（P1 缺口）。
+2. **SW context type**：`source_context_type()==kPrivilegedExtension` 的假设未在真机验证；
+   失败表现为明确的 `PERMISSION_DENIED`（不是放行）。
+3. **window 快照账本**是 chrome 进程内静态缓存（上限 256 项），浏览器重启/窗口关闭后自然失效；
+   真值仍以每个 WebContents 的 content 状态为准。
+4. **`sessionToken` 不回填**：响应里没有可审计 token；扩展侧字段可选，不影响语义。
+5. **版本上限**：JSON/C++ `int`，`version > INT_MAX` 会被拒绝（扩展每模式变化 +1，实际不可达）。
+6. **`kind` 只用于 TTL/审计**：chrome 端固定用 120s 上限发给内核；扩展侧 10s/60s/120s 的
+   细分仍以客户端 `commandTtlFor()` 为准（内核只做上限兜底）。
+7. **单测未跑 `unit_tests`**：仅编译对象；chrome 层行为（target 解析、窗口展开、事件路由）
+   尚未有自动化覆盖，依赖 L 的 E2E。
+8. **`Runtime.evaluate`/`DOM.*` 边界不变**：仍由扩展命令层守卫（§2.5/§7.1）。
+
+### 13.10 交付物（patch 029）
+
+| 项 | 路径 / 值 |
+|---|---|
+| patch 029 | `D:\work\browsercli\chromium\patches\029-input-ownership-api.patch`，**3511 行**，31 个文件段（+2937/−23） |
+| patch sha256 | `4db90062f589dade23c0182c00c2e131dd0d0acb88a9d5ee4e3878077228e9ac` |
+| 回退校验 | `git apply --check -R` 通过（EXIT=0） |
+| 基线 | 由 patch 001-028 重建到临时树后取 diff，patch 只含本轮 029 改动 |
+| 构建日志 | `/tmp/build-content-unittests3.log`、`/tmp/build-chrome4.log`（本机临时） |
+| 单测日志 | `/tmp/final-input-ownership-tests.log`，51/51 PASS |
+| manifest / commit | `patch-manifest.json` **未修改**；未 commit / push；工作区保留 |
+
+
