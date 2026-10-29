@@ -1,28 +1,44 @@
-# Windows 内核侧输入仲裁（最小集，patch 028）— 2026-10-29
+# Windows 内核侧输入仲裁（最小集，patch 028）— 2026-10-29（R3 修订）
 
-> 范围：Chromium 内核侧「最小可用输入仲裁」，Feature **默认关闭**，本轮只做源码 + 单元测试，
+> 范围：Chromium 内核侧「最小可用输入仲裁」。Feature **默认关闭**，本轮只做源码 + 单元测试，
 > 不实现扩展 API（`chrome.browserCli.inputOwnership`），不更新 `patch-manifest.json`，
-> 不 commit / push。所有结论都可用本文件中的原始命令与输出复现。
+> 不 commit / push。
 >
-> 设计依据：`docs/input-ownership-design-2026-10-28.md` §13（内核方案、信任模型、
-> 四个入口、Feature/回滚要求）。基线：`D:\c\src` HEAD
-> `7d0f28c30d1c0fadbce17ecec0ee2565aef9a940` + patch 001-027，构建目录 `out/WinDev`。
+> 修订历史：
+> - R1：patch 028 初版（四入口 + 全局 grant 桶）。
+> - R2：按主代理 5 项审核要求 + 6 项补充要点重做（绝对截止、session 分桶、
+>   人类暂停、拒绝先于 `Focus()`、单次消费、`Runtime.evaluate` 边界）。
+> - **R3（本文档）**：补齐「不经过 `Forward*` / 丢失 `kFromDebugger`」的 CDP 输入旁路：
+>   `Input.synthesizePinchGesture / synthesizeScrollGesture / synthesizeTapGesture /
+>   emulateTouchFromMouseEvent / dispatchTouchEvent(synthetic pointer actions)`
+>   全部改为命令级前置裁决，并新增 automation event window 防止其内部事件被误判为人类输入。
+>
+> 设计依据：`docs/input-ownership-design-2026-10-28.md` §13。
+> 基线：`D:\c\src` HEAD `7d0f28c30d1c0fadbce17ecec0ee2565aef9a940` + patch 001-027，
+> 构建目录 `out/WinDev`。
 
 ## 0. 结论摘要
 
 | 项 | 结果 |
 |---|---|
-| `features::kInputOwnershipEnforcement` | 已加入 `content_features.{h,cc}`，`FEATURE_DISABLED_BY_DEFAULT` |
-| 默认 mode | **`kAssist`（fail closed）**：未设置 mode 时无 grant，debugger 输入全部丢弃，人类输入照常（2026-10-29 按主代理审核修正，见 §4） |
-| 决策器（纯逻辑、可单测） | `content::InputOwnershipDecider`，不依赖 WebContents / renderer / DevTools |
-| 每 WebContents 控制器 | `InputOwnershipController`（`WebContentsUserData`） |
-| 四个入口接线 | 3 个 `Forward*` + `Input.insertText` 全部接上 |
-| Feature 关闭 | 决策恒「放行」、零状态写入、不创建 controller（双层证据，见 §5） |
-| 构建 | 首次 `chrome` 655 步 + 收尾 20 步；默认值修正后 `chrome` 23 步、`content_unittests` 2 步（先 2202 步）；全部 EXIT=0，最终 `ninja -n` = no work |
-| 单测 | `--gtest_filter=InputOwnership*` → 22 tests，`[ PASSED ] 22 tests`，EXIT=0 |
-| patch | `chromium/patches/028-input-ownership-arbitration.patch`，1258 行，16 个文件段（11 改 + 5 新增） |
-| patch sha256 | `c108e0f9c20c899be4e4dd9b13aec7f18651cd10338bf17abe1b7890e0a4889b` |
-| manifest / commit | **未更新、未提交**（按要求留给主代理审核） |
+| `features::kInputOwnershipEnforcement` | `content_features.{h,cc}`，**`FEATURE_DISABLED_BY_DEFAULT`（未变）** |
+| 默认 mode | **`kAssist`（fail closed）** |
+| grant 生命周期 | **绝对截止**：发放时一次性确定 `now + ttl`（≤600s），任何输入事件都不延长 |
+| grant 分桶 | **按 `DevToolsSession*`（session token）分桶** |
+| 事件级 gesture 截止 | 鼠标 5s、键盘 2s；文本 burst **≤ min(now+300ms, grant_deadline)** |
+| **命令级裁决（R3）** | `ShouldDeliverDebuggerCommand(session, kind)`：HUMAN/pause 拒绝、ASSIST 无 grant 拒绝/有则扣 1、AI 放行、Feature off 放行 |
+| **覆盖的合成类命令（R3）** | `dispatchTouchEvent`(synthetic pointer actions)、`emulateTouchFromMouseEvent`、`synthesizePinchGesture`、`synthesizeScrollGesture`、`synthesizeTapGesture` |
+| 人类暂停 | 人类输入到达时**立即** `human_pause_until_ = now + 1s`（刷新式），暂停内 AI/ASSIST 的 debugger 输入全部丢弃 |
+| 拒绝位置 | 事件路径与命令路径都在 `Focus()` / DragController / gesture 入队 / 转发之前 |
+| 单次消费 | 事件路径：InputHandler 裁决+扣减 → `ScopedInputOwnershipAuthorization` → RWHI 跳过；命令路径：命令入口裁决+扣减 1，内部事件由 window 覆盖 |
+| **automation event window（R3）** | 命令被接受后开启，≤5s 且由 gesture 完成回调关闭；窗口内**未带 `kFromDebugger`** 的 renderer 事件照常投递，但**不记为人类输入**（否则每次合成手势都会误触发人类暂停） |
+| 无 session 的 debugger 输入 | HUMAN/ASSIST **fail closed**；AI 放行（事件与命令两条路径一致） |
+| session 撤销 | `InputHandler::Disable` / 析构 / `SetRenderer` 撤销 grant + gesture/text + 该 session 的 window |
+| 构建 | `content_unittests` EXIT=0；`chrome` EXIT=0；最终 `ninja -n` = no work |
+| 单测 | `--gtest_filter=InputOwnership*` → **40 tests**（33 decider + 7 controller），`SUCCESS: all tests passed.` |
+| patch | `chromium/patches/028-input-ownership-arbitration.patch`，**2956 行**，17 个文件段（12 改 + 5 新增） |
+| patch sha256 | `c129b42baeef335b62e4f6b0ad684db550e21a72078efae07782446f646ea86e` |
+| manifest / commit | **未更新、未提交** |
 
 ## 1. 改动文件
 
@@ -30,157 +46,196 @@
 
 | 文件 | 作用 |
 |---|---|
-| `content/public/browser/input_ownership.h` | 公共门面：`InputOwnershipMode{kAi,kAssist,kHuman}`、`InputOwnershipSnapshot{mode,version}`（`mode` 默认 `kAssist`）、纯决策器 `InputOwnershipDecider` 声明。只前置声明 `blink::WebInputEvent`，不 include `web_contents.h`，因此可被 `renderer_host/` 引用 |
-| `content/browser/input_ownership/input_ownership_decider.cc` | 决策器实现（模式判定、`kFromDebugger` 判定、grant 生命周期、手势级计数、human presence 去抖） |
-| `content/browser/input_ownership/input_ownership_controller.h` | `InputOwnershipController : WebContentsUserData`；`ShouldDropAutomationEvent` / `ShouldDropAutomationTextInsert` / `snapshot()` + testing 写入口 |
-| `content/browser/input_ownership/input_ownership_controller.cc` | controller 实现与 `WEB_CONTENTS_USER_DATA_KEY_IMPL` |
-| `content/browser/input_ownership/input_ownership_controller_unittest.cc` | 19 个决策器测试 + 3 个 controller 测试（见 §7） |
+| `content/public/browser/input_ownership.h` | 公共门面：`InputOwnershipMode`、`InputOwnershipSessionToken`、**`InputOwnershipCommandKind`**、`InputOwnershipSnapshot`、纯决策器 `InputOwnershipDecider`（per-session grant/gesture、人类暂停、**命令级裁决 + automation event window**） |
+| `content/browser/input_ownership/input_ownership_decider.cc` | 决策器实现 |
+| `content/browser/input_ownership/input_ownership_controller.h` | `InputOwnershipController : WebContentsUserData`；事件/文本/**命令**三类裁决、暂停查询、window 开关、撤销、`ScopedInputOwnershipAuthorization` |
+| `content/browser/input_ownership/input_ownership_controller.cc` | controller 实现、scope 深度计数、WebContents 销毁清理 |
+| `content/browser/input_ownership/input_ownership_controller_unittest.cc` | 33 个决策器测试 + 7 个 controller 测试 |
 
 ### 1.2 修改
 
 | 文件 | 改动 |
 |---|---|
-| `content/public/common/content_features.h/.cc` | 新增 `kInputOwnershipEnforcement`，`FEATURE_DISABLED_BY_DEFAULT` |
-| `content/browser/renderer_host/render_widget_host_delegate.h/.cc` | 新增 `virtual InputOwnershipController* GetInputOwnershipController();`，默认返回 `nullptr` |
-| `content/browser/web_contents/web_contents_impl.h/.cc` | override `GetInputOwnershipController()`：Feature 关闭返回 `nullptr`（不创建 user data）；开启时 `GetOrCreateForWebContents` |
-| `content/browser/renderer_host/render_widget_host_impl.cc` | 文件内 helper `ShouldDropAutomationInput()` + 3 个 `Forward*` 汇合点检查 |
-| `content/browser/devtools/protocol/input_handler.cc` | `InputHandler::InsertText` 在插入前查询同一 controller，丢弃时 `Response::ServerError` |
-| `content/browser/BUILD.gn` / `content/public/browser/BUILD.gn` / `content/test/BUILD.gn` | 新文件加入 `:browser`、`browser_sources`、`content_unittests` |
+| `content/public/common/content_features.h/.cc` | `kInputOwnershipEnforcement`（默认关闭） |
+| `content/browser/renderer_host/render_widget_host_delegate.h/.cc` | `virtual InputOwnershipController* GetInputOwnershipController()`，默认 `nullptr` |
+| `content/browser/web_contents/web_contents_impl.h/.cc` | override；Feature 关闭返回 `nullptr` |
+| `content/browser/renderer_host/render_widget_host_impl.cc` | `ShouldDropAutomationInput()`：人类事件记账/暂停、无 session 的 debugger fail closed、scope 内跳过、**window 内的未标记事件不记人类**；3 个 `Forward*` 汇合点 |
+| `content/browser/devtools/protocol/input_handler.h` | session token 访问器、事件/文本/**命令**裁决 helper、window 关闭 helper、撤销；`SynthesizeRepeatingScroll` / `OnScrollFinished` 增加 window id 参数 |
+| `content/browser/devtools/protocol/input_handler.cc` | Injector 四路径前置裁决 + scope；`InsertText`；**5 个合成类入口前置裁决 + window 开/关**；emulated touch 的异步转发内加 scope；`Disable`/析构/`SetRenderer` 撤销 |
+| `content/browser/BUILD.gn` / `content/public/browser/BUILD.gn` / `content/test/BUILD.gn` | 新文件加入构建 |
 
-改动只落在 `content/`，未触碰 patch 001-027 涉及的文件（chrome/ui/viz），也未触碰其它 worktree。
+## 2. 审核要求的实现
 
-## 2. 关键设计
+### 2.1 grant 绝对截止与生命周期
 
-### 2.1 分层
+| 要求 | 实现 |
+|---|---|
+| grant 发放时一次性确定截止，任何后续事件不能延长 | `grant_deadline = now + min(ttl, 600s)`，决策路径只读；唯一写入点是 `PurgeExpired()` 的清除 |
+| `insertText` 300ms 窗口不能无限续期 | `text_burst_until = min(now+300ms, grant_deadline)` |
+| 鼠标/键盘 gesture 绝对 deadline | 鼠标 5s、键盘 2s，且都 `min(..., grant_deadline)` |
+| 手势状态不得永久保持 | `PurgeExpired()` 每决策前关闭超时手势；桶在「剩余 0 + 无手势/grace/burst」时删除 |
+| 清理触发点 | 模式变更（清全部 session + window）、session 撤销（清该 session + 其 window）、grant 过期、WebContents 销毁、gesture 完成 |
+
+### 2.2 grant 绑定 DevTools 会话 + 目标 WebContents
+
+- 桶 key = `DevToolsSession*`（`static_cast<const void*>(session())`，不解引用）。
+- controller 是 `WebContentsUserData`，因此 grant 天然只存在于被操作的那个 WebContents。
+- **单次消费**：事件路径由 `InputHandler` 裁决扣减 + `ScopedInputOwnershipAuthorization` 让 RWHI 跳过；命令路径由命令入口扣减 1 次，内部事件不再扣减。
+- **第三方 CDP**：第三人称会话有自己的桶，HUMAN 下被拒，ASSIST 下只能用**自己**的 grant（`SessionGrantsAreIsolated`）。
+- **撤销**：`Disable()` / `~InputHandler()` / `SetRenderer()` → `RevokeInputOwnershipSession()`（经 `base::WeakPtr` 访问 controller，避免 WebContents 先销毁的悬垂）。
+
+### 2.3 Human Presence 与 AI 输入暂停衔接
+
+- `NoteHumanPresence(now)` 第一件事即 `human_pause_until_ = now + 1s`（刷新式、不去抖）；300ms 去抖只作用于上报计数。
+- 暂停在**所有** debugger 判定之前（事件、文本、**命令**三条路径），AI 也丢；人类输入永不丢。
+- 到期只凭时间比较，按当前 mode 继续；模式变更**不清**暂停（剩余 ≤1s）。
+- 不改变 ownership、不锁人类输入；暂停内不 `Focus()`、不入队 gesture。
+
+### 2.4 Feature 默认关闭
+
+- 三层 early-return：RWHI helper 首行、`GetInputOwnershipController()` 返回 `nullptr`、决策器每个入口首行；`InputHandler` 的四个 helper 同样首行判定。
+- 命令路径：Feature 关闭时 `ShouldDropDebuggerCommand` 直接放行，且**不打开 window、不记录 kind**（`FeatureOffDeliversDebuggerCommand` 断言）。
+- `ScopedInputOwnershipAuthorization(nullptr)` 为 no-op。
+
+### 2.5 不把 patch 028 描述成「完整页面修改隔离」（边界声明）
+
+**patch 028 只是「输入事件仲裁」，不是页面修改隔离，也不是 CDP 权限系统。**
+
+1. **`Runtime.evaluate` / `Runtime.callFunctionOn` / `DOM.*` / `Page.navigate` 直接改 DOM，完全不经过输入事件仲裁。**
+2. **第三方 CDP 的信任边界**：内核能区分「带 `kFromDebugger` 的注入事件」「OS 人类输入」「命令级 CDP 输入命令」，但**无法**判断某个 CDP 会话是否可信——能 attach 的客户端都能调 `Runtime.evaluate`。
+3. **BrowserPilot 命令层仍负责所有权校验**：内核是第二道防线，权威判定仍在扩展命令层与 `setOwnership` 快照。
+4. 本 patch 不提供：扩展 API、`grantInput` 真实写入路径、CDP 会话身份校验、`Runtime.evaluate` 拦截。
+5. 仍未覆盖的注入路径见 §9.2。
+
+### 2.6 命令级注入旁路（R3 新增）
+
+**问题**：`Input.synthesize*/emulateTouchFromMouseEvent/dispatchTouchEvent(pointer actions)` 产生的
+renderer 事件在 `SyntheticGestureTargetAura` 里被重建为 `ui::Event`，`kFromDebugger` 位丢失；
+`RenderWidgetHostImpl` 只按该位判断，因此这些事件会被当成**人类输入**（投递 + 记 presence + 1s 暂停）。
+只靠 RWHI 无法区分「人类」与「合成手势内部事件」。
+
+**实现（三层）**：
+
+1. **命令级前置裁决**（`InputOwnershipController::ShouldDropSessionCommand` →
+   `InputOwnershipDecider::ShouldDeliverDebuggerCommand`）：
+   | 条件 | 结果 |
+   |---|---|
+   | Feature off | 放行，零状态 |
+   | human pause | 拒绝 |
+   | `kAi` | 放行，不扣 grant |
+   | `kHuman` | 拒绝，不扣 grant |
+   | `kAssist` + 有效 grant | 放行并扣 **1** 个单位 |
+   | `kAssist` 无 grant / 过期 / 用尽 | 拒绝 |
+   | 无 session token | 仅 AI 放行 |
+   在 `InputHandler` 的 5 个入口**入队/构造之前**调用；拒绝统一返回
+   `ServerError("InputOwnership: debugger input rejected (no valid grant for this session)")`，
+   不触碰 `pointer_ids_`、不队列 gesture、不 `Focus()`。
+2. **automation event window**：命令被接受后开启，`≤5s`，并在 gesture 完成回调里关闭
+   （pinch / scroll 的最后一轮 / tap 的最后一击 / pointer-action 序列结束）。
+   window 打开期间，RWHI 对**未带 `kFromDebugger`** 的事件：照常投递，但跳过
+   `NoteHumanPresence()` —— 它们不会被误判为人类，也不会误触发 1s 暂停。
+   window 单槽、带自增 id：新命令替换旧 window，旧回调的 close 只匹配自己的 id；
+   session 撤销或模式变更会关闭对应 window。
+3. **异步转发的 scope**：`emulateTouchFromMouseEvent` 的 `InsertVisualStateCallback` 回调里
+   构造 `ScopedInputOwnershipAuthorization` 再 `Forward*`（该路径的事件**保留** `kFromDebugger`，
+   但转发发生在命令返回之后，栈上的 scope 覆盖不到，必须在回调里建）。
+
+**限额与固有盲区**（明确记录）：
+
+- window 硬上限 5s；`repeat_count × duration` 超过 5s 的长滚动，尾部事件会重新被当作人类输入
+  （仍会投递，只是会置 1s 暂停）。
+- window 打开期间**真实人类输入不设暂停**（无法与内部事件区分）。窗口只由已授权命令开启，
+  HUMAN 下不可能开启，且通常 <1s；这是为「合成手势不误判人类」付出的代价。
+- 模式切到 HUMAN 时 window 关闭，但**已经启动**的合成手势无法取消，可能继续跑完
+  （时长受命令参数限制），其后续事件会被当作人类输入投递。
+
+## 3. 命令 ↔ 手势语义表
+
+| 扩展命令 | CDP 命令序列 | 内核输入 | grant 扣减 | 绝对上限 |
+|---|---|---|---|---|
+| `click` | mousePressed + mouseReleased | `kMouseDown` + `kMouseUp` | **1** | 手势 ≤5s |
+| `hover` / `move` | mouseMoved | `kMouseMove` | **1 / 命令** | 命令级 |
+| `drag` | pressed + N×moved + released | down + moves + up | **1** | 手势 ≤5s |
+| `press`（键盘） | keyDown(+keyUp) | `RawKeyDown`(+`Char`+`KeyUp`) | **1** | 按键 ≤2s |
+| `wheel` | mouseWheel（1 命令） | 真实 wheel + 合成 phaseEnded | **1**（同一 scope） | 命令级 |
+| `type` / `fill` | N× `Input.insertText` | `ImeCommitText` | **1**（burst） | `min(now+300ms, grant_deadline)` |
+| `scrollTo`（合成） | `synthesizeScrollGesture` | 平台滚轮/手势事件（**无 `kFromDebugger`**） | **1 / 命令**（含 repeat） | 命令级 + window ≤5s |
+| `pinch` | `synthesizePinchGesture` | 平台手势事件 | **1** | 命令级 + window ≤5s |
+| `tap` | `synthesizeTapGesture` | 平台手势事件 | **1**（含 tapCount） | 命令级 + window ≤5s |
+| `touch` | `dispatchTouchEvent`（pointer actions 后端） | 合成触摸（平台事件） | **1 / 命令** | 命令级 + window ≤5s |
+| `emulateTouch` | `emulateTouchFromMouseEvent` | `ForwardMouse/Wheel`（**保留** `kFromDebugger`） | **1** | 命令级（回调内 scope） |
+| `touch`（默认后端） | `dispatchTouchEvent` | touch emulator | **1** | 命令级 |
+
+计数口径：
+
+- **一次 CDP 命令只裁决/扣减一次**。wheel 的「真实 + phaseEnded」两个转发共享一个 scope；
+  合成手势的整个序列（含 repeat / tapCount）只扣一次。
+- **命令边界即入口函数**：本轮不新增 `Begin/EndDebuggerInputCommand`；跨命令手势由 gesture deadline 描述。
+- 内核 grant 是第二道防线，扩展命令层仍按命令预算。
+
+## 4. 分层、单次消费与拒绝位置
 
 ```
-RendererWidgetHostImpl::Forward*  ─┐
-InputHandler::InsertText          ─┴─► RenderWidgetHostDelegate::GetInputOwnershipController()
-                                            │ (WebContentsImpl override)
-                                            ▼
-                              InputOwnershipController (WebContentsUserData, 每 WebContents 一个)
-                                            │
-                                            ▼
-                              InputOwnershipDecider (纯逻辑：mode + kFromDebugger + grant)
+事件路径（mouse/key/wheel/text/touch）
+  InputHandler::InputInjector::Inject*
+    1) ShouldDropDebuggerInput(...)      ← Feature → pause → session grant（扣 1）
+       └ 拒绝 → sendFailure(ServerError)，Focus/Drag/转发都没发生
+    2) ScopedInputOwnershipAuthorization
+    3) Focus() → Forward* ──────────────► RWHI: scope 内直接放行（不重复扣减）
+
+命令路径（synthetic / emulated touch）
+  InputHandler::DispatchTouchEvent(pointer actions)
+    SynthesizePinch/Scroll/TapGesture / EmulateTouchFromMouseEvent
+    1) ShouldDropDebuggerCommand(...)    ← Feature → pause → mode → grant（扣 1）
+       └ 拒绝 → sendFailure / ServerError return，未入队、未改 pointer_ids_
+    2) OpenAutomationEventWindow(...)    ← ≤5s，gesture 完成时关闭
+    3) QueueSyntheticGesture(...)  or  InsertVisualStateCallback(...)
+         └ 内部平台事件（无 kFromDebugger）→ RWHI: window 内投递且**不记人类**
+         └ emulated touch 的异步回调：ScopedInputOwnershipAuthorization 后 Forward*
 ```
 
-- 决策器不依赖 WebContents，单测可直接构造；时间通过 `base::TimeTicks now` 显式传入，
-  单测不依赖真实时钟。
-- controller 只做「per-WebContents 身份 + 转发」；它不产生用户身份，也不自行改 mode。
-- **初始 mode = `kAssist`（fail closed）**：`InputOwnershipSnapshot::mode` 与决策器的 `mode_`
-  默认值都是 `kAssist`。在受信扩展报告 mode 之前，没有 grant，所以 debugger 输入全部丢弃、
-  人类输入照常。忘记 `setOwnership` 不会退化成「AI 全放行」。
+- **拒绝先于副作用**：事件路径在 `Focus()`/DragController 之前；命令路径在 `pointer_ids_` 修改、
+  gesture 入队、`InsertVisualStateCallback` 之前。
+- **只扣一次**：RWHI 的 scope 检查是纯只读（`debugger_authorization_depth_ > 0`）。
+- scope 作用于 controller（每 WebContents），嵌套计数；交叉 WebContents 不误放行
+  （`ScopedAuthorizationIsPerController` 用第二个 WebContents 断言）。
 
-### 2.2 Feature 门禁（默认关闭）
-
-- 所有入口的第一行都是 `base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)`；
-  关闭时 `ShouldDropAutomationInput()` 直接返回 `false`，**不查询 delegate、不查询 controller**。
-- `WebContentsImpl::GetInputOwnershipController()` 关闭时返回 `nullptr`，因此连
-  `WebContentsUserData` 都不会被创建。
-- 决策器内部同样先判 Feature，关闭时 `ShouldDeliverDebuggerEvent()` / `ShouldDeliverDebuggerTextInsert()`
-  返回 `true` 且**不读不写任何状态**（不消耗 grant、不记录 human presence）。
-- `NotifyHumanPresenceForTesting()` 在 Feature 关闭时也是 no-op（不发事件语义）。
-- 例外（有意）：`SetModeForTesting` / `GrantDebuggerInputForTesting` 无论 Feature 开关都会写状态。
-  它们是测试驱动入口，不是生产写路径；正是为了证明「即便状态是 HUMAN + 有 grant，Feature
-  关闭时仍全部放行」。生产写路径（受信扩展 API）本轮不实现。
-
-### 2.3 grant 采用「手势级」计数（不是逐事件）
-
-与设计 §13.5.3 对齐，避免一次点击吃掉 2 次 grant、一次按键吃掉 3 次：
-
-| 手势 | 扣减时机 | 同一手势内免扣 |
-|---|---|---|
-| 鼠标 | `kMouseDown`；无按键的 move/hover 每次扣 1 | 已授权的 press→release，以及 release 后 200ms 内的 move/click |
-| 滚轮 | 每个 `kMouseWheel` 扣 1 | — |
-| 键盘 | `RawKeyDown` / `KeyDown` 扣 1 | 同一物理键的 `kChar` / `kKeyUp`，直到下一次 RawKeyDown |
-| 文本 | 每次 `insertText` 扣 1；300ms 内的连续插入共享 1 次 | 滚动窗口覆盖 `type` 的逐字输入 |
-
-其它约束：
-
-- 未被授权的 `kMouseDown` 会连带丢弃其 `kMouseUp`（页面不会看到「只抬起没按下」）。
-- 未授权的 `RawKeyDown` 在 RWHI 里同时置 `suppress_events_until_keydown_ = true`，
-  复用既有机制把后续 `kChar`/`kKeyUp` 一并挡掉。
-- grant 写入时夹紧：`actions ∈ [0, 10000]`、`ttl ≤ 600s`（与扩展侧 §12.5 常量一致）。
-- grant 只在 ASSIST 生效；`SetModeForTesting` 变更 mode 时清空 grant 与所有手势中间态。
-
-### 2.4 四个入口的精确位置
-
-| 入口 | 位置 | 丢弃动作 |
-|---|---|---|
-| `ForwardMouseEventWithLatencyInfo` | 类型 `CHECK` 之后、`mouse_event_callbacks_` 之前 | `return`（不触发任何 observer/callback） |
-| `ForwardWheelEventWithLatencyInfo` | `ScopedSafetyChecksExclusion` 之后、`IsIgnoringWebInputEvents` 之前 | `return` |
-| `ForwardKeyboardEventWithCommands` | **`PreHandleKeyboardEvent` 之后**、touch emulator 之前 | `RawKeyDown/KeyDown` 置 `suppress_events_until_keydown_=true` 后 `return` |
-| `InputHandler::InsertText` | 解析出 `widget_host` 之后、`ImeCommitText` 之前 | `callback->sendFailure(Response::ServerError("InputOwnership: insertText rejected (grant required)"))` |
-
-键盘检查放在浏览器快捷键处理之后，保证 HUMAN 模式下 Ctrl+L / Ctrl+T / Ctrl+W / F5 仍然由浏览器
-处理（设计 §4.1 不变量 4）；只有真正要进页面的键盘输入才受仲裁。
-
-## 3. 决策矩阵
+## 5. 决策矩阵
 
 `fromDebugger = (event.GetModifiers() & kFromDebugger) != 0`。Feature 关闭时下表全部为 D（放行）。
-**未设置 mode 时按 `kAssist` 处理（fail closed）**，因此首行就是「人类 D / debugger 丢弃」。
 
-| mode | fromDebugger | 事件 | grant 状态 | 结果 |
+| mode | 输入 | session | grant | 结果 |
 |---|---|---|---|---|
-| **未设置（默认 kAssist）** | 是 | 任意鼠标/滚轮/键盘/text | 无（初始无 grant） | **丢弃** |
-| 未设置（默认 kAssist） | 否（人类） | 任意 | 任意 | **D**，并记一次 human presence |
-| 任意 | 否（人类） | 任意鼠标/滚轮/键盘 | 任意 | **D**，并记一次 human presence（300ms 去抖） |
-| kAi | 是 | 任意 | 任意 | **D**，不消耗 grant |
-| kHuman | 是 | 任意（鼠标/滚轮/键盘/text） | 任意（含已授权） | **丢弃**，不消耗 grant |
-| kAssist | 是 | `kMouseDown` | 无/过期/用尽 | **丢弃** |
-| kAssist | 是 | `kMouseDown` | 有效 | **D**，`remaining--`，开启鼠标手势 |
-| kAssist | 是 | `kMouseUp` / 手势内的 move 等 | 同一次已授权手势 | **D**，`kMouseUp` 关闭手势并给 200ms 宽限 |
-| kAssist | 是 | `kMouseUp`（无匹配按下） | 无 | **丢弃** |
-| kAssist | 是 | 无按键 move（手势外、宽限外） | 无有效 grant | **丢弃** |
-| kAssist | 是 | 无按键 move | 有效 | **D**，`remaining--` |
-| kAssist | 是 | `kMouseWheel` | 无有效 grant / 有效 | **丢弃** / **D** 且 `remaining--` |
-| kAssist | 是 | `RawKeyDown`/`KeyDown` | 无有效 grant / 有效 | **丢弃** / **D** 且 `remaining--` |
-| kAssist | 是 | `kChar`/`kKeyUp`（同一已授权按键） | — | **D**（免费） |
-| kAssist | 是 | `kChar`/`kKeyUp`（无已授权按下） | — | **丢弃** |
-| kAssist | 是 | `insertText` | 300ms 窗口内已扣过 | **D**（免费，窗口顺延） |
-| kAssist | 是 | `insertText`（窗口外） | 无有效 grant / 有效 | **丢弃**（ServerError）/ **D** 且 `remaining--` |
-| kAssist | 是 | 触摸/手势等未接线类型 | 无有效 grant / 有效 | **丢弃** / **D** 且 `remaining--`（保守 fail-closed） |
+| 任意 | 人类（无 `kFromDebugger`，无 window） | — | — | **D** + 立即 1s 暂停 |
+| 任意 | 未标记事件，**window 开启** | — | — | **D**，**不**记人类、不暂停 |
+| 任意 | debugger 事件 | 任意 | — | 暂停窗口内丢弃（含 AI） |
+| 任意 | debugger 事件 | 无 token | — | AI：D；ASSIST/HUMAN：丢弃 |
+| kAi | debugger 事件 / 命令 | 有 | 任意 | **D**，不扣 grant |
+| kHuman | debugger 事件 / 命令 | 有 | 任意 | **丢弃**，不扣 grant |
+| kAssist | debugger 事件 | 有 | 无/过期/用尽 | **丢弃**（事件路径返回 ServerError） |
+| kAssist | `kMouseDown` | 有 | 有效 | **D** 且 `--`，手势 ≤5s |
+| kAssist | 手势内 move/up | 有 | 同一次按下 | **D**（免费），up 后 200ms grace（受 grant 封顶） |
+| kAssist | 孤立 `kMouseUp` | 有 | 无 | **丢弃** |
+| kAssist | 裸 move | 有 | 有效 / 无 | **D** 且 `--` / 丢弃 |
+| kAssist | 手势超 5s | 有 | — | 手势强制关闭；后续 move 变裸 move、up 丢弃 |
+| kAssist | `kMouseWheel` | 有 | 有效 / 无 | **D** 且 `--` / 丢弃 |
+| kAssist | 键盘按下 | 有 | 有效 / 无 | **D** 且 `--`（≤2s）/ 丢弃 |
+| kAssist | `insertText` | 有 | burst 内 / 外且有效 / 无 | **D**（免费）/ **D** 且 `--` / 丢弃 |
+| kAssist | **合成命令（5 类）** | 有 | 有效 / 无 | **D** 且 `--`（window ≤5s）/ **丢弃** |
+| kAssist | 触摸（默认后端） | 有 | 有效 / 无 | **D** 且 `--` / 丢弃 |
 
-版本语义：`snapshot().version` 在每次**实际** mode 变更时 +1；重复设置同一 mode 不变（幂等）。
+版本语义不变：`snapshot().version` 只在**实际** mode 变更时 +1。
 
-## 4. 与设计 §13 的差异（本轮最小集，主代理需确认）
+## 6. Feature-off 证据
 
-| 设计 §13 | 本轮实现 | 说明 |
-|---|---|---|
-| 快照未知 → `kAssist`（fail closed） | **已对齐**：`InputOwnershipSnapshot::mode` 与 `InputOwnershipDecider::mode_` 默认值均为 `kAssist` | 2026-10-29 按主代理审核修正（原为 `kAi`）。未设置 mode 且无 grant 时 debugger 输入全部丢弃，由 `DefaultModeIsAssistFailClosed` 覆盖 |
-| 30s 无更新 → 降级 ASSIST（stale） | 未实现 stale 定时器 | 默认值已是 ASSIST，因此「从未 setOwnership」是 fail-closed；但若扩展先 `setOwnership(kAi)` 之后失联/崩溃，状态会一直保持 `kAi`。扩展 API 那一轮必须补心跳（或每 30s 失效回 ASSIST） |
-| grant 表按 `DevToolsAgentHost*`（session）分桶 | 单个全局 grant 桶 | 本轮无扩展 API，无法安全获得受信 session 身份；分桶留到扩展 API 那一轮（需要 `ExtensionDevToolsClientHost` 匹配） |
-| `grantInput` 只由受信扩展 API 写入 | 只有 `GrantDebuggerInputForTesting` | 符合「本轮不实现扩展 API」 |
-| `human_presence` 通过 `SetHumanPresenceCallback` 上报 chrome 层 | 只在决策器内 300ms 去抖计数 | 无 chrome 层回调，避免本轮引入未受审核的事件桥 |
-| `InputOwnershipSnapshot.stale` 字段 | 无（只有 `mode` + `version`） | 按本轮任务书的结构体定义 |
+三层代码 early-return（§2.4）+ 两层测试：
 
-## 5. Feature-off 证据
+- `FeatureOffDeliversEverything`：HUMAN + 5 grant 下事件全放行、grant 不变、无暂停、无 presence。
+- `FeatureOffDoesNotCreateController`：controller 与 user data 均为 `nullptr`。
+- `FeatureOffDeliversDebuggerCommand`：HUMAN + 5 grant 下命令放行、grant 不变、
+  `OpenAutomationEventWindow()` 返回 0、window 不开启、`last_command_kind` 不记录。
 
-代码层（三条独立证据）：
-
-1. `render_widget_host_impl.cc` 的 `ShouldDropAutomationInput()` 第一行即
-   `if (!base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) return false;`
-   —— Feature 关闭时不触碰 delegate / controller，三个 `Forward*` 的既有分支顺序和返回值不变。
-2. `WebContentsImpl::GetInputOwnershipController()` 在 Feature 关闭时返回 `nullptr`，不创建
-   `WebContentsUserData`（`InputOwnershipControllerTest.FeatureOffDoesNotCreateController` 断言
-   `GetInputOwnershipController()` 与 `FromWebContents()` 都是 `nullptr`）。
-3. `InputOwnershipDecider::ShouldDeliverDebuggerEvent()` / `ShouldDeliverDebuggerTextInsert()`
-   先判 Feature；关闭时返回 `true` 且不写任何状态。单测
-   `FeatureOffDeliversEverything` 在 **HUMAN mode + 5 次 grant** 下断言鼠标/滚轮/键盘/文本全部
-   放行、grant 仍为 5、human presence 计数为 0（连 `NotifyHumanPresenceForTesting` 都不计数）。
-
-构建/运行层：
-
-- Feature 默认值 `FEATURE_DISABLED_BY_DEFAULT`，`out/WinDev` 未传任何 `--enable-features`，
-  单测进程内默认关闭；上述 22 个测试全部在默认（关闭）状态下启动，其中
-  `FeatureOffDeliversEverything` / `FeatureOffDoesNotCreateController` 显式关闭 Feature 断言。
-- 未新增 chrome://flags 条目（见 §8 未覆盖项）；需要显式开启时用
-  `--enable-features=InputOwnershipEnforcement`（`base::Feature` 名称即
-  `kInputOwnershipEnforcement` 去掉前缀 `k`）。
-
-## 6. 构建命令与结果
-
-环境（Git Bash）：
+## 7. 构建命令与结果
 
 ```bash
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
@@ -190,41 +245,46 @@ cd /d/c/src
 ```
 
 ```bash
-# 1) chrome（首次 655 步；因 content_features.h 变更触发 content/ 与 chrome/ 增量重编 + 链接）
-third_party/ninja/ninja.exe -C out/WinDev -j 6 chrome
-# → EXIT=0，最后 [652/655] LINK(DLL) chrome.dll；日志 build-logs/028-chrome-build.log
+# 0) 单对象预检：编译 input_ownership_* / input_handler / render_widget_host_impl
+third_party/ninja/ninja.exe -C out/WinDev -j 6 \
+  obj/content/browser/browser/input_ownership_controller.obj \
+  obj/content/browser/browser/input_ownership_decider.obj \
+  obj/content/test/content_unittests/input_ownership_controller_unittest.obj \
+  obj/content/browser/browser/input_handler.obj \
+  obj/content/browser/browser/render_widget_host_impl.obj
+# → 首次 1 处绑定参数错误（OnScrollFinished 漏传 window id），修正后全部成功
 
-# 2) 注释改动后收尾（20 步，含 input_ownership_controller.obj / input_handler.obj / content.dll）
-third_party/ninja/ninja.exe -C out/WinDev -j 6 chrome
-# → EXIT=0
-
-# 3) content_unittests（首次 2202 步）
+# 1) content_unittests（11 步，含 content.dll 重链）
 third_party/ninja/ninja.exe -C out/WinDev -j 6 content_unittests
-# → EXIT=0，[2202/2202] LINK content_unittests.exe；日志 build-logs/028-content-unittests-build.log
+# → EXIT=0（日志 028d-content-unittests-build.log）
 
-# 4) 默认值改为 kAssist 后重编（chrome 23 步、content_unittests 2 步）
-third_party/ninja/ninja.exe -C out/WinDev -j 6 chrome            # → CHROME_EXIT=0
-third_party/ninja/ninja.exe -C out/WinDev -j 6 content_unittests # → UNITTESTS_EXIT=0
-# 日志 build-logs/028-rebuild-assist-default.log
+# 2) 单测
+out/WinDev/content_unittests.exe --gtest_filter=InputOwnership*
+# → EXIT=0，40/40 PASS（日志 028d-input-ownership-tests.log）
 
-# 5) no-work 复核
-third_party/ninja/ninja.exe -C out/WinDev -n -j 6 chrome          # → ninja: no work to do.
-third_party/ninja/ninja.exe -C out/WinDev -n -j 6 content_unittests # → ninja: no work to do.
+# 3) chrome
+third_party/ninja/ninja.exe -C out/WinDev -j 6 chrome
+# → 首次失败：components_storage_monitor.dll / components_sessions.dll permission denied
+#   （其他 agent 的 out/WinDev/chrome.exe 探针进程周期性占用 DLL；未使用 taskkill /IM）
+# → 等待后 -j 4 重跑：EXIT=0，13 步，[11/13] LINK(DLL) chrome.dll（日志 028c-chrome-build.log）
+#   最后一轮只把 window 打开点前移到 gesture 入队处（input_handler 私有 helper），
+#   content.dll 导出表未变，因此 chrome 无需重链。
+
+# 4) no-work 复核
+third_party/ninja/ninja.exe -C out/WinDev -n -j 6 chrome content_unittests
+# → ninja: no work to do.
 ```
 
-未启动可见窗口；未启动 Backlight；未使用 `--use-mock-keychain`（Windows 不涉及）；未触碰用户
-Chrome / profile；未出现任何系统对话框。
+未启动可见窗口；未触碰用户 Chrome / profile；未出现系统对话框；未杀任何进程。
 
-## 7. 单元测试原始输出
-
-命令：
+## 8. 单元测试原始输出
 
 ```bash
 cd /d/c/src/out/WinDev
 ./content_unittests.exe --gtest_filter=InputOwnership*
 ```
 
-原始输出（`build-logs/028-input-ownership-tests-assist-default.log`，完整未删减）：
+原始输出（`build-logs/028d-input-ownership-tests.log`，167 行，完整未删减，EXIT=0）：
 
 ```text
 IMPORTANT DEBUGGING NOTE: batches of tests are run inside their
@@ -233,7 +293,7 @@ own process. For debugging a test inside a debugger, use the
 --single-process-tests.
 Using sharding settings from environment. This is shard 0/1
 Using 1 parallel jobs.
-Note: Google Test filter = InputOwnershipDeciderTest.FeatureOffDeliversEverything:InputOwnershipDeciderTest.DefaultModeIsAssistFailClosed:InputOwnershipDeciderTest.HumanInputIsAlwaysDelivered:InputOwnershipDeciderTest.HumanInputDoesNotConsumeGrant:InputOwnershipDeciderTest.HumanModeDropsDebuggerInput:InputOwnershipDeciderTest.AiModeDeliversDebuggerInput:InputOwnershipDeciderTest.AssistWithoutGrantDropsDebuggerInput:InputOwnershipDeciderTest.AssistGrantOneAllowsOnePointerGesture:InputOwnershipDeciderTest.AssistDroppedPressAlsoDropsRelease:InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit
+Note: Google Test filter = InputOwnershipDeciderTest.FeatureOffDeliversEverything:InputOwnershipDeciderTest.DefaultModeIsAssistFailClosed:InputOwnershipDeciderTest.HumanInputIsAlwaysDelivered:InputOwnershipDeciderTest.HumanInputDoesNotConsumeGrant:InputOwnershipDeciderTest.HumanModeDropsDebuggerInput:InputOwnershipDeciderTest.AiModeDeliversDebuggerInput:InputOwnershipDeciderTest.AssistWithoutGrantDropsDebuggerInput:InputOwnershipDeciderTest.UnattributedDebuggerInputFailsClosed:InputOwnershipDeciderTest.AssistGrantOneAllowsOnePointerGesture:InputOwnershipDeciderTest.AssistDroppedPressAlsoDropsRelease
 [==========] Running 10 tests from 1 test suite.
 [----------] Global test environment set-up.
 [----------] 10 tests from InputOwnershipDeciderTest
@@ -251,33 +311,35 @@ Note: Google Test filter = InputOwnershipDeciderTest.FeatureOffDeliversEverythin
 [       OK ] InputOwnershipDeciderTest.AiModeDeliversDebuggerInput (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.AssistWithoutGrantDropsDebuggerInput
 [       OK ] InputOwnershipDeciderTest.AssistWithoutGrantDropsDebuggerInput (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.UnattributedDebuggerInputFailsClosed
+[       OK ] InputOwnershipDeciderTest.UnattributedDebuggerInputFailsClosed (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.AssistGrantOneAllowsOnePointerGesture
 [       OK ] InputOwnershipDeciderTest.AssistGrantOneAllowsOnePointerGesture (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.AssistDroppedPressAlsoDropsRelease
 [       OK ] InputOwnershipDeciderTest.AssistDroppedPressAlsoDropsRelease (0 ms)
-[ RUN      ] InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit
-[       OK ] InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit (0 ms)
 [----------] 10 tests from InputOwnershipDeciderTest (20 ms total)
 
 [----------] Global test environment tear-down
-[==========] 10 tests from 1 test suite ran. (22 ms total)
+[==========] 10 tests from 1 test suite ran. (28 ms total)
 [  PASSED  ] 10 tests.
-[1/22] InputOwnershipDeciderTest.FeatureOffDeliversEverything (0 ms)
-[2/22] InputOwnershipDeciderTest.DefaultModeIsAssistFailClosed (0 ms)
-[3/22] InputOwnershipDeciderTest.HumanInputIsAlwaysDelivered (0 ms)
-[4/22] InputOwnershipDeciderTest.HumanInputDoesNotConsumeGrant (0 ms)
-[5/22] InputOwnershipDeciderTest.HumanModeDropsDebuggerInput (0 ms)
-[6/22] InputOwnershipDeciderTest.AiModeDeliversDebuggerInput (0 ms)
-[7/22] InputOwnershipDeciderTest.AssistWithoutGrantDropsDebuggerInput (0 ms)
-[8/22] InputOwnershipDeciderTest.AssistGrantOneAllowsOnePointerGesture (0 ms)
-[9/22] InputOwnershipDeciderTest.AssistDroppedPressAlsoDropsRelease (0 ms)
-[10/22] InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit (0 ms)
-Note: Google Test filter = InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerTick:InputOwnershipDeciderTest.AssistGrantOneAllowsOneKeyPress:InputOwnershipDeciderTest.AssistTextInsertSharesOneBurst:InputOwnershipDeciderTest.AssistGrantExpiry:InputOwnershipDeciderTest.AssistGrantExhaustion:InputOwnershipDeciderTest.GrantClearedOnModeChange:InputOwnershipDeciderTest.ModeVersionIsMonotonic:InputOwnershipDeciderTest.HumanPresenceIsDebounced:InputOwnershipDeciderTest.DebuggerInputIsNotHumanPresence:InputOwnershipControllerTest.FeatureOffDoesNotCreateController
-[==========] Running 10 tests from 2 test suites.
+[1/40] InputOwnershipDeciderTest.FeatureOffDeliversEverything (0 ms)
+[2/40] InputOwnershipDeciderTest.DefaultModeIsAssistFailClosed (0 ms)
+[3/40] InputOwnershipDeciderTest.HumanInputIsAlwaysDelivered (0 ms)
+[4/40] InputOwnershipDeciderTest.HumanInputDoesNotConsumeGrant (0 ms)
+[5/40] InputOwnershipDeciderTest.HumanModeDropsDebuggerInput (0 ms)
+[6/40] InputOwnershipDeciderTest.AiModeDeliversDebuggerInput (0 ms)
+[7/40] InputOwnershipDeciderTest.AssistWithoutGrantDropsDebuggerInput (0 ms)
+[8/40] InputOwnershipDeciderTest.UnattributedDebuggerInputFailsClosed (0 ms)
+[9/40] InputOwnershipDeciderTest.AssistGrantOneAllowsOnePointerGesture (0 ms)
+[10/40] InputOwnershipDeciderTest.AssistDroppedPressAlsoDropsRelease (0 ms)
+Note: Google Test filter = InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit:InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerCommand:InputOwnershipDeciderTest.AssistGrantOneAllowsOneKeyPress:InputOwnershipDeciderTest.AssistTextInsertSharesOneBurst:InputOwnershipDeciderTest.AssistGrantExpiry:InputOwnershipDeciderTest.AssistGrantExhaustion:InputOwnershipDeciderTest.GrantClearedOnModeChange:InputOwnershipDeciderTest.ModeChangeClearsGestureState:InputOwnershipDeciderTest.ModeVersionIsMonotonic:InputOwnershipDeciderTest.HumanPresenceIsDebounced
+[==========] Running 10 tests from 1 test suite.
 [----------] Global test environment set-up.
-[----------] 9 tests from InputOwnershipDeciderTest
-[ RUN      ] InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerTick
-[       OK ] InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerTick (0 ms)
+[----------] 10 tests from InputOwnershipDeciderTest
+[ RUN      ] InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit
+[       OK ] InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerCommand
+[       OK ] InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerCommand (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.AssistGrantOneAllowsOneKeyPress
 [       OK ] InputOwnershipDeciderTest.AssistGrantOneAllowsOneKeyPress (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.AssistTextInsertSharesOneBurst
@@ -288,136 +350,205 @@ Note: Google Test filter = InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerT
 [       OK ] InputOwnershipDeciderTest.AssistGrantExhaustion (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.GrantClearedOnModeChange
 [       OK ] InputOwnershipDeciderTest.GrantClearedOnModeChange (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.ModeChangeClearsGestureState
+[       OK ] InputOwnershipDeciderTest.ModeChangeClearsGestureState (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.ModeVersionIsMonotonic
 [       OK ] InputOwnershipDeciderTest.ModeVersionIsMonotonic (0 ms)
 [ RUN      ] InputOwnershipDeciderTest.HumanPresenceIsDebounced
 [       OK ] InputOwnershipDeciderTest.HumanPresenceIsDebounced (0 ms)
+[----------] 10 tests from InputOwnershipDeciderTest (27 ms total)
+
+[----------] Global test environment tear-down
+[==========] 10 tests from 1 test suite ran. (28 ms total)
+[  PASSED  ] 10 tests.
+[11/40] InputOwnershipDeciderTest.AssistBareMoveCostsOneUnit (0 ms)
+[12/40] InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerCommand (0 ms)
+[13/40] InputOwnershipDeciderTest.AssistGrantOneAllowsOneKeyPress (0 ms)
+[14/40] InputOwnershipDeciderTest.AssistTextInsertSharesOneBurst (0 ms)
+[15/40] InputOwnershipDeciderTest.AssistGrantExpiry (0 ms)
+[16/40] InputOwnershipDeciderTest.AssistGrantExhaustion (0 ms)
+[17/40] InputOwnershipDeciderTest.GrantClearedOnModeChange (0 ms)
+[18/40] InputOwnershipDeciderTest.ModeChangeClearsGestureState (0 ms)
+[19/40] InputOwnershipDeciderTest.ModeVersionIsMonotonic (0 ms)
+[20/40] InputOwnershipDeciderTest.HumanPresenceIsDebounced (0 ms)
+Note: Google Test filter = InputOwnershipDeciderTest.DebuggerInputIsNotHumanPresence:InputOwnershipDeciderTest.SessionGrantsAreIsolated:InputOwnershipDeciderTest.SessionRevocation:InputOwnershipDeciderTest.MouseGestureHasAbsoluteDeadline:InputOwnershipDeciderTest.KeyGestureHasAbsoluteDeadline:InputOwnershipDeciderTest.TextBurstCannotExtendPastGrantDeadline:InputOwnershipDeciderTest.TextBurstCappedByGrantWithUnitsLeft:InputOwnershipDeciderTest.HumanInputPausesAllDebuggerInput:InputOwnershipDeciderTest.HumanPauseExpiresThenAssistResumes:InputOwnershipDeciderTest.DebuggerCommandMatrix
+[==========] Running 10 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 10 tests from InputOwnershipDeciderTest
 [ RUN      ] InputOwnershipDeciderTest.DebuggerInputIsNotHumanPresence
 [       OK ] InputOwnershipDeciderTest.DebuggerInputIsNotHumanPresence (0 ms)
-[----------] 9 tests from InputOwnershipDeciderTest (19 ms total)
-
-[----------] 1 test from InputOwnershipControllerTest
-[ RUN      ] InputOwnershipControllerTest.FeatureOffDoesNotCreateController
-[       OK ] InputOwnershipControllerTest.FeatureOffDoesNotCreateController (106 ms)
-[----------] 1 test from InputOwnershipControllerTest (106 ms total)
+[ RUN      ] InputOwnershipDeciderTest.SessionGrantsAreIsolated
+[       OK ] InputOwnershipDeciderTest.SessionGrantsAreIsolated (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.SessionRevocation
+[       OK ] InputOwnershipDeciderTest.SessionRevocation (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.MouseGestureHasAbsoluteDeadline
+[       OK ] InputOwnershipDeciderTest.MouseGestureHasAbsoluteDeadline (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.KeyGestureHasAbsoluteDeadline
+[       OK ] InputOwnershipDeciderTest.KeyGestureHasAbsoluteDeadline (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.TextBurstCannotExtendPastGrantDeadline
+[       OK ] InputOwnershipDeciderTest.TextBurstCannotExtendPastGrantDeadline (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.TextBurstCappedByGrantWithUnitsLeft
+[       OK ] InputOwnershipDeciderTest.TextBurstCappedByGrantWithUnitsLeft (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.HumanInputPausesAllDebuggerInput
+[       OK ] InputOwnershipDeciderTest.HumanInputPausesAllDebuggerInput (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.HumanPauseExpiresThenAssistResumes
+[       OK ] InputOwnershipDeciderTest.HumanPauseExpiresThenAssistResumes (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.DebuggerCommandMatrix
+[       OK ] InputOwnershipDeciderTest.DebuggerCommandMatrix (0 ms)
+[----------] 10 tests from InputOwnershipDeciderTest (21 ms total)
 
 [----------] Global test environment tear-down
-[==========] 10 tests from 2 test suites ran. (126 ms total)
+[==========] 10 tests from 1 test suite ran. (21 ms total)
 [  PASSED  ] 10 tests.
-[11/22] InputOwnershipDeciderTest.AssistWheelCostsOneUnitPerTick (0 ms)
-[12/22] InputOwnershipDeciderTest.AssistGrantOneAllowsOneKeyPress (0 ms)
-[13/22] InputOwnershipDeciderTest.AssistTextInsertSharesOneBurst (0 ms)
-[14/22] InputOwnershipDeciderTest.AssistGrantExpiry (0 ms)
-[15/22] InputOwnershipDeciderTest.AssistGrantExhaustion (0 ms)
-[16/22] InputOwnershipDeciderTest.GrantClearedOnModeChange (0 ms)
-[17/22] InputOwnershipDeciderTest.ModeVersionIsMonotonic (0 ms)
-[18/22] InputOwnershipDeciderTest.HumanPresenceIsDebounced (0 ms)
-[19/22] InputOwnershipDeciderTest.DebuggerInputIsNotHumanPresence (0 ms)
-[20/22] InputOwnershipControllerTest.FeatureOffDoesNotCreateController (106 ms)
-Note: Google Test filter = InputOwnershipControllerTest.OneControllerPerWebContents:InputOwnershipControllerTest.DefaultAssistThenAiThenHuman
-[==========] Running 2 tests from 1 test suite.
+[21/40] InputOwnershipDeciderTest.DebuggerInputIsNotHumanPresence (0 ms)
+[22/40] InputOwnershipDeciderTest.SessionGrantsAreIsolated (0 ms)
+[23/40] InputOwnershipDeciderTest.SessionRevocation (0 ms)
+[24/40] InputOwnershipDeciderTest.MouseGestureHasAbsoluteDeadline (0 ms)
+[25/40] InputOwnershipDeciderTest.KeyGestureHasAbsoluteDeadline (0 ms)
+[26/40] InputOwnershipDeciderTest.TextBurstCannotExtendPastGrantDeadline (0 ms)
+[27/40] InputOwnershipDeciderTest.TextBurstCappedByGrantWithUnitsLeft (0 ms)
+[28/40] InputOwnershipDeciderTest.HumanInputPausesAllDebuggerInput (0 ms)
+[29/40] InputOwnershipDeciderTest.HumanPauseExpiresThenAssistResumes (0 ms)
+[30/40] InputOwnershipDeciderTest.DebuggerCommandMatrix (0 ms)
+Note: Google Test filter = InputOwnershipDeciderTest.DebuggerCommandKindsEachCostOneUnit:InputOwnershipDeciderTest.FeatureOffDeliversDebuggerCommand:InputOwnershipDeciderTest.AutomationEventWindowLifecycle:InputOwnershipControllerTest.FeatureOffDoesNotCreateController:InputOwnershipControllerTest.OneControllerPerWebContents:InputOwnershipControllerTest.DefaultAssistThenAiThenHuman:InputOwnershipControllerTest.HumanEventPausesDebuggerInput:InputOwnershipControllerTest.SessionGrantsAreIsolated:InputOwnershipControllerTest.ScopedAuthorizationIsPerController:InputOwnershipControllerTest.AutomationCommandAndWindow
+[==========] Running 10 tests from 2 test suites.
 [----------] Global test environment set-up.
-[----------] 2 tests from InputOwnershipControllerTest
+[----------] 3 tests from InputOwnershipDeciderTest
+[ RUN      ] InputOwnershipDeciderTest.DebuggerCommandKindsEachCostOneUnit
+[       OK ] InputOwnershipDeciderTest.DebuggerCommandKindsEachCostOneUnit (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.FeatureOffDeliversDebuggerCommand
+[       OK ] InputOwnershipDeciderTest.FeatureOffDeliversDebuggerCommand (0 ms)
+[ RUN      ] InputOwnershipDeciderTest.AutomationEventWindowLifecycle
+[       OK ] InputOwnershipDeciderTest.AutomationEventWindowLifecycle (0 ms)
+[----------] 3 tests from InputOwnershipDeciderTest (19 ms total)
+
+[----------] 7 tests from InputOwnershipControllerTest
+[ RUN      ] InputOwnershipControllerTest.FeatureOffDoesNotCreateController
+[       OK ] InputOwnershipControllerTest.FeatureOffDoesNotCreateController (112 ms)
 [ RUN      ] InputOwnershipControllerTest.OneControllerPerWebContents
-[       OK ] InputOwnershipControllerTest.OneControllerPerWebContents (109 ms)
+[       OK ] InputOwnershipControllerTest.OneControllerPerWebContents (104 ms)
 [ RUN      ] InputOwnershipControllerTest.DefaultAssistThenAiThenHuman
-[       OK ] InputOwnershipControllerTest.DefaultAssistThenAiThenHuman (105 ms)
-[----------] 2 tests from InputOwnershipControllerTest (234 ms total)
+[       OK ] InputOwnershipControllerTest.DefaultAssistThenAiThenHuman (102 ms)
+[ RUN      ] InputOwnershipControllerTest.HumanEventPausesDebuggerInput
+[       OK ] InputOwnershipControllerTest.HumanEventPausesDebuggerInput (101 ms)
+[ RUN      ] InputOwnershipControllerTest.SessionGrantsAreIsolated
+[       OK ] InputOwnershipControllerTest.SessionGrantsAreIsolated (101 ms)
+[ RUN      ] InputOwnershipControllerTest.ScopedAuthorizationIsPerController
+[       OK ] InputOwnershipControllerTest.ScopedAuthorizationIsPerController (100 ms)
+[ RUN      ] InputOwnershipControllerTest.AutomationCommandAndWindow
+[       OK ] InputOwnershipControllerTest.AutomationCommandAndWindow (99 ms)
+[----------] 7 tests from InputOwnershipControllerTest (723 ms total)
 
 [----------] Global test environment tear-down
-[==========] 2 tests from 1 test suite ran. (234 ms total)
-[  PASSED  ] 2 tests.
-[21/22] InputOwnershipControllerTest.OneControllerPerWebContents (109 ms)
-[22/22] InputOwnershipControllerTest.DefaultAssistThenAiThenHuman (105 ms)
+[==========] 10 tests from 2 test suites ran. (743 ms total)
+[  PASSED  ] 10 tests.
+[31/40] InputOwnershipDeciderTest.DebuggerCommandKindsEachCostOneUnit (0 ms)
+[32/40] InputOwnershipDeciderTest.FeatureOffDeliversDebuggerCommand (0 ms)
+[33/40] InputOwnershipDeciderTest.AutomationEventWindowLifecycle (0 ms)
+[34/40] InputOwnershipControllerTest.FeatureOffDoesNotCreateController (112 ms)
+[35/40] InputOwnershipControllerTest.OneControllerPerWebContents (104 ms)
+[36/40] InputOwnershipControllerTest.DefaultAssistThenAiThenHuman (102 ms)
+[37/40] InputOwnershipControllerTest.HumanEventPausesDebuggerInput (101 ms)
+[38/40] InputOwnershipControllerTest.SessionGrantsAreIsolated (101 ms)
+[39/40] InputOwnershipControllerTest.ScopedAuthorizationIsPerController (100 ms)
+[40/40] InputOwnershipControllerTest.AutomationCommandAndWindow (99 ms)
 SUCCESS: all tests passed.
-Tests took 1 seconds.
+Tests took 2 seconds.
 ```
 
-### 7.1 矩阵逐项对应
+### 8.1 测试矩阵
 
-| 任务书要求 | 覆盖测试 |
-|---|---|
-| **Feature 开启但未设置 mode → debugger 丢弃（fail-closed）** | `DefaultModeIsAssistFailClosed`（snapshot=ASSIST/version=0；鼠标/滚轮/键盘/text 全丢弃；人类输入仍放行）；`DefaultAssistThenAiThenHuman`（controller 层同一行为） |
-| Feature 关闭 → 任何 mode 都放行 | `FeatureOffDeliversEverything`（HUMAN + 5 grant 仍全放行）、`FeatureOffDoesNotCreateController` |
-| 人类输入（无 `kFromDebugger`）在 HUMAN/ASSIST 都放行 | `HumanInputIsAlwaysDelivered`（三种 mode 各一组）、`HumanInputDoesNotConsumeGrant` |
-| HUMAN 下 debugger 鼠标/键盘/滚轮丢弃 | `HumanModeDropsDebuggerInput`（另含 `insertText`） |
-| ASSIST 无 grant 丢弃 | `AssistWithoutGrantDropsDebuggerInput` |
-| grant 1 次只放行 1 次 | `AssistGrantOneAllowsOnePointerGesture`、`AssistGrantOneAllowsOneKeyPress`、`AssistBareMoveCostsOneUnit`、`AssistWheelCostsOneUnitPerTick`（「1 次 = 1 个手势」，与 §2.3 计数口径一致） |
-| 过期 / 用尽拒绝 | `AssistGrantExpiry`、`AssistGrantExhaustion` |
-| AI 放行（显式设置） | `AiModeDeliversDebuggerInput`（测试内显式 `SetModeForTesting(kAi)`，并断言不消耗 grant） |
-| grant 只在 ASSIST 有效，切到 HUMAN/AI 清空 | `GrantClearedOnModeChange` |
-| mode 版本单调（初始为 ASSIST/0） | `ModeVersionIsMonotonic` |
-| human presence 去抖（附加） | `HumanPresenceIsDebounced`（默认 ASSIST 下人类事件仍计数）、`DebuggerInputIsNotHumanPresence`（显式 kAi 下确认 debugger 事件不计数） |
-| controller 每 WebContents 一个（附加） | `OneControllerPerWebContents`（并断言新 controller 为 ASSIST）、`DefaultAssistThenAiThenHuman` |
+| 要求 / 场景 | 覆盖测试 | 断言要点 |
+|---|---|---|
+| **绝对截止**：grant 不被事件延长 | `AssistGrantExpiry`、`TextBurstCannotExtendPastGrantDeadline`、`TextBurstCappedByGrantWithUnitsLeft` | 300ms grant：+290ms 免费、+300ms 起拒绝 |
+| **鼠标手势 5s 截止** | `MouseGestureHasAbsoluteDeadline` | +4s move 免费；+6s move 变裸 move 扣 1；随后 up 丢弃 |
+| **键盘 2s 截止** | `KeyGestureHasAbsoluteDeadline` | +1s Char 免费；+2.5s Char/KeyUp 丢弃 |
+| **模式变更清 gesture/text** | `GrantClearedOnModeChange`、`ModeChangeClearsGestureState` | 切模式后 grant=0、up 不再放行 |
+| **session 分桶** | `SessionGrantsAreIsolated`（decider + controller） | A 用完不影响 B；B 不能借 A |
+| **session 撤销** | `SessionRevocation` | revoke 后 up/down 拒绝；同 token 重授权可用；B 不受影响 |
+| **无 session 的 debugger** | `UnattributedDebuggerInputFailsClosed` | ASSIST/HUMAN 丢、AI 放行、不消耗他人 grant |
+| **人类暂停立即生效** | `HumanInputPausesAllDebuggerInput` | +1ms 鼠标/键盘/滚轮/文本全丢；人类输入仍送达；暂停刷新 |
+| **暂停到期恢复** | `HumanPauseExpiresThenAssistResumes` | +1.1s ASSIST 恢复并扣 1 |
+| **人类输入永不丢** | `HumanInputIsAlwaysDelivered`、`HumanInputDoesNotConsumeGrant`、`HumanEventPausesDebuggerInput` | 三 mode + session 路径 |
+| **单次消费 / scope** | `ScopedAuthorizationIsPerController` | 嵌套计数；第二个 WebContents 不授权；nullptr no-op |
+| **Feature 关闭** | `FeatureOffDeliversEverything`、`FeatureOffDoesNotCreateController`、`FeatureOffDeliversDebuggerCommand` | 事件/命令全放行、零状态、不建 controller、不开 window |
+| **FAIL-CLOSED 默认** | `DefaultModeIsAssistFailClosed`、`DefaultAssistThenAiThenHuman` | ASSIST/version=0，全丢 |
+| **HUMAN 丢 debugger** | `HumanModeDropsDebuggerInput`、`DebuggerCommandMatrix` | 事件与命令都丢，grant 不变 |
+| **AI 放行** | `AiModeDeliversDebuggerInput`、`DebuggerCommandMatrix` | 不扣 grant；unattributed 也放行 |
+| **手势级计数（click/key/wheel/text）** | `AssistGrantOneAllowsOnePointerGesture`、`AssistGrantOneAllowsOneKeyPress`、`AssistWheelCostsOneUnitPerCommand`、`AssistTextInsertSharesOneBurst`、`AssistBareMoveCostsOneUnit` | 1 单位 = 1 手势 |
+| **命令级矩阵（R3）** | `DebuggerCommandMatrix` | ASSIST 无 grant 拒绝；有则只准 1 次；HUMAN 拒绝且不扣；AI 放行不扣；暂停期拒绝、到期恢复 |
+| **命令 kind 覆盖（R3）** | `DebuggerCommandKindsEachCostOneUnit` | touch/emulateTouch/pinch/scroll/tap 各扣 1，`last_command_kind` 正确 |
+| **window 生命周期（R3）** | `AutomationEventWindowLifecycle` | 截止、5s 封顶、旧 id 不能关新窗、revoke 关对应 session、mode 变更关闭 |
+| **命令 + window（controller，R3）** | `AutomationCommandAndWindow` | 拒绝不开窗；授权后扣 1；HUMAN 不扣；AI 不扣 |
+| **孤立 release 不投递** | `AssistDroppedPressAlsoDropsRelease` | 未授权按下 → up 也丢 |
+| **过期 / 用尽** | `AssistGrantExpiry`、`AssistGrantExhaustion` | 不复活 |
+| **human presence 去抖** | `HumanPresenceIsDebounced`、`DebuggerInputIsNotHumanPresence` | 300ms 只影响计数；debugger 不算 presence |
+| **mode 版本单调** | `ModeVersionIsMonotonic` | 初始 ASSIST/0 |
+| **每 WebContents 一个 controller** | `OneControllerPerWebContents` | 同一实例、初始 ASSIST |
 
-## 8. 未覆盖项（明确不做，待后续）
+## 9. 未覆盖项
 
-1. **扩展 API（K7/K8/K9）**：`browserCli.inputOwnership.setOwnership / grantInput / getOwnership`、
-   `onHumanPresence`、受信扩展身份校验、`_api_features.json` allowlist、managed policy 门禁——
-   本轮完全未实现。当前只有 testing 写入口。
-2. **会话级 grant 分桶**：未按 `DevToolsAgentHost*` 分桶；第三方 CDP 与自有 AI 共享同一桶。
-   后果只会「少放行」不会「多放行」（设计 §13.5.2 已列为已知限制）。
-3. **30s 快照过期 / 降级 ASSIST**、`InputOwnershipSnapshot.stale` 字段：未实现（见 §4）。
-   默认值已改为 ASSIST，因此「从未 setOwnership」是 fail-closed；但 `setOwnership(kAi)` 之后
-   扩展失联不会自动降级，需要扩展 API 那一轮补心跳/过期。
-4. **浏览器级 / OOPIF / 子帧浏览器测试**：未做（本轮约束禁止启动可见窗口）；`Forward*` 在
-   OOPIF 本地根上是否走同一个 `delegate_`，只有代码推断（`RenderWidgetHostImpl` 的 delegate 是
-   每个 widget 创建时传入的 FrameTree render_widget_delegate，即 `WebContentsImpl`），未实测。
-5. **`Input.dispatchTouchEvent` / `ForwardGestureEvent` / `ImeSetComposition`**：未接线（决策器对
-   未识别类型在 ASSIST 下保守要求 grant，但这些路径当前根本不会查询 controller）。
-6. **`human_presence` 事件桥**：只做了内核侧去抖计数，没有 `SetHumanPresenceCallback`、
-   没有扩展事件。
-7. **chrome://flags 条目**：未加 `about_flags.cc` 条目；显式开启需用
-   `--enable-features=InputOwnershipEnforcement`。
-8. **UMA / TRACE 事件**：只加了 3 个 `TRACE_EVENT0`（丢弃时），未加 UMA。
-9. **`patch-manifest.json`、commit、push**：按要求未做。
-10. **端到端「DOM 计数不变」证据**：需要 browser test 或真实窗口，本轮未做；现有证据只到
-    决策器/controller 层与编译链接层。
+### 9.1 本轮明确不做
 
-## 9. 风险
+1. **扩展 API（K7/K8/K9）** 与真实 `grantInput` 写入路径（chrome.debugger 会话 → `DevToolsSession*` 映射）。
+2. **30s 快照过期 / 降级 ASSIST**、`snapshot.stale`。
+3. **`Begin/EndDebuggerInputCommand`**（见 §3）。
+4. **OOPIF / 子帧的浏览器级验证**（本轮禁止启动可见窗口）。
+5. **human_presence 事件桥**、chrome://flags 条目、UMA。
+6. **端到端「DOM 计数不变」证据**（需要 browser test）。
+
+### 9.2 已知的注入旁路（本 patch 不覆盖）
+
+| 旁路 | 原因 | 影响 | 建议 |
+|---|---|---|---|
+| `Runtime.evaluate` / `callFunctionOn` / `DOM.*` | 不是输入事件 | **HUMAN 下仍可改页面** | BrowserPilot 命令层做所有权校验；内核不承诺这层隔离 |
+| `DragController` 的拖拽续传（`StartDragging` 之后） | 转发发生在 InputHandler 判决之外的异步回调，没有 scope | ASSIST/HUMAN 下这些事件被 RWHI 丢弃（fail closed），拖拽中断 | 若要支持 AI 拖拽，需把 drag 状态纳入 session 预算 |
+| 已启动的合成手势在模式切到 HUMAN 之后 | 内核没有取消 `SyntheticGestureController` 队列的公开 API | 手势可能继续跑完（时长受命令参数限制），其事件按人类输入投递 | 后续可在 `SetOwnership(HUMAN)` 时取消队列 |
+| 合成手势内部事件超出 5s window | window 硬上限 5s | 尾部事件被当作人类输入（投递 + 1s 暂停） | 长滚动请拆命令 |
+| TouchEmulator 生成的鼠标事件（默认 touch 后端） | 只有命令入口裁决，内部事件无标记 | 落在 window 内的按 automation 处理，之后按人类 | 同上 |
+| `synthesizeScrollGesture` 的 `repeat_count × delay` 很长 | window 不随 repeat 续期 | 仅影响 presence/pause 判定，不影响投递 | 可后续在 repeat 时分段续期 |
+
+## 10. 风险
 
 | 风险 | 影响 | 缓解 / 建议 |
 |---|---|---|
-| ~~默认 mode 为 `kAi`~~ **已修复（2026-10-29）** | 原实现与设计 §13.1「未知 → ASSIST fail-closed」相反 | 默认值已改为 `kAssist`（`InputOwnershipSnapshot::mode` + `InputOwnershipDecider::mode_`），新增 `DefaultModeIsAssistFailClosed`；该风险项关闭 |
-| `setOwnership(kAi)` 之后扩展失联，状态不会自动降级 | 一直保持 AI 全放行，直到扩展重连或 WebContents 销毁 | 默认值只能覆盖「从未上报」；扩展 API 那一轮必须补 30s 心跳/过期降级回 ASSIST（见 §4、§8.3） |
-| Feature 默认关闭但状态可被 testing 入口写入 | 仅测试可达，生产无调用点 | `#if !defined(UNIT_TEST)`? 未加，保持与 Chromium 常见 `*ForTesting` 一致；建议审核时确认不需要 `DCHECK_IS_ON()` 门禁 |
-| 手势级计数口径与「逐事件」预期不同 | 同一手势的 release/char 不扣 grant，可能被误读为「放了不止一次」 | §2.3 与 §7.1 已明确「1 次 = 1 个手势」；若主代理要求逐事件，需要改 4 处分支并重写 4 个测试 |
-| 单个全局 grant 桶 | 第三方 CDP 可消耗扩展授权的预算 | 只减少可用次数，不会造成未授权输入；后续按 session 分桶 |
-| 丢弃 `Input.insertText` 返回 `ServerError` | 第三方客户端会看到显式错误（这是有意的 fail-closed），可能与某些自动化框架的重试逻辑冲突 | 已按设计 §13.4 写死错误文本；扩展侧应把它当「无授权」处理 |
-| 鼠标宽限窗口 200ms / 文本窗口 300ms | 慢速拖拽或长间隔输入可能多消耗 grant | 常量集中在 `input_ownership_decider.cc` 匿名命名空间，便于按实测调整 |
-| 键盘检查位于 `PreHandleKeyboardEvent` 之后 | 浏览器快捷键不受仲裁（符合设计），但若未来把仲裁扩展到 `HandleKeyboardEvent` 之后可能重复消费 | 入口注释已说明「只剩进页面的输入」 |
-| `content_features.h` 变更触发大范围重编 | 构建时间（首次 chrome 655 步 + unittest 2202 步；默认值修正后 chrome 23 步、unittest 2 步） | 属预期；增量构建后已 no work |
-| 组件构建（`content.dll`）下 `for_content_tests` 的 `check_includes` 关闭 | 头文件包含规则未由 gn check 全量校验 | 新文件只 include content 内部/公共头，风险低；可在主代理侧用完整构建复核 |
+| window 内真实人类输入不设暂停（≤5s） | 极端并发下人类输入不会立刻压制 AI | window 只由已授权命令开启，HUMAN 下不可能；通常 <1s；可调 `kInputOwnershipAutomationWindow` |
+| window 5s 上限 | 长合成手势尾部按人类处理 | 拆分长滚动命令；常量集中，便于调整 |
+| HUMAN 切换后已启动手势继续 | HUMAN 语义短时被削弱 | 记录为未覆盖；后续在 mode 切换时取消 gesture 队列 |
+| 人类暂停 1s | 快速人工操作时 AI 命令频繁收到 ServerError | 扩展层应把该错误当「人类在场」退避 |
+| 鼠标 5s / 键盘 2s 上限 | 慢速拖拽或长按被强制关闭，up 丢弃 | 上限远大于正常自动化手势 |
+| `kFromDebugger` 不区分来源（RWHI 层） | 第三方注入无法在该层归属 | 已在 InputHandler 层按 `DevToolsSession*` 分桶；未经过 InputHandler 的路径 fail closed |
+| `Runtime.evaluate` 旁路 | HUMAN 仍有非输入类修改途径 | 文档明确边界；命令层负责所有权 |
+| 构建期 DLL 被其它 agent 的探针进程占用 | 链接偶发 `permission denied` | 等待后重试；不杀进程、不用 `taskkill /IM` |
+| `content_features.h` 变更触发大范围重编 | 构建时间 | 增量后已 no work |
 
-## 10. 复现与回退
-
-复现（在当前树已应用改动的前提下）：
+## 11. 复现与回退
 
 ```bash
 cd /d/c/src && export DEPOT_TOOLS_WIN_TOOLCHAIN=0
 export vs2026_install="C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools"
 export PATH="/d/c/src/third_party/cpython3/host/bin:$PATH"
-third_party/ninja/ninja.exe -C out/WinDev -j 6 content_unittests
+third_party/ninja/ninja.exe -C out/WinDev -j 6 chrome content_unittests
 out/WinDev/content_unittests.exe --gtest_filter=InputOwnership*
 ```
 
-回退（任选其一，均不触碰 patch 001-027）：
+回退：
 
 ```bash
-# a) 反向应用本 patch（会删除 5 个新文件并还原 11 个文件）
 git -C /d/c/src apply -R /d/work/browsercli/chromium/patches/028-input-ownership-arbitration.patch
-# b) 只删新文件 + 还原 11 个改动文件（等价）
 ```
 
-Feature 常量保留在 `content_features.{h,cc}` 也无副作用（没有任何生产代码在 Feature 关闭时
-引用 controller）；若要彻底回退可连同 `content/BUILD.gn` 的三行源文件条目一起删除。
+（已在当前树验证 `git apply --check -R` 通过，EXIT=0。）
 
-## 11. 交付物清单
+## 12. 交付物清单
 
 | 项 | 路径 | 状态 |
 |---|---|---|
-| patch 028 | `D:\work\browsercli\chromium\patches\028-input-ownership-arbitration.patch` | 已重新生成（含 kAssist 默认值），1258 行，sha256 `c108e0f9c20c899be4e4dd9b13aec7f18651cd10338bf17abe1b7890e0a4889b` |
-| 本文档 | `D:\work\browsercli\docs\windows-input-arbitration-kernel-2026-10-29.md` | 已生成（2026-10-29 修正默认值后同步更新） |
-| 源码改动 | `D:\c\src` 工作区（11 M + 2 新增路径 / 5 个新文件） | 保留，未 commit |
-| `patch-manifest.json` | `D:\work\browsercli\chromium\patch-manifest.json` | **未修改**（按要求） |
-| 构建日志 | `D:\work\browsercli\build-logs\028-chrome-build.log`、`028-content-unittests-build.log`、`028-rebuild-assist-default.log`、`028-input-ownership-tests-assist-default.log`、`028-baseline-status.txt` | 已保存 |
+| patch 028 | `D:\work\browsercli\chromium\patches\028-input-ownership-arbitration.patch` | 已重新生成，**2956 行**，17 段，sha256 `c129b42baeef335b62e4f6b0ad684db550e21a72078efae07782446f646ea86e` |
+| 本文档 | `D:\work\browsercli\docs\windows-input-arbitration-kernel-2026-10-29.md` | R3 |
+| 源码改动 | `D:\c\src` 工作区（12 改 + 5 新增） | 保留，未 commit |
+| `patch-manifest.json` | `D:\work\browsercli\chromium\patch-manifest.json` | **未修改** |
+| 基线 git status | `build-logs/028d-baseline-status.txt` | 生成 patch 前后一致 |
+| 构建日志 | `build-logs/028d-content-unittests-build.log`、`028c-chrome-build.log` | 已保存 |
+| 单测日志 | `build-logs/028d-input-ownership-tests.log` | 167 行，40/40 PASS |
+| 进程排查记录 | `build-logs/028c-chrome-procs*.txt`、`028c-lock-probe*.txt`、`028d-baseline-status.txt` | 说明 DLL 占用来自其它 agent 的 `out/WinDev/chrome.exe` 探针，未杀进程 |
