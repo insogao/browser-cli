@@ -50,6 +50,10 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 FIXTURE = os.path.join(REPO, "tests", "fixtures", "background-render-probe.html")
 CDP_LIB = os.path.join(HERE, "browser-cli-capability-cdp-check.py")
 
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import win_job  # noqa: E402  (Job Object: kills exactly the tree we started)
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 SW_HIDE = 0
@@ -271,6 +275,13 @@ def measure_window(session, hwnd, timeout, label, from_surface=True):
 # --------------------------------------------------------------------------
 
 def launch(chrome, profile, port, managed, extra):
+    """Start the browser inside a Job Object.
+
+    The returned object exposes pid/poll()/wait()/terminate()/kill() like
+    subprocess.Popen, but cleanup is scoped by the job: terminate() and
+    close() can only ever affect the process tree this harness created.
+    There is no fallback to an image-name kill.
+    """
     args = [
         chrome,
         # A visible window is required: the three states under test are native
@@ -286,9 +297,7 @@ def launch(chrome, profile, port, managed, extra):
     if managed:
         args.insert(1, "--browser-cli-background-presentation")
     args.extend(extra)
-    return __import__("subprocess").Popen(
-        args, stdout=__import__("subprocess").DEVNULL,
-        stderr=__import__("subprocess").DEVNULL)
+    return win_job.launch(args, stdio="devnull", label="background-render")
 
 
 def create_probe_windows(port, count, timeout):
@@ -350,10 +359,11 @@ def main():
 
     port = cap.free_port()
     profile = tempfile.mkdtemp(prefix="bl-bg-")
-    process = launch(args.chrome, profile, port, args.managed, args.extra_switch)
     report = {"scenario": args.scenario, "windows": args.windows,
               "repeat": args.repeat, "managed": args.managed, "samples": []}
+    process = None
     try:
+        process = launch(args.chrome, profile, port, args.managed, args.extra_switch)
         cap.wait_for_devtools(port, 60)
         created = create_probe_windows(port, args.windows, 40)
         time.sleep(3.0)
@@ -428,14 +438,20 @@ def main():
         for ws, _session in sessions.values():
             ws.close()
     finally:
-        try:
-            process.terminate()
-            process.wait(timeout=10)
-        except Exception:
+        # Job Object cleanup: terminate() kills the whole tree we started,
+        # close() releases the job handle (KILL_ON_JOB_CLOSE covers anything
+        # still alive). Neither can touch a browser this harness did not start.
+        if process is not None:
             try:
-                process.kill()
+                process.terminate()
+                process.wait(timeout=10)
             except Exception:
                 pass
+            finally:
+                try:
+                    process.close()
+                except Exception:
+                    pass
         shutil.rmtree(profile, ignore_errors=True)
 
     # ---- verdict -----------------------------------------------------------

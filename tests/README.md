@@ -646,6 +646,49 @@ tests/check-browser-launch-hygiene.sh --root DIR # 自测/合成目录
 任何新增测试入口都必须先通过该门禁。规则根因与生产约束见 [`../AGENTS.md`](../AGENTS.md)：
 **生产 Browser CLI 不得使用 mock keychain**，正式版依靠稳定签名 + 稳定安装路径。
 
+## 测试进程清理（强制：Job Object 或验证式 PID，禁止全局 kill）
+
+背景：2026-10-28 的诊断脚本执行过按镜像名的全局清理，在用户 Chrome 正在运行时可能误杀用户进程。
+从本切片起，测试进程的清理必须能**证明归属**，规则如下（违反即阻塞缺陷）：
+
+1. **禁止**任何无法证明归属的清理：按镜像名 / 进程名匹配的一律不允许，包括 `taskkill /IM`、
+   `Stop-Process -Name`、`Get-Process <name> | Stop-Process`、`pkill -f <browser>`、
+   `killall <browser>`、`wmic process ... delete`。
+2. **Windows Python harness 用 Job Object**：`tests/tools/win_job.py` 以
+   `CreateJobObjectW` + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 创建 job，子进程以
+   `CREATE_SUSPENDED` 启动、先 `AssignProcessToJobObject` 再 `ResumeThread`，因此不存在
+   “归属前已经创建孙进程”的窗口。`close()` 关闭 job 句柄即终止整棵进程树；任何 Win32
+   失败都抛 `JobError`，**没有**回退到全局 kill 的路径。
+3. **Node 测试用验证式 PID 清理**：`BrowserPilot/scripts/lib/test-process.mjs` 启动时记录
+   PID、创建时间、可执行路径、完整命令行与唯一 marker；`stopTestProcess()` 清理前重新查询
+   该 PID，**PID + 创建时间 + 命令行含 marker + 可执行路径全部匹配**才按 PID 清理，
+   任一不匹配即拒绝并记录。非 Windows 平台没有 WMI 身份查询，只通过本进程 spawn 的
+   `ChildProcess` 句柄清理（与原行为一致），不会按裸 PID 猜。
+4. **测试进程必须有唯一 marker**：优先使用独立临时 `--user-data-dir`
+   （`tempfile.mkdtemp` / `fs.mkdtempSync` / `mktemp -d`）。没有唯一 marker 的进程不允许
+   进入清理流程。
+5. 同一套规则适用于**用户 Chrome 正在运行**的场景：清理只作用于本次启动的 job / 已核验 PID，
+   不会扫描或结束其它浏览器实例。
+
+命令：
+
+```sh
+# Job Object 自测：只杀目标树，控制进程必须存活（Windows）
+python tests/tools/win_job.py --self-test
+
+# 后台渲染 harness 已改为 Job Object 启动/清理（launch()/finally）
+python tests/tools/background-render-cdp-check.py --chrome <chrome.exe> --scenario hidden
+
+# 静态门禁（在 BrowserPilot 仓库）：扫描源码中的全局清理写法
+node ../BrowserPilot/scripts/check-process-cleanup.mjs --root tests --root scripts
+
+# 真实进程安全测试（两个 headless Chrome：目标被杀、控制存活、伪造 record 被拒）
+node ../BrowserPilot/scripts/test-process-safety.mjs
+```
+
+`check-process-cleanup.mjs` 已接入 BrowserPilot 的 `npm run check:process-cleanup` 与 CI；
+BrowserPilot 侧 `npm run test:safety` 会依次执行静态门禁与真实进程安全测试。
+
 ## `check-identity-consistency.sh`（静态门禁，强制）
 
 校验唯一身份配置源 `config/product-identity.env` 与 `chromium/args.gn`（`branding_file_path`）以及
