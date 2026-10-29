@@ -138,6 +138,11 @@
       "order": 27,
       "file": "027-viz-activate-pending-root-frame-for-copy.patch",
       "sha256": "a6e923b6dc9f65cb16a2a7382a4bddc10c6f21c46d73bb7d620c05eab6763c9e"
+    },
+    {
+      "order": 28,
+      "file": "028-input-ownership-arbitration.patch",
+      "sha256": "c108e0f9c20c899be4e4dd9b13aec7f18651cd10338bf17abe1b7890e0a4889b"
     }
   ]
 }

@@ -1,0 +1,1258 @@
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 866351b8..d2b13350 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -1119,6 +1119,9 @@ source_set("browser") {
+     "in_memory_federated_permission_context.h",
+     "indexed_db/indexed_db_internals_ui.cc",
+     "indexed_db/indexed_db_internals_ui.h",
++    "input_ownership/input_ownership_controller.cc",
++    "input_ownership/input_ownership_controller.h",
++    "input_ownership/input_ownership_decider.cc",
+     "installedapp/fetch_related_apps_task.h",
+     "installedapp/installed_app_provider_impl.cc",
+     "installedapp/installed_app_provider_impl.h",
+diff --git a/content/browser/devtools/protocol/input_handler.cc b/content/browser/devtools/protocol/input_handler.cc
+index 411d7835..7eb3ad81 100644
+--- a/content/browser/devtools/protocol/input_handler.cc
++++ b/content/browser/devtools/protocol/input_handler.cc
+@@ -13,6 +13,7 @@
+ 
+ #include "base/check.h"
+ #include "base/check_deref.h"
++#include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/functional/callback_helpers.h"
+@@ -27,6 +28,7 @@
+ #include "content/browser/devtools/devtools_agent_host_impl.h"
+ #include "content/browser/devtools/protocol/native_input_event_builder.h"
+ #include "content/browser/devtools/protocol/protocol.h"
++#include "content/browser/input_ownership/input_ownership_controller.h"
+ #include "content/browser/renderer_host/data_transfer_util.h"
+ #include "content/browser/renderer_host/input/touch_emulator_impl.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+@@ -1294,6 +1296,23 @@ void InputHandler::InsertText(const std::string& text,
+       widget_host = target_host;
+   }
+ 
++  // Browser CLI (patch 028): `Input.insertText` commits text through
++  // WidgetInputHandler and therefore never reaches
++  // RenderWidgetHostImpl::ForwardKeyboardEventWithCommands. Consult the same
++  // input ownership controller explicitly so that `type`/`fill` cannot bypass
++  // arbitration. This is fail-closed and diagnosable for the caller.
++  if (base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement) &&
++      widget_host->delegate()) {
++    if (InputOwnershipController* controller =
++            widget_host->delegate()->GetInputOwnershipController()) {
++      if (controller->ShouldDropAutomationTextInsert()) {
++        callback->sendFailure(Response::ServerError(
++            "InputOwnership: insertText rejected (grant required)"));
++        return;
++      }
++    }
++  }
++
+   base::OnceClosure closure =
+       base::BindOnce(&InsertTextCallback::sendSuccess, std::move(callback));
+ 
+diff --git a/content/browser/renderer_host/render_widget_host_delegate.cc b/content/browser/renderer_host/render_widget_host_delegate.cc
+index 942d2a5c..6455c1a2 100644
+--- a/content/browser/renderer_host/render_widget_host_delegate.cc
++++ b/content/browser/renderer_host/render_widget_host_delegate.cc
+@@ -42,6 +42,11 @@ bool RenderWidgetHostDelegate::ShouldIgnoreInputEvents() {
+   return false;
+ }
+ 
++InputOwnershipController*
++RenderWidgetHostDelegate::GetInputOwnershipController() {
++  return nullptr;
++}
++
+ bool RenderWidgetHostDelegate::PreHandleGestureEvent(
+     const blink::WebGestureEvent& event) {
+   return false;
+diff --git a/content/browser/renderer_host/render_widget_host_delegate.h b/content/browser/renderer_host/render_widget_host_delegate.h
+index 74a2c460..fbea5503 100644
+--- a/content/browser/renderer_host/render_widget_host_delegate.h
++++ b/content/browser/renderer_host/render_widget_host_delegate.h
+@@ -58,6 +58,7 @@ namespace content {
+ class RenderFrameProxyHost;
+ class RenderWidgetHostImpl;
+ class DevicePostureProviderImpl;
++class InputOwnershipController;
+ class RenderWidgetHostViewBase;
+ class RenderViewHostDelegateView;
+ class TextInputManager;
+@@ -141,6 +142,13 @@ class CONTENT_EXPORT RenderWidgetHostDelegate {
+   virtual bool ShouldIgnoreWebInputEvents(const blink::WebInputEvent& event);
+   virtual bool ShouldIgnoreInputEvents();
+ 
++  // Browser CLI (patch 028): returns the input ownership arbitration controller
++  // for this widget's WebContents, or nullptr when the feature is disabled
++  // (the default). Callers must check
++  // `features::kInputOwnershipEnforcement` before querying this so that the
++  // disabled path has zero cost.
++  virtual InputOwnershipController* GetInputOwnershipController();
++
+   // Callback to give the browser a chance to handle the specified gesture
+   // event before sending it to the renderer.
+   // Returns true if the |event| was handled.
+diff --git a/content/browser/renderer_host/render_widget_host_impl.cc b/content/browser/renderer_host/render_widget_host_impl.cc
+index 1658893e..a3aa1a6c 100644
+--- a/content/browser/renderer_host/render_widget_host_impl.cc
++++ b/content/browser/renderer_host/render_widget_host_impl.cc
+@@ -18,6 +18,7 @@
+ #include "base/command_line.h"
+ #include "base/debug/alias.h"
+ #include "base/debug/dump_without_crashing.h"
++#include "base/feature_list.h"
+ #include "base/files/file_path.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+@@ -66,6 +67,7 @@
+ #include "content/browser/devtools/devtools_instrumentation.h"
+ #include "content/browser/file_system/browser_file_system_helper.h"
+ #include "content/browser/gpu/compositor_util.h"
++#include "content/browser/input_ownership/input_ownership_controller.h"
+ #include "content/browser/renderer_host/agent_scheduling_group_host.h"
+ #include "content/browser/renderer_host/data_transfer_util.h"
+ #include "content/browser/renderer_host/dip_util.h"
+@@ -1673,6 +1675,28 @@ void RenderWidgetHostImpl::ForwardMouseEvent(const WebMouseEvent& mouse_event) {
+   }
+ }
+ 
++namespace {
++
++// Browser CLI (patch 028): returns true when the WebContents' input ownership
++// controller says this event must not reach the renderer. When
++// `features::kInputOwnershipEnforcement` is disabled (default) this returns
++// false without querying the delegate or the controller, so the existing code
++// path is untouched.
++bool ShouldDropAutomationInput(RenderWidgetHostDelegate* delegate,
++                               const blink::WebInputEvent& event) {
++  if (!base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
++    return false;
++  }
++  if (!delegate) {
++    return false;
++  }
++  InputOwnershipController* controller =
++      delegate->GetInputOwnershipController();
++  return controller && controller->ShouldDropAutomationEvent(event);
++}
++
++}  // namespace
++
+ void RenderWidgetHostImpl::ForwardMouseEventWithLatencyInfo(
+     const WebMouseEvent& mouse_event,
+     const ui::LatencyInfo& latency) {
+@@ -1687,6 +1711,14 @@ void RenderWidgetHostImpl::ForwardMouseEventWithLatencyInfo(
+   CHECK_GE(mouse_event.GetType(), WebInputEvent::Type::kMouseTypeFirst);
+   CHECK_LE(mouse_event.GetType(), WebInputEvent::Type::kMouseTypeLast);
+ 
++  // Browser CLI (patch 028): drop debugger-injected mouse input when the
++  // WebContents is owned by the human (or by assist mode without a grant).
++  // Placed before the callbacks so a dropped event triggers no observer.
++  if (ShouldDropAutomationInput(delegate_, mouse_event)) {
++    TRACE_EVENT0("input", "RenderWidgetHostImpl::DropAutomationMouseEvent");
++    return;
++  }
++
+   for (auto& mouse_event_callback : mouse_event_callbacks_) {
+     if (mouse_event_callback.Run(mouse_event)) {
+       return;
+@@ -1750,6 +1782,13 @@ void RenderWidgetHostImpl::ForwardWheelEventWithLatencyInfo(
+   // TODO(crbug.com/478562227): Optimize and remove if possible.
+   base::ScopedSafetyChecksExclusion excluded;
+ 
++  // Browser CLI (patch 028): drop debugger-injected wheel input when the
++  // WebContents is owned by the human (or by assist mode without a grant).
++  if (ShouldDropAutomationInput(delegate_, wheel_event)) {
++    TRACE_EVENT0("input", "RenderWidgetHostImpl::DropAutomationWheelEvent");
++    return;
++  }
++
+   if (IsIgnoringWebInputEvents(wheel_event)) {
+     return;
+   }
+@@ -1911,6 +1950,22 @@ void RenderWidgetHostImpl::ForwardKeyboardEventWithCommands(
+     }
+   }
+ 
++  // Browser CLI (patch 028): browser UI shortcuts (Ctrl+L/T/W, F5, ...) have
++  // already been handled by PreHandleKeyboardEvent above, so whatever is left
++  // is input destined for the page. Drop it when the WebContents is owned by
++  // the human (or by assist mode without a grant). Dropping a keydown also
++  // suppresses the matching Char/KeyUp through the existing
++  // `suppress_events_until_keydown_` machinery, otherwise the page would see a
++  // key release without a press.
++  if (ShouldDropAutomationInput(delegate_, key_event)) {
++    TRACE_EVENT0("input", "RenderWidgetHostImpl::DropAutomationKeyboardEvent");
++    if (key_event.GetType() == WebKeyboardEvent::Type::kRawKeyDown ||
++        key_event.GetType() == WebKeyboardEvent::Type::kKeyDown) {
++      suppress_events_until_keydown_ = true;
++    }
++    return;
++  }
++
+   auto* touch_emulator = GetTouchEmulator(/*create_if_necessary=*/false);
+   if (touch_emulator && touch_emulator->HandleKeyboardEvent(key_event)) {
+     return;
+diff --git a/content/browser/web_contents/web_contents_impl.cc b/content/browser/web_contents/web_contents_impl.cc
+index b2ec492c..6cbd15a5 100644
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -89,6 +89,7 @@
+ #include "content/browser/gpu/gpu_process_host.h"
+ #include "content/browser/guest_page_holder_impl.h"
+ #include "content/browser/host_zoom_map_impl.h"
++#include "content/browser/input_ownership/input_ownership_controller.h"
+ #include "content/browser/media/audio_stream_monitor.h"
+ #include "content/browser/media/media_web_contents_observer.h"
+ #include "content/browser/memory/scheduler_loop_quarantine_web_contents_observer.h"
+@@ -4660,6 +4661,15 @@ void WebContentsImpl::Activate() {
+   }
+ }
+ 
++InputOwnershipController* WebContentsImpl::GetInputOwnershipController() {
++  // Feature off (default): never create the controller, so the arbitration
++  // path has zero cost and zero observable state.
++  if (!base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
++    return nullptr;
++  }
++  return InputOwnershipController::GetOrCreateForWebContents(this);
++}
++
+ void WebContentsImpl::SetTopControlsShownRatio(
+     RenderWidgetHostImpl* render_widget_host,
+     float ratio) {
+diff --git a/content/browser/web_contents/web_contents_impl.h b/content/browser/web_contents/web_contents_impl.h
+index b67fd8e3..bf24b498 100644
+--- a/content/browser/web_contents/web_contents_impl.h
++++ b/content/browser/web_contents/web_contents_impl.h
+@@ -144,6 +144,7 @@ class BrowserPluginEmbedder;
+ class BrowserPluginGuest;
+ class FrameEvictionOptOutClient;
+ class FindRequestManager;
++class InputOwnershipController;
+ class JavaScriptDialogDismissNotifier;
+ class MediaSession;
+ class MediaWebContentsObserver;
+@@ -1154,6 +1155,7 @@ class CONTENT_EXPORT WebContentsImpl
+ #endif
+ 
+   // RenderWidgetHostDelegate --------------------------------------------------
++  InputOwnershipController* GetInputOwnershipController() override;
+ 
+   void SetTopControlsShownRatio(RenderWidgetHostImpl* render_widget_host,
+                                 float ratio) override;
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+index 790d6657..9ab50944 100644
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -223,6 +223,7 @@ source_set("browser_sources") {
+     "immersive_playback_options.h",
+     "initiator_navigation_state.cc",
+     "initiator_navigation_state.h",
++    "input_ownership.h",
+     "installability_error.cc",
+     "installability_error.h",
+     "installed_payment_apps_finder.h",
+diff --git a/content/public/common/content_features.cc b/content/public/common/content_features.cc
+index 2cc4b16c..1ae704c0 100644
+--- a/content/public/common/content_features.cc
++++ b/content/public/common/content_features.cc
+@@ -618,6 +618,12 @@ BASE_FEATURE_PARAM(base::TimeDelta,
+                    "views_ui_delay_duration",
+                    base::Seconds(3));
+ 
++// Browser CLI (patch 028): kernel-side input ownership arbitration. When
++// disabled (default), every decision helper returns "deliver" and no state is
++// written, so behavior is identical to stock Chromium. Browser CLI only; stock
++// Chrome never enables it.
++BASE_FEATURE(kInputOwnershipEnforcement, base::FEATURE_DISABLED_BY_DEFAULT);
++
+ // Kill switch for the GetInstalledRelatedApps API.
+ BASE_FEATURE(kInstalledApp, base::FEATURE_ENABLED_BY_DEFAULT);
+ 
+diff --git a/content/public/common/content_features.h b/content/public/common/content_features.h
+index 48ce562e..7e3850fd 100644
+--- a/content/public/common/content_features.h
++++ b/content/public/common/content_features.h
+@@ -189,6 +189,10 @@ CONTENT_EXPORT BASE_DECLARE_FEATURE_PARAM(bool,
+                                           kSkipIgnoreBrowserInitiatedNavs);
+ CONTENT_EXPORT BASE_DECLARE_FEATURE_PARAM(bool,
+                                           kSkipIgnoreRendererInitiatedNavs);
++// Browser CLI (patch 028): kernel-side input ownership arbitration. When
++// disabled (default), every decision helper returns "deliver" and no state is
++// written, so behavior is identical to stock Chromium. Browser CLI only.
++CONTENT_EXPORT BASE_DECLARE_FEATURE(kInputOwnershipEnforcement);
+ CONTENT_EXPORT BASE_DECLARE_FEATURE(kInstalledApp);
+ CONTENT_EXPORT BASE_DECLARE_FEATURE(kInstalledAppProvider);
+ CONTENT_EXPORT BASE_DECLARE_FEATURE(kIsolatesPriorityUseProcessPriority);
+diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
+index bbfab413..884acdc0 100644
+--- a/content/test/BUILD.gn
++++ b/content/test/BUILD.gn
+@@ -2680,6 +2680,7 @@ test("content_unittests") {
+     "../browser/handwriting/handwriting_recognition_service_impl_unittest.cc",
+     "../browser/idle/idle_manager_unittest.cc",
+     "../browser/image_capture/image_capture_impl_unittest.cc",
++    "../browser/input_ownership/input_ownership_controller_unittest.cc",
+     "../browser/installedapp/installed_app_provider_impl_unittest.cc",
+     "../browser/loader/connection_allowlist_unittest.cc",
+     "../browser/loader/cors_origin_pattern_setter_unittest.cc",
+diff --git a/content/browser/input_ownership/input_ownership_controller.cc b/content/browser/input_ownership/input_ownership_controller.cc
+new file mode 100644
+index 00000000..6a768af1
+--- /dev/null
++++ b/content/browser/input_ownership/input_ownership_controller.cc
+@@ -0,0 +1,43 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/input_ownership/input_ownership_controller.h"
++
++#include "third_party/blink/public/common/input/web_input_event.h"
++
++namespace content {
++
++InputOwnershipController::InputOwnershipController(WebContents* web_contents)
++    : WebContentsUserData<InputOwnershipController>(*web_contents) {}
++
++InputOwnershipController::~InputOwnershipController() = default;
++
++bool InputOwnershipController::ShouldDropAutomationEvent(
++    const blink::WebInputEvent& event) {
++  return !decider_.ShouldDeliverDebuggerEvent(event);
++}
++
++bool InputOwnershipController::ShouldDropAutomationTextInsert() {
++  return !decider_.ShouldDeliverDebuggerTextInsert();
++}
++
++void InputOwnershipController::SetModeForTesting(InputOwnershipMode mode) {
++  decider_.SetModeForTesting(mode);
++}
++
++void InputOwnershipController::GrantDebuggerInputForTesting(
++    int actions,
++    base::TimeDelta ttl,
++    base::TimeTicks now) {
++  decider_.GrantDebuggerInputForTesting(actions, ttl, now);
++}
++
++void InputOwnershipController::NotifyHumanPresenceForTesting(
++    base::TimeTicks now) {
++  decider_.NotifyHumanPresenceForTesting(now);
++}
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(InputOwnershipController);
++
++}  // namespace content
+diff --git a/content/browser/input_ownership/input_ownership_controller.h b/content/browser/input_ownership/input_ownership_controller.h
+new file mode 100644
+index 00000000..158257c2
+--- /dev/null
++++ b/content/browser/input_ownership/input_ownership_controller.h
+@@ -0,0 +1,75 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_BROWSER_INPUT_OWNERSHIP_INPUT_OWNERSHIP_CONTROLLER_H_
++#define CONTENT_BROWSER_INPUT_OWNERSHIP_INPUT_OWNERSHIP_CONTROLLER_H_
++
++#include "base/time/time.h"
++#include "content/common/content_export.h"
++#include "content/public/browser/input_ownership.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace blink {
++class WebInputEvent;
++}  // namespace blink
++
++namespace content {
++
++class WebContents;
++
++// Browser CLI (patch 028): per-WebContents input ownership arbitration.
++//
++// There is exactly one controller per WebContents (WebContentsUserData). It
++// owns the decision state and is consulted by RenderWidgetHostImpl for the
++// three `Forward*` entry points and by the DevTools InputHandler for
++// `Input.insertText`.
++//
++// The controller is only created when `features::kInputOwnershipEnforcement`
++// is enabled (see WebContentsImpl::GetInputOwnershipController), and the
++// decision engine itself returns "deliver" without touching any state while
++// the feature is disabled.
++//
++// Write entry points here are testing-only. The production write path is the
++// Browser CLI trusted-extension API, which is intentionally not part of this
++// patch.
++class CONTENT_EXPORT InputOwnershipController
++    : public WebContentsUserData<InputOwnershipController> {
++ public:
++  ~InputOwnershipController() override;
++
++  InputOwnershipController(const InputOwnershipController&) = delete;
++  InputOwnershipController& operator=(const InputOwnershipController&) = delete;
++
++  // Returns true if `event` is debugger-injected and must be discarded instead
++  // of being forwarded to the renderer. Human input always returns false.
++  bool ShouldDropAutomationEvent(const blink::WebInputEvent& event);
++
++  // Same as above for `Input.insertText`, which bypasses Forward* entirely.
++  bool ShouldDropAutomationTextInsert();
++
++  InputOwnershipSnapshot snapshot() const { return decider_.snapshot(); }
++
++  // Testing-only. These deliberately ignore
++  // `features::kInputOwnershipEnforcement` so tests can prove that stored
++  // state alone never changes delivery while the feature is off.
++  void SetModeForTesting(InputOwnershipMode mode);
++  void GrantDebuggerInputForTesting(
++      int actions,
++      base::TimeDelta ttl,
++      base::TimeTicks now = base::TimeTicks::Now());
++  void NotifyHumanPresenceForTesting(
++      base::TimeTicks now = base::TimeTicks::Now());
++
++ private:
++  explicit InputOwnershipController(WebContents* web_contents);
++  friend class WebContentsUserData<InputOwnershipController>;
++
++  InputOwnershipDecider decider_;
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_INPUT_OWNERSHIP_INPUT_OWNERSHIP_CONTROLLER_H_
+diff --git a/content/browser/input_ownership/input_ownership_controller_unittest.cc b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+new file mode 100644
+index 00000000..31093874
+--- /dev/null
++++ b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+@@ -0,0 +1,451 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/input_ownership/input_ownership_controller.h"
++
++#include "base/test/scoped_feature_list.h"
++#include "base/time/time.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/public/common/content_features.h"
++#include "content/public/test/test_renderer_host.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_keyboard_event.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
++
++namespace content {
++
++namespace {
++
++constexpr int kDebuggerModifiers = blink::WebInputEvent::kFromDebugger;
++constexpr int kHumanModifiers = blink::WebInputEvent::kNoModifiers;
++
++// A non-null, deterministic time origin for the decider tests.
++base::TimeTicks T0() {
++  return base::TimeTicks() + base::Seconds(1);
++}
++
++using Type = blink::WebInputEvent::Type;
++
++}  // namespace
++
++class InputOwnershipDeciderTest : public testing::Test {
++ protected:
++  void EnableFeature() {
++    feature_list_.InitAndEnableFeature(features::kInputOwnershipEnforcement);
++  }
++  void DisableFeature() {
++    feature_list_.InitWithFeatureState(features::kInputOwnershipEnforcement,
++                                       false);
++  }
++
++  bool Mouse(Type type, int modifiers, base::TimeTicks now) {
++    blink::WebMouseEvent event(type, modifiers, now);
++    return decider_.ShouldDeliverDebuggerEvent(event, now);
++  }
++
++  bool Wheel(int modifiers, base::TimeTicks now) {
++    blink::WebMouseWheelEvent event(Type::kMouseWheel, modifiers, now);
++    return decider_.ShouldDeliverDebuggerEvent(event, now);
++  }
++
++  bool Key(Type type, int modifiers, base::TimeTicks now) {
++    blink::WebKeyboardEvent event(type, modifiers, now);
++    return decider_.ShouldDeliverDebuggerEvent(event, now);
++  }
++
++  base::test::ScopedFeatureList feature_list_;
++  InputOwnershipDecider decider_;
++};
++
++// Feature off: every decision delivers, nothing is consumed, no presence is
++// reported, regardless of the stored mode/grant. This is the default state of
++// the product build.
++TEST_F(InputOwnershipDeciderTest, FeatureOffDeliversEverything) {
++  DisableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kHuman);
++  decider_.GrantDebuggerInputForTesting(5, base::Seconds(10), now);
++
++  EXPECT_TRUE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kDebuggerModifiers, now));
++  EXPECT_TRUE(Wheel(kDebuggerModifiers, now));
++  EXPECT_TRUE(Key(Type::kRawKeyDown, kDebuggerModifiers, now));
++  EXPECT_TRUE(Key(Type::kChar, kDebuggerModifiers, now));
++  EXPECT_TRUE(decider_.ShouldDeliverDebuggerTextInsert(now));
++
++  // Zero side effects: the grant was not consumed and no human presence was
++  // recorded (the human event below is the only human input seen).
++  EXPECT_EQ(5, decider_.remaining_grant_for_testing());
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kHumanModifiers, now));
++  EXPECT_EQ(0, decider_.human_presence_count_for_testing());
++  decider_.NotifyHumanPresenceForTesting(now);
++  EXPECT_EQ(0, decider_.human_presence_count_for_testing());
++}
++
++// Feature on but no mode reported yet: arbitration must fail closed. The
++// default is kAssist with no grant, so every debugger event is dropped while
++// human input keeps working. This is the state an embedder lands in if it
++// forgets to call setOwnership.
++TEST_F(InputOwnershipDeciderTest, DefaultModeIsAssistFailClosed) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++
++  const InputOwnershipSnapshot snapshot = decider_.snapshot();
++  EXPECT_EQ(InputOwnershipMode::kAssist, snapshot.mode);
++  EXPECT_EQ(0u, snapshot.version);
++
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Mouse(Type::kMouseMove, kDebuggerModifiers, now));
++  EXPECT_FALSE(Wheel(kDebuggerModifiers, now));
++  EXPECT_FALSE(Key(Type::kRawKeyDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Key(Type::kChar, kDebuggerModifiers, now));
++  EXPECT_FALSE(decider_.ShouldDeliverDebuggerTextInsert(now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++
++  // Human input is never affected by the fail-closed default.
++  EXPECT_TRUE(Mouse(Type::kMouseDown, kHumanModifiers, now));
++  EXPECT_TRUE(Key(Type::kRawKeyDown, kHumanModifiers, now));
++  EXPECT_TRUE(Wheel(kHumanModifiers, now));
++  EXPECT_EQ(1, decider_.human_presence_count_for_testing());
++}
++
++// Human input (no kFromDebugger) is never dropped, in any mode.
++TEST_F(InputOwnershipDeciderTest, HumanInputIsAlwaysDelivered) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  for (InputOwnershipMode mode : {InputOwnershipMode::kAi,
++                                  InputOwnershipMode::kAssist,
++                                  InputOwnershipMode::kHuman}) {
++    decider_.SetModeForTesting(mode);
++    EXPECT_TRUE(Mouse(Type::kMouseDown, kHumanModifiers, now))
++        << "mode=" << static_cast<int>(mode);
++    EXPECT_TRUE(Mouse(Type::kMouseMove, kHumanModifiers, now));
++    EXPECT_TRUE(Wheel(kHumanModifiers, now));
++    EXPECT_TRUE(Key(Type::kRawKeyDown, kHumanModifiers, now));
++    EXPECT_TRUE(Key(Type::kChar, kHumanModifiers, now));
++  }
++}
++
++// Human input must not consume the assist-mode grant.
++TEST_F(InputOwnershipDeciderTest, HumanInputDoesNotConsumeGrant) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(2, base::Seconds(10), now);
++
++  EXPECT_TRUE(Mouse(Type::kMouseDown, kHumanModifiers, now));
++  EXPECT_TRUE(Key(Type::kRawKeyDown, kHumanModifiers, now));
++  EXPECT_TRUE(Wheel(kHumanModifiers, now));
++  EXPECT_EQ(2, decider_.remaining_grant_for_testing());
++}
++
++// HUMAN mode drops every debugger-originated event and does not consume the
++// grant.
++TEST_F(InputOwnershipDeciderTest, HumanModeDropsDebuggerInput) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kHuman);
++  decider_.GrantDebuggerInputForTesting(10, base::Seconds(10), now);
++
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Mouse(Type::kMouseMove, kDebuggerModifiers, now));
++  EXPECT_FALSE(Wheel(kDebuggerModifiers, now));
++  EXPECT_FALSE(Key(Type::kRawKeyDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Key(Type::kChar, kDebuggerModifiers, now));
++  EXPECT_FALSE(decider_.ShouldDeliverDebuggerTextInsert(now));
++  EXPECT_EQ(10, decider_.remaining_grant_for_testing());
++}
++
++// AI mode delivers everything without touching the grant. AI is never the
++// default, so it must be set explicitly.
++TEST_F(InputOwnershipDeciderTest, AiModeDeliversDebuggerInput) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAi);
++  decider_.GrantDebuggerInputForTesting(3, base::Seconds(10), now);
++
++  EXPECT_EQ(InputOwnershipMode::kAi, decider_.snapshot().mode);
++  EXPECT_TRUE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_TRUE(Mouse(Type::kMouseUp, kDebuggerModifiers,
++                    now + base::Milliseconds(5)));
++  EXPECT_TRUE(Wheel(kDebuggerModifiers, now));
++  EXPECT_TRUE(Key(Type::kRawKeyDown, kDebuggerModifiers, now));
++  EXPECT_TRUE(Key(Type::kKeyUp, kDebuggerModifiers, now));
++  EXPECT_TRUE(decider_.ShouldDeliverDebuggerTextInsert(now));
++  EXPECT_EQ(3, decider_.remaining_grant_for_testing());
++}
++
++// ASSIST without any grant drops all debugger input.
++TEST_F(InputOwnershipDeciderTest, AssistWithoutGrantDropsDebuggerInput) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Mouse(Type::kMouseMove, kDebuggerModifiers, now));
++  EXPECT_FALSE(Wheel(kDebuggerModifiers, now));
++  EXPECT_FALSE(Key(Type::kRawKeyDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Key(Type::kChar, kDebuggerModifiers, now));
++  EXPECT_FALSE(decider_.ShouldDeliverDebuggerTextInsert(now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++}
++
++// One grant unit covers exactly one mouse gesture: press and release are
++// delivered, the next press is rejected.
++TEST_F(InputOwnershipDeciderTest, AssistGrantOneAllowsOnePointerGesture) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(1, base::Seconds(10), now);
++
++  EXPECT_TRUE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_TRUE(Mouse(Type::kMouseUp, kDebuggerModifiers,
++                    now + base::Milliseconds(10)));
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers,
++                     now + base::Milliseconds(500)));
++}
++
++// A press that is not granted must not leak its release to the page.
++TEST_F(InputOwnershipDeciderTest, AssistDroppedPressAlsoDropsRelease) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++  EXPECT_FALSE(Mouse(Type::kMouseUp, kDebuggerModifiers,
++                     now + base::Milliseconds(10)));
++}
++
++// Bare moves outside a granted gesture each cost one unit.
++TEST_F(InputOwnershipDeciderTest, AssistBareMoveCostsOneUnit) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(1, base::Seconds(10), now);
++
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kDebuggerModifiers, now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_FALSE(Mouse(Type::kMouseMove, kDebuggerModifiers,
++                     now + base::Milliseconds(1)));
++}
++
++// Every wheel tick costs one unit.
++TEST_F(InputOwnershipDeciderTest, AssistWheelCostsOneUnitPerTick) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(1, base::Seconds(10), now);
++
++  EXPECT_TRUE(Wheel(kDebuggerModifiers, now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_FALSE(Wheel(kDebuggerModifiers, now + base::Milliseconds(1)));
++}
++
++// One grant unit covers one physical key press: RawKeyDown, Char and KeyUp are
++// delivered, the next RawKeyDown is rejected.
++TEST_F(InputOwnershipDeciderTest, AssistGrantOneAllowsOneKeyPress) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(1, base::Seconds(10), now);
++
++  EXPECT_TRUE(Key(Type::kRawKeyDown, kDebuggerModifiers, now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_TRUE(Key(Type::kChar, kDebuggerModifiers,
++                  now + base::Milliseconds(1)));
++  EXPECT_TRUE(Key(Type::kKeyUp, kDebuggerModifiers,
++                  now + base::Milliseconds(2)));
++  // A KeyUp that does not belong to a delivered press is dropped.
++  EXPECT_FALSE(Key(Type::kKeyUp, kDebuggerModifiers,
++                   now + base::Milliseconds(3)));
++  EXPECT_FALSE(Key(Type::kRawKeyDown, kDebuggerModifiers,
++                   now + base::Milliseconds(4)));
++}
++
++// Consecutive text insertions within 300ms share one unit; a later insertion
++// needs a new unit.
++TEST_F(InputOwnershipDeciderTest, AssistTextInsertSharesOneBurst) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(1, base::Seconds(10), now);
++
++  EXPECT_TRUE(decider_.ShouldDeliverDebuggerTextInsert(now));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_TRUE(decider_.ShouldDeliverDebuggerTextInsert(
++      now + base::Milliseconds(100)));
++  EXPECT_TRUE(decider_.ShouldDeliverDebuggerTextInsert(
++      now + base::Milliseconds(200)));
++  EXPECT_FALSE(decider_.ShouldDeliverDebuggerTextInsert(
++      now + base::Milliseconds(900)));
++}
++
++// Expired grants are cleared and rejected.
++TEST_F(InputOwnershipDeciderTest, AssistGrantExpiry) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(5, base::Milliseconds(50), now);
++
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers,
++                     now + base::Milliseconds(100)));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers,
++                     now + base::Milliseconds(200)));
++}
++
++// Exhausted grants are cleared (no accidental resurrection).
++TEST_F(InputOwnershipDeciderTest, AssistGrantExhaustion) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(2, base::Seconds(10), now);
++
++  EXPECT_TRUE(Wheel(kDebuggerModifiers, now));
++  EXPECT_TRUE(Wheel(kDebuggerModifiers, now + base::Milliseconds(1)));
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_FALSE(Wheel(kDebuggerModifiers, now + base::Milliseconds(2)));
++}
++
++// Grants are only valid in ASSIST mode; switching the mode clears them.
++TEST_F(InputOwnershipDeciderTest, GrantClearedOnModeChange) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  decider_.GrantDebuggerInputForTesting(5, base::Seconds(10), now);
++  EXPECT_EQ(5, decider_.remaining_grant_for_testing());
++
++  decider_.SetModeForTesting(InputOwnershipMode::kHuman);
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  EXPECT_EQ(0, decider_.remaining_grant_for_testing());
++  EXPECT_FALSE(Mouse(Type::kMouseDown, kDebuggerModifiers, now));
++}
++
++// The snapshot version is monotonic and only bumps on an actual mode change.
++TEST_F(InputOwnershipDeciderTest, ModeVersionIsMonotonic) {
++  EnableFeature();
++  InputOwnershipSnapshot snapshot = decider_.snapshot();
++  // Default is kAssist (fail closed), not kAi.
++  EXPECT_EQ(InputOwnershipMode::kAssist, snapshot.mode);
++  EXPECT_EQ(0u, snapshot.version);
++
++  decider_.SetModeForTesting(InputOwnershipMode::kAssist);
++  EXPECT_EQ(0u, decider_.snapshot().version);
++
++  decider_.SetModeForTesting(InputOwnershipMode::kAi);
++  snapshot = decider_.snapshot();
++  EXPECT_EQ(InputOwnershipMode::kAi, snapshot.mode);
++  EXPECT_EQ(1u, snapshot.version);
++
++  decider_.SetModeForTesting(InputOwnershipMode::kAi);
++  EXPECT_EQ(1u, decider_.snapshot().version);
++
++  decider_.SetModeForTesting(InputOwnershipMode::kHuman);
++  snapshot = decider_.snapshot();
++  EXPECT_EQ(InputOwnershipMode::kHuman, snapshot.mode);
++  EXPECT_EQ(2u, snapshot.version);
++}
++
++// Human presence is debounced to one report per 300ms window.
++TEST_F(InputOwnershipDeciderTest, HumanPresenceIsDebounced) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kHumanModifiers, now));
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kHumanModifiers,
++                    now + base::Milliseconds(100)));
++  EXPECT_EQ(1, decider_.human_presence_count_for_testing());
++
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kHumanModifiers,
++                    now + base::Milliseconds(400)));
++  EXPECT_EQ(2, decider_.human_presence_count_for_testing());
++
++  decider_.NotifyHumanPresenceForTesting(now + base::Milliseconds(500));
++  EXPECT_EQ(2, decider_.human_presence_count_for_testing());
++  decider_.NotifyHumanPresenceForTesting(now + base::Milliseconds(800));
++  EXPECT_EQ(3, decider_.human_presence_count_for_testing());
++}
++
++// Debugger input never counts as human presence (checked in kAi so that the
++// event is actually delivered).
++TEST_F(InputOwnershipDeciderTest, DebuggerInputIsNotHumanPresence) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  decider_.SetModeForTesting(InputOwnershipMode::kAi);
++  EXPECT_TRUE(Mouse(Type::kMouseMove, kDebuggerModifiers, now));
++  EXPECT_EQ(0, decider_.human_presence_count_for_testing());
++}
++
++// --- Controller tests -------------------------------------------------------
++
++class InputOwnershipControllerTest : public RenderViewHostTestHarness {
++ protected:
++  WebContentsImpl* impl() {
++    return static_cast<WebContentsImpl*>(web_contents());
++  }
++};
++
++// With the feature disabled the delegate never creates a controller, so no
++// user data and no arbitration state exist at all.
++TEST_F(InputOwnershipControllerTest, FeatureOffDoesNotCreateController) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitWithFeatureState(features::kInputOwnershipEnforcement,
++                                     false);
++
++  EXPECT_EQ(nullptr, impl()->GetInputOwnershipController());
++  EXPECT_EQ(nullptr,
++            InputOwnershipController::FromWebContents(web_contents()));
++}
++
++// With the feature enabled there is exactly one controller per WebContents.
++TEST_F(InputOwnershipControllerTest, OneControllerPerWebContents) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(features::kInputOwnershipEnforcement);
++
++  InputOwnershipController* controller =
++      impl()->GetInputOwnershipController();
++  ASSERT_NE(nullptr, controller);
++  EXPECT_EQ(controller, impl()->GetInputOwnershipController());
++  EXPECT_EQ(controller,
++            InputOwnershipController::FromWebContents(web_contents()));
++  // A fresh controller fails closed until a mode is reported.
++  EXPECT_EQ(InputOwnershipMode::kAssist, controller->snapshot().mode);
++}
++
++// The controller reflects the decider state through ShouldDropAutomationEvent.
++TEST_F(InputOwnershipControllerTest, DefaultAssistThenAiThenHuman) {
++  base::test::ScopedFeatureList feature_list;
++  feature_list.InitAndEnableFeature(features::kInputOwnershipEnforcement);
++
++  InputOwnershipController* controller =
++      impl()->GetInputOwnershipController();
++  ASSERT_NE(nullptr, controller);
++
++  const base::TimeTicks now = T0();
++  blink::WebMouseEvent debugger_mouse(Type::kMouseDown, kDebuggerModifiers,
++                                      now);
++  blink::WebMouseEvent human_mouse(Type::kMouseDown, kHumanModifiers, now);
++
++  // Default mode is kAssist with no grant: fail closed.
++  EXPECT_TRUE(controller->ShouldDropAutomationEvent(debugger_mouse));
++  EXPECT_TRUE(controller->ShouldDropAutomationTextInsert());
++
++  // kAi delivers debugger input.
++  controller->SetModeForTesting(InputOwnershipMode::kAi);
++  EXPECT_FALSE(controller->ShouldDropAutomationEvent(debugger_mouse));
++  EXPECT_FALSE(controller->ShouldDropAutomationTextInsert());
++
++  // kHuman drops debugger input but never human input.
++  controller->SetModeForTesting(InputOwnershipMode::kHuman);
++  EXPECT_TRUE(controller->ShouldDropAutomationEvent(debugger_mouse));
++  EXPECT_TRUE(controller->ShouldDropAutomationTextInsert());
++  EXPECT_FALSE(controller->ShouldDropAutomationEvent(human_mouse));
++  EXPECT_EQ(InputOwnershipMode::kHuman, controller->snapshot().mode);
++}
++
++}  // namespace content
+diff --git a/content/browser/input_ownership/input_ownership_decider.cc b/content/browser/input_ownership/input_ownership_decider.cc
+new file mode 100644
+index 00000000..73185000
+--- /dev/null
++++ b/content/browser/input_ownership/input_ownership_decider.cc
+@@ -0,0 +1,223 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/public/browser/input_ownership.h"
++
++#include <algorithm>
++
++#include "base/feature_list.h"
++#include "content/public/common/content_features.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++
++namespace content {
++
++namespace {
++
++// Caps mirrored from the extension-side grant constants (design §12.5/§13.5.2).
++constexpr int kMaxGrantActions = 10000;
++constexpr base::TimeDelta kMaxGrantTtl = base::Seconds(600);
++
++// A granted mouse press frees the matching release and any move/context-menu
++// event for this long after the release.
++constexpr base::TimeDelta kMouseGestureGrace = base::Milliseconds(200);
++
++// Consecutive `Input.insertText` calls within this window count as one grant
++// (covers `type` sending one call per character).
++constexpr base::TimeDelta kTextGestureGrace = base::Milliseconds(300);
++
++// Human presence is reported at most once per window.
++constexpr base::TimeDelta kHumanPresenceDebounce = base::Milliseconds(300);
++
++bool IsFeatureEnabled() {
++  return base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement);
++}
++
++}  // namespace
++
++InputOwnershipDecider::InputOwnershipDecider() = default;
++InputOwnershipDecider::~InputOwnershipDecider() = default;
++
++bool InputOwnershipDecider::ShouldDeliverDebuggerEvent(
++    const blink::WebInputEvent& event,
++    base::TimeTicks now) {
++  // Feature off: every event is delivered and no state is touched, including
++  // no human presence bookkeeping.
++  if (!IsFeatureEnabled()) {
++    return true;
++  }
++
++  // Human input is never subject to arbitration. Only events injected through
++  // DevTools carry kFromDebugger.
++  if ((event.GetModifiers() & blink::WebInputEvent::kFromDebugger) == 0) {
++    NoteHumanPresence(now);
++    return true;
++  }
++
++  switch (mode_) {
++    case InputOwnershipMode::kAi:
++      return true;
++    case InputOwnershipMode::kHuman:
++      return false;
++    case InputOwnershipMode::kAssist:
++      break;
++  }
++
++  const blink::WebInputEvent::Type type = event.GetType();
++
++  if (blink::WebInputEvent::IsMouseEventType(type)) {
++    if (type == blink::WebInputEvent::Type::kMouseDown) {
++      // A new press always starts a new gesture and always costs one unit.
++      mouse_gesture_open_ = false;
++      mouse_grace_until_ = base::TimeTicks();
++      if (!ConsumeGrant(now)) {
++        return false;
++      }
++      mouse_gesture_open_ = true;
++      return true;
++    }
++    // Release and any follow-up event of a granted press are free.
++    if (mouse_gesture_open_) {
++      if (type == blink::WebInputEvent::Type::kMouseUp) {
++        mouse_gesture_open_ = false;
++        mouse_grace_until_ = now + kMouseGestureGrace;
++      }
++      return true;
++    }
++    if (!mouse_grace_until_.is_null() && now < mouse_grace_until_) {
++      return true;
++    }
++    if (type == blink::WebInputEvent::Type::kMouseUp) {
++      // The matching press was dropped; a lone release must not reach the page.
++      return false;
++    }
++    // Bare moves/hover (and any other mouse event outside a granted gesture)
++    // each cost one unit.
++    return ConsumeGrant(now);
++  }
++
++  if (type == blink::WebInputEvent::Type::kMouseWheel) {
++    // Every wheel tick costs one unit.
++    return ConsumeGrant(now);
++  }
++
++  if (blink::WebInputEvent::IsKeyboardEventType(type)) {
++    if (type == blink::WebInputEvent::Type::kRawKeyDown ||
++        type == blink::WebInputEvent::Type::kKeyDown) {
++      // One physical key press costs one unit; its Char/KeyUp follow free.
++      key_gesture_open_ = ConsumeGrant(now);
++      return key_gesture_open_;
++    }
++    // Char/KeyUp only make sense for a press that was delivered.
++    if (key_gesture_open_) {
++      if (type == blink::WebInputEvent::Type::kKeyUp) {
++        key_gesture_open_ = false;
++      }
++      return true;
++    }
++    return false;
++  }
++
++  // Touch/gesture events are not wired to this decision point in this patch.
++  // If they ever are, fail closed: they need a grant like any other automation
++  // input.
++  return ConsumeGrant(now);
++}
++
++bool InputOwnershipDecider::ShouldDeliverDebuggerTextInsert(
++    base::TimeTicks now) {
++  if (!IsFeatureEnabled()) {
++    return true;
++  }
++
++  switch (mode_) {
++    case InputOwnershipMode::kAi:
++      return true;
++    case InputOwnershipMode::kHuman:
++      return false;
++    case InputOwnershipMode::kAssist:
++      break;
++  }
++
++  // Consecutive insertions are treated as one gesture (typing), with a rolling
++  // window so that a long `type` call only costs a single unit.
++  if (!text_grace_until_.is_null() && now < text_grace_until_) {
++    text_grace_until_ = now + kTextGestureGrace;
++    return true;
++  }
++  if (!ConsumeGrant(now)) {
++    return false;
++  }
++  text_grace_until_ = now + kTextGestureGrace;
++  return true;
++}
++
++void InputOwnershipDecider::SetModeForTesting(InputOwnershipMode mode) {
++  if (mode == mode_) {
++    return;
++  }
++  mode_ = mode;
++  ++version_;
++  // A grant never survives a mode change, and stale gesture state must not leak
++  // into the new mode.
++  ClearGrant();
++  ClearGestureState();
++}
++
++void InputOwnershipDecider::GrantDebuggerInputForTesting(int actions,
++                                                         base::TimeDelta ttl,
++                                                         base::TimeTicks now) {
++  if (actions <= 0 || ttl <= base::TimeDelta()) {
++    ClearGrant();
++    return;
++  }
++  grant_remaining_ = std::min(actions, kMaxGrantActions);
++  grant_expires_at_ = now + std::min(ttl, kMaxGrantTtl);
++}
++
++void InputOwnershipDecider::NotifyHumanPresenceForTesting(base::TimeTicks now) {
++  if (!IsFeatureEnabled()) {
++    return;
++  }
++  NoteHumanPresence(now);
++}
++
++void InputOwnershipDecider::ClearGrant() {
++  grant_remaining_ = 0;
++  grant_expires_at_ = base::TimeTicks();
++}
++
++void InputOwnershipDecider::ClearGestureState() {
++  mouse_gesture_open_ = false;
++  mouse_grace_until_ = base::TimeTicks();
++  key_gesture_open_ = false;
++  text_grace_until_ = base::TimeTicks();
++}
++
++bool InputOwnershipDecider::HasValidGrant(base::TimeTicks now) const {
++  return grant_remaining_ > 0 && !grant_expires_at_.is_null() &&
++         now < grant_expires_at_;
++}
++
++bool InputOwnershipDecider::ConsumeGrant(base::TimeTicks now) {
++  if (!HasValidGrant(now)) {
++    ClearGrant();
++    return false;
++  }
++  --grant_remaining_;
++  if (grant_remaining_ == 0) {
++    grant_expires_at_ = base::TimeTicks();
++  }
++  return true;
++}
++
++void InputOwnershipDecider::NoteHumanPresence(base::TimeTicks now) {
++  if (!last_human_presence_.is_null() &&
++      now - last_human_presence_ < kHumanPresenceDebounce) {
++    return;
++  }
++  last_human_presence_ = now;
++  ++human_presence_count_;
++}
++
++}  // namespace content
+diff --git a/content/public/browser/input_ownership.h b/content/public/browser/input_ownership.h
+new file mode 100644
+index 00000000..17e0d1b2
+--- /dev/null
++++ b/content/public/browser/input_ownership.h
+@@ -0,0 +1,131 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_PUBLIC_BROWSER_INPUT_OWNERSHIP_H_
++#define CONTENT_PUBLIC_BROWSER_INPUT_OWNERSHIP_H_
++
++#include <stdint.h>
++
++#include "base/time/time.h"
++#include "content/common/content_export.h"
++
++namespace blink {
++class WebInputEvent;
++}  // namespace blink
++
++namespace content {
++
++class InputOwnershipController;
++
++// Browser CLI (patch 028): the mode the trusted embedder (the Browser CLI
++// extension, via a kernel-only API) has assigned to a WebContents.
++enum class InputOwnershipMode {
++  // Automation owns the tab: debugger input is delivered freely.
++  kAi,
++  // Automation works on behalf of a human: debugger input is delivered only
++  // while a human-granted budget is available.
++  kAssist,
++  // The human owns the tab: debugger input is dropped, human input is always
++  // delivered.
++  kHuman,
++};
++
++// Snapshot of the arbitration state. `version` is monotonically increasing and
++// is bumped on every accepted mode change.
++//
++// The default mode is kAssist: an embedder that has not (yet) reported a mode
++// must fail closed. With no grant, kAssist drops all debugger input while
++// human input keeps working, which matches design §13.1 ("unknown -> ASSIST").
++struct CONTENT_EXPORT InputOwnershipSnapshot {
++  InputOwnershipMode mode = InputOwnershipMode::kAssist;
++  uint64_t version = 0;
++};
++
++// Pure decision engine for input ownership arbitration. It deliberately does
++// not depend on WebContents, renderers or the DevTools protocol so that it can
++// be unit tested in isolation. The controller owns one instance per
++// WebContents.
++//
++// Invariants:
++//  - With `features::kInputOwnershipEnforcement` disabled every query returns
++//    true ("deliver") and no state is read or written.
++//  - Human input (events without `blink::WebInputEvent::kFromDebugger`) is
++//    never dropped.
++//  - The initial mode is kAssist (fail closed): before any mode is set,
++//    debugger input is dropped because there is no grant.
++//  - Debugger input is dropped in kHuman mode.
++//  - In kAssist mode debugger input is delivered only while a grant is valid;
++//    each input gesture consumes one unit of the grant. A gesture is a full
++//    mouse press/release cycle, a single wheel tick, one physical key press
++//    (RawKeyDown ... KeyUp/Char) or one burst of text insertion (consecutive
++//    `Input.insertText` calls within 300ms).
++//  - Grants are cleared when the mode changes, when they expire, and when they
++//    are exhausted.
++class CONTENT_EXPORT InputOwnershipDecider {
++ public:
++  InputOwnershipDecider();
++  ~InputOwnershipDecider();
++
++  InputOwnershipDecider(const InputOwnershipDecider&) = delete;
++  InputOwnershipDecider& operator=(const InputOwnershipDecider&) = delete;
++
++  // Returns true if `event` may be delivered to the renderer. Human input is
++  // always delivered (and noted as human presence); debugger input is subject
++  // to the current mode. Callers pass the local time to keep the decision
++  // deterministic in tests.
++  bool ShouldDeliverDebuggerEvent(
++      const blink::WebInputEvent& event,
++      base::TimeTicks now = base::TimeTicks::Now());
++
++  // Same as above for `Input.insertText`, which bypasses the keyboard event
++  // path and therefore has no WebInputEvent. It is always debugger-originated.
++  bool ShouldDeliverDebuggerTextInsert(
++      base::TimeTicks now = base::TimeTicks::Now());
++
++  InputOwnershipSnapshot snapshot() const { return {mode_, version_}; }
++
++  // Testing-only entry points. They are never reachable from a renderer, a
++  // web page or a DevTools client. Production writes go through the trusted
++  // Browser CLI extension API (not part of this patch); these setters exist so
++  // the decision matrix can be exercised without that API.
++  void SetModeForTesting(InputOwnershipMode mode);
++  void GrantDebuggerInputForTesting(
++      int actions,
++      base::TimeDelta ttl,
++      base::TimeTicks now = base::TimeTicks::Now());
++  void NotifyHumanPresenceForTesting(
++      base::TimeTicks now = base::TimeTicks::Now());
++
++  // Test-only introspection.
++  int human_presence_count_for_testing() const { return human_presence_count_; }
++  int remaining_grant_for_testing() const { return grant_remaining_; }
++
++ private:
++  void ClearGrant();
++  void ClearGestureState();
++  bool HasValidGrant(base::TimeTicks now) const;
++  bool ConsumeGrant(base::TimeTicks now);
++  void NoteHumanPresence(base::TimeTicks now);
++
++  // Initial mode is kAssist on purpose: until a trusted embedder reports a
++  // mode, arbitration must fail closed (no grant => debugger input is dropped).
++  InputOwnershipMode mode_ = InputOwnershipMode::kAssist;
++  uint64_t version_ = 0;
++
++  int grant_remaining_ = 0;
++  base::TimeTicks grant_expires_at_;
++
++  // Gesture state used for gesture-level (not event-level) grant accounting.
++  bool mouse_gesture_open_ = false;
++  base::TimeTicks mouse_grace_until_;
++  bool key_gesture_open_ = false;
++  base::TimeTicks text_grace_until_;
++
++  base::TimeTicks last_human_presence_;
++  int human_presence_count_ = 0;
++};
++
++}  // namespace content
++
++#endif  // CONTENT_PUBLIC_BROWSER_INPUT_OWNERSHIP_H_
