@@ -1,12 +1,35 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 91b711a..0b029ba 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2941,6 +2941,17 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+   static const char* const kCommonSwitchNames[] = {
+       embedder_support::kUserAgent,
+       switches::kUserDataDir,  // Make logs go to the right file.
++      // Browser CLI (patch 029): the managed presentation mode is part of the
++      // extension API availability contract (`browserCliInputOwnership` is
++      // only visible while it is on). Availability is evaluated in the
++      // renderer for extension pages, so the switch must be present there too;
++      // otherwise the delegated feature check silently hides the namespace in
++      // the extension page while it exists in the browser process. The literal
++      // mirrors views::kBrowserCliBackgroundPresentationSwitch in
++      // ui/views/widget/browser_cli_presentation_policy.h (//chrome/browser
++      // core does not depend on //ui/views directly). It carries no secrets,
++      // and every call is still verified in the browser process.
++      "browser-cli-background-presentation",
+   };
+   command_line->CopySwitchesFrom(browser_command_line, kCommonSwitchNames);
+ 
 diff --git a/chrome/browser/extensions/BUILD.gn b/chrome/browser/extensions/BUILD.gn
-index 25029f6..198fe75 100644
+index 25029f6..7ac03b2 100644
 --- a/chrome/browser/extensions/BUILD.gn
 +++ b/chrome/browser/extensions/BUILD.gn
-@@ -1905,6 +1905,7 @@ source_set("unit_tests") {
+@@ -1905,6 +1905,8 @@ source_set("unit_tests") {
      "activity_log/fullstream_ui_policy_unittest.cc",
      "api/activity_log_private/activity_log_private_api_unittest.cc",
      "api/bookmarks/bookmarks_api_unittest.cc",
 +    "api/browser_cli/browser_cli_extension_identity_unittest.cc",
++    "api/browser_cli/browser_cli_input_ownership_availability_unittest.cc",
      "api/browsing_data/browsing_data_unittest.cc",
      "api/chrome_extensions_api_client_unittest.cc",
      "api/cookies/cookies_helpers_unittest.cc",
@@ -295,6 +318,70 @@ index 0000000..f3da6cd
 +}
 +
 +}  // namespace extensions::browser_cli
+diff --git a/chrome/browser/extensions/api/browser_cli/browser_cli_input_ownership_availability_unittest.cc b/chrome/browser/extensions/api/browser_cli/browser_cli_input_ownership_availability_unittest.cc
+new file mode 100644
+index 0000000..d38d1eb
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/browser_cli_input_ownership_availability_unittest.cc
+@@ -0,0 +1,58 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/common/extensions/api/browser_cli_input_ownership_availability.h"
++
++#include "extensions/common/mojom/context_type.mojom.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace extensions::browser_cli_input_ownership_availability {
++namespace {
++
++// A top-level API feature: if this ever becomes a child of another feature
++// ("browserCli.inputOwnership" style), extensions/renderer/feature_cache.cc
++// skips it and the namespace is never installed into extension bindings.
++constexpr char kNamespaceName[] = "browserCliInputOwnership";
++
++}  // namespace
++
++TEST(BrowserCliInputOwnershipAvailabilityTest, RegistersTopLevelNamespace) {
++  const Feature::FeatureDelegatedAvailabilityCheckMap map =
++      CreateAvailabilityCheckMap();
++  EXPECT_NE(map.end(), map.find(kNamespaceName));
++  EXPECT_EQ(1u, map.size());
++}
++
++TEST(BrowserCliInputOwnershipAvailabilityTest, FeatureOffHidesNamespace) {
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      /*feature_enabled=*/false, /*managed_mode=*/true,
++      mojom::ContextType::kPrivilegedExtension));
++}
++
++TEST(BrowserCliInputOwnershipAvailabilityTest, ManagedModeOffHidesNamespace) {
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      /*feature_enabled=*/true, /*managed_mode=*/false,
++      mojom::ContextType::kPrivilegedExtension));
++}
++
++TEST(BrowserCliInputOwnershipAvailabilityTest, OnlyPrivilegedExtensionAllowed) {
++  EXPECT_TRUE(IsInputOwnershipNamespaceAvailable(
++      /*feature_enabled=*/true, /*managed_mode=*/true,
++      mojom::ContextType::kPrivilegedExtension));
++
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      true, true, mojom::ContextType::kUnprivilegedExtension));
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      true, true, mojom::ContextType::kContentScript));
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      true, true, mojom::ContextType::kWebPage));
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      true, true, mojom::ContextType::kPrivilegedWebPage));
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      true, true, mojom::ContextType::kWebUi));
++  EXPECT_FALSE(IsInputOwnershipNamespaceAvailable(
++      true, true, mojom::ContextType::kUnspecified));
++}
++
++}  // namespace extensions::browser_cli_input_ownership_availability
 diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn b/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn
 new file mode 100644
 index 0000000..6a512c9
@@ -331,7 +418,7 @@ index 0000000..6a512c9
 +}
 diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
 new file mode 100644
-index 0000000..96becc4
+index 0000000..2ba607b
 --- /dev/null
 +++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
 @@ -0,0 +1,847 @@
@@ -605,7 +692,7 @@ index 0000000..96becc4
 +  }
 +}
 +
-+// Dispatches `browserCli.inputOwnership.onHumanPresence` to every trusted
++// Dispatches `browserCliInputOwnership.onHumanPresence` to every trusted
 +// Browser CLI extension installed in the WebContents' profile. It never
 +// broadcasts to other extensions.
 +void DispatchHumanPresence(content::WebContents* web_contents,
@@ -1184,7 +1271,7 @@ index 0000000..96becc4
 +}  // namespace extensions
 diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h
 new file mode 100644
-index 0000000..c38250c
+index 0000000..40019f2
 --- /dev/null
 +++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h
 @@ -0,0 +1,132 @@
@@ -1200,7 +1287,7 @@ index 0000000..c38250c
 +
 +namespace extensions {
 +
-+// chrome.browserCli.inputOwnership.* (Browser CLI P3, kernel side).
++// chrome.browserCliInputOwnership.* (Browser CLI P3, kernel side).
 +//
 +// Every function below performs the same trust check first
 +// (`IsTrustedBrowserCliCaller`): the caller must be the allowlisted automation
@@ -1215,7 +1302,7 @@ index 0000000..c38250c
 +
 +class BrowserCliInputOwnershipSetOwnershipFunction : public ExtensionFunction {
 + public:
-+  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.setOwnership",
++  DECLARE_EXTENSION_FUNCTION("browserCliInputOwnership.setOwnership",
 +                             BROWSERCLI_INPUTOWNERSHIP_SETOWNERSHIP)
 +
 +  BrowserCliInputOwnershipSetOwnershipFunction();
@@ -1232,7 +1319,7 @@ index 0000000..c38250c
 +
 +class BrowserCliInputOwnershipHeartbeatFunction : public ExtensionFunction {
 + public:
-+  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.heartbeat",
++  DECLARE_EXTENSION_FUNCTION("browserCliInputOwnership.heartbeat",
 +                             BROWSERCLI_INPUTOWNERSHIP_HEARTBEAT)
 +
 +  BrowserCliInputOwnershipHeartbeatFunction();
@@ -1249,7 +1336,7 @@ index 0000000..c38250c
 +
 +class BrowserCliInputOwnershipGetOwnershipFunction : public ExtensionFunction {
 + public:
-+  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.getOwnership",
++  DECLARE_EXTENSION_FUNCTION("browserCliInputOwnership.getOwnership",
 +                             BROWSERCLI_INPUTOWNERSHIP_GETOWNERSHIP)
 +
 +  BrowserCliInputOwnershipGetOwnershipFunction();
@@ -1266,7 +1353,7 @@ index 0000000..c38250c
 +
 +class BrowserCliInputOwnershipGrantInputFunction : public ExtensionFunction {
 + public:
-+  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.grantInput",
++  DECLARE_EXTENSION_FUNCTION("browserCliInputOwnership.grantInput",
 +                             BROWSERCLI_INPUTOWNERSHIP_GRANTINPUT)
 +
 +  BrowserCliInputOwnershipGrantInputFunction();
@@ -1284,7 +1371,7 @@ index 0000000..c38250c
 +class BrowserCliInputOwnershipBeginInputCommandFunction
 +    : public ExtensionFunction {
 + public:
-+  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.beginInputCommand",
++  DECLARE_EXTENSION_FUNCTION("browserCliInputOwnership.beginInputCommand",
 +                             BROWSERCLI_INPUTOWNERSHIP_BEGININPUTCOMMAND)
 +
 +  BrowserCliInputOwnershipBeginInputCommandFunction();
@@ -1302,7 +1389,7 @@ index 0000000..c38250c
 +class BrowserCliInputOwnershipEndInputCommandFunction
 +    : public ExtensionFunction {
 + public:
-+  DECLARE_EXTENSION_FUNCTION("browserCli.inputOwnership.endInputCommand",
++  DECLARE_EXTENSION_FUNCTION("browserCliInputOwnership.endInputCommand",
 +                             BROWSERCLI_INPUTOWNERSHIP_ENDINPUTCOMMAND)
 +
 +  BrowserCliInputOwnershipEndInputCommandFunction();
@@ -1454,14 +1541,14 @@ index 0a5ad34..e0eaa0d 100644
      "//extensions/common",
      "//extensions/common:common_constants",
 diff --git a/chrome/common/extensions/api/_api_features.json b/chrome/common/extensions/api/_api_features.json
-index eb656bf..fc91e4a 100644
+index eb656bf..faa6fd8 100644
 --- a/chrome/common/extensions/api/_api_features.json
 +++ b/chrome/common/extensions/api/_api_features.json
 @@ -327,6 +327,21 @@
      "dependencies": [],
      "contexts": ["privileged_extension"]
    },
-+  "browserCli.inputOwnership": {
++  "browserCliInputOwnership": {
 +    // Browser CLI P3: production write path into the content input ownership
 +    // arbitration. Same id-hash allowlist and privileged context as the
 +    // capability namespace; `requires_delegated_availability_check` hides the
@@ -1493,7 +1580,7 @@ index c28f54c..c0670a2 100644
      "dictation_private.webidl",
 diff --git a/chrome/common/extensions/api/browser_cli_input_ownership.json b/chrome/common/extensions/api/browser_cli_input_ownership.json
 new file mode 100644
-index 0000000..79c7ac0
+index 0000000..89e3f8e
 --- /dev/null
 +++ b/chrome/common/extensions/api/browser_cli_input_ownership.json
 @@ -0,0 +1,311 @@
@@ -1516,7 +1603,7 @@ index 0000000..79c7ac0
 +// mode), and only delivers ASSIST input inside a session-bound grant.
 +[
 +  {
-+    "namespace": "browserCli.inputOwnership",
++    "namespace": "browserCliInputOwnership",
 +    "description": "none",
 +    "types": [
 +      {
@@ -1810,10 +1897,10 @@ index 0000000..79c7ac0
 +]
 diff --git a/chrome/common/extensions/api/browser_cli_input_ownership_availability.cc b/chrome/common/extensions/api/browser_cli_input_ownership_availability.cc
 new file mode 100644
-index 0000000..2980989
+index 0000000..30a52bf
 --- /dev/null
 +++ b/chrome/common/extensions/api/browser_cli_input_ownership_availability.cc
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,71 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1835,14 +1922,28 @@ index 0000000..2980989
 +
 +namespace {
 +
-+// The feature (namespace) this delegated check applies to.
-+constexpr char kInputOwnershipFeature[] = "browserCli.inputOwnership";
++// The feature (namespace) this delegated check applies to. It must be a
++// TOP-LEVEL namespace: `extensions/renderer/feature_cache.cc` skips every API
++// feature that has a parent feature (for example "browserCli.inputOwnership"
++// would be treated as a child of "browserCli" and never installed into the
++// extension bindings). Keep this in sync with the `"namespace"` in
++// browser_cli_input_ownership.json and the `_api_features.json` key.
++constexpr char kInputOwnershipFeature[] = "browserCliInputOwnership";
 +
 +// Mirrors `kBrowserCliBackgroundPresentationSwitch` in
 +// ui/views/widget/browser_cli_presentation_policy.h. It is duplicated because
-+// chrome/common must not depend on //ui/views; if the switch is ever renamed
++// chrome/common must not depend on //ui/views; the switch is also propagated to
++// renderer processes (chrome_content_browser_client.cc) so extension-page
++// availability sees the same managed-mode state. If the switch is ever renamed
 +// this check simply stops matching and the API stays unavailable (fail closed).
 +constexpr char kManagedModeSwitch[] = "browser-cli-background-presentation";
++
++bool IsInputOwnershipNamespaceAvailable(bool feature_enabled,
++                                        bool managed_mode,
++                                        extensions::mojom::ContextType context) {
++  return feature_enabled && managed_mode &&
++         context == extensions::mojom::ContextType::kPrivilegedExtension;
++}
 +
 +bool AreInputOwnershipFeaturesAvailable(
 +    std::string_view api_full_name,
@@ -1856,22 +1957,10 @@ index 0000000..2980989
 +  if (api_full_name != kInputOwnershipFeature) {
 +    return false;
 +  }
-+  // The namespace only exists while the kernel is actually enforcing; the
-+  // content write paths fail closed on their own, this keeps the API itself
-+  // absent (design §6.2).
-+  if (!base::FeatureList::IsEnabled(
-+          ::features::kInputOwnershipEnforcement)) {
-+    return false;
-+  }
-+  // Managed mode is the same precondition that makes the capability namespace
-+  // report "enhanced"; without it the browser has no presentation gate and the
-+  // ownership API is not meaningful.
-+  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kManagedModeSwitch)) {
-+    return false;
-+  }
-+  // The caller must be an extension context, never a content script or a web
-+  // page (the id allowlist in `_api_features.json` is checked separately).
-+  return context == extensions::mojom::ContextType::kPrivilegedExtension;
++  return IsInputOwnershipNamespaceAvailable(
++      base::FeatureList::IsEnabled(::features::kInputOwnershipEnforcement),
++      base::CommandLine::ForCurrentProcess()->HasSwitch(kManagedModeSwitch),
++      context);
 +}
 +
 +}  // namespace
@@ -1885,10 +1974,10 @@ index 0000000..2980989
 +}  // namespace extensions::browser_cli_input_ownership_availability
 diff --git a/chrome/common/extensions/api/browser_cli_input_ownership_availability.h b/chrome/common/extensions/api/browser_cli_input_ownership_availability.h
 new file mode 100644
-index 0000000..0afc314
+index 0000000..c00de75
 --- /dev/null
 +++ b/chrome/common/extensions/api/browser_cli_input_ownership_availability.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,32 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1897,15 +1986,26 @@ index 0000000..0afc314
 +#define CHROME_COMMON_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_AVAILABILITY_H_
 +
 +#include "extensions/common/features/feature.h"
++#include "extensions/common/mojom/context_type.mojom.h"
 +
 +namespace extensions::browser_cli_input_ownership_availability {
 +
 +// Browser CLI P3: returns the delegated availability handler for
-+// `browserCli.inputOwnership`. It makes the namespace invisible unless the
++// `browserCliInputOwnership`. It makes the namespace invisible unless the
 +// content feature `InputOwnershipEnforcement` is enabled and the browser runs
 +// in managed mode, so a stock Chrome (or a feature-off build) never exposes a
 +// half-wired write path to the arbitration state.
 +Feature::FeatureDelegatedAvailabilityCheckMap CreateAvailabilityCheckMap();
++
++// Pure predicate behind the delegated check, exposed for unit tests. The
++// namespace is available only for a privileged extension context while the
++// kernel is enforcing and managed mode is on. It must stay a TOP-LEVEL API
++// feature: `extensions/renderer/feature_cache.cc` skips every feature that has
++// a parent (e.g. "browserCli.inputOwnership" would be treated as a child of
++// "browserCli" and never installed into the extension bindings).
++bool IsInputOwnershipNamespaceAvailable(bool feature_enabled,
++                                        bool managed_mode,
++                                        mojom::ContextType context);
 +
 +}  // namespace extensions::browser_cli_input_ownership_availability
 +

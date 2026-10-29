@@ -1,7 +1,8 @@
 # Windows 内核侧输入仲裁（最小集，patch 028）— 2026-10-29（R3 修订）
 
 > 范围：Chromium 内核侧「最小可用输入仲裁」。Feature **默认关闭**。R1-R3 只做源码 + 单元测试；
-> R4（§13，patch 029）补齐扩展 API `chrome.browserCli.inputOwnership`。
+> R4（§13，patch 029）补齐扩展 API `chrome.browserCliInputOwnership`（顶层命名空间；
+> 原设计的 `browserCli.inputOwnership` 会被 renderer feature cache 当作子 feature 跳过，见 §13.11）。
 > 不更新 `patch-manifest.json`，不 commit / push。
 >
 > 修订历史：
@@ -13,7 +14,7 @@
 >   emulateTouchFromMouseEvent / dispatchTouchEvent(synthetic pointer actions)`
 >   全部改为命令级前置裁决，并新增 automation event window 防止其内部事件被误判为人类输入。
 > - **R4（§13，patch 029）**：生产输入权 API 落地——content 生产写入口（K10-K13）、
->   `chrome.browserCli.inputOwnership` 扩展 API（K14）、session 绑定（K16）、
+>   `chrome.browserCliInputOwnership` 扩展 API（K14）、session 绑定（K16）、
 >   `onHumanPresence` 事件。Feature 仍默认关闭；K15 见 §13.6 缺口说明。
 >
 > 设计依据：`docs/input-ownership-design-2026-10-28.md` §13。
@@ -560,7 +561,7 @@ git -C /d/c/src apply -R /d/work/browsercli/chromium/patches/028-input-ownership
 
 > 本节记录 `chromium/patches/029-input-ownership-api.patch`。它把设计文档
 > `D:\work\BrowserPilot\docs\input-ownership-api-2026-10-29.md` 的 K10-K14/K16 落到
-> `D:\c\src`：content 生产写入口 + `chrome.browserCli.inputOwnership` 扩展 API +
+> `D:\c\src`：content 生产写入口 + `chrome.browserCliInputOwnership` 扩展 API +
 > session 绑定 + 30s stale + 命令 scope + `onHumanPresence`。
 > Feature 仍 **`FEATURE_DISABLED_BY_DEFAULT`**；`patch-manifest.json` **未修改**，
 > 未 commit / push。patch 001-028 与工作区未 reset/checkout。
@@ -573,7 +574,7 @@ git -C /d/c/src apply -R /d/work/browsercli/chromium/patches/028-input-ownership
 | K11 | 生产 `SetOwnership` 版本语义 | **已实现** | 高 version 接受并清 grant；同 version 同 mode 幂等只刷新 `last_update`；同 version 异 mode → `kVersionConflict`；低 version → `kStaleVersion`；version 0 → `kInvalidArgument` |
 | K12 | `GrantDebuggerInput` / `BeginInputCommand` / `EndInputCommand` | **已实现** | grant 按 `DevToolsSession*` 分桶、绝对 `now+ttl`（≤600s）；begin 预占 1 单位并建立 `min(now+kindTtl, grant_deadline)` scope（内核上限 120s）；scope 内同 session 事件不再扣减；同 `commandId` 幂等；`cancelled` 且 scope 内 0 事件才退回 1 单位；到期由 `PurgeExpired` 关闭且单位保持消耗 |
 | K13 | `SetHumanPresenceCallback` | **已实现** | content 只提供全局回调（仅 chrome 层注册）；controller 在每次决策前后比较去抖计数（300ms）触发；chrome 层通过 `EventRouter::DispatchEventToExtension` 只投递给受信扩展 |
-| K14 | `chrome.browserCli.inputOwnership` | **已实现** | 新 JSON 文件 `chrome/common/extensions/api/browser_cli_input_ownership.json`（6 方法 + `onHumanPresence`）+ `chrome/browser/extensions/api/browser_cli_input_ownership/`；生成注册已进入 `generated_api_registration.cc` |
+| K14 | `chrome.browserCliInputOwnership`（顶层） | **已实现** | 新 JSON 文件 `chrome/common/extensions/api/browser_cli_input_ownership.json`（6 方法 + `onHumanPresence`）+ `chrome/browser/extensions/api/browser_cli_input_ownership/`；生成注册已进入 `generated_api_registration.cc`。命名必须顶层，原因见 §13.11 |
 | K15 | window → 新 tab 立即继承 | **部分（P1 缺口）** | `setOwnership`/`heartbeat` 都会把窗口快照展开到**当前** tab；heartbeat（≤10s）会把 `setOwnership` 之后新建的 tab 补绑。**未实现** `TabStripModelObserver` 的“创建即继承”，见 §13.6 |
 | K16 | 扩展 session 映射 | **已实现（fail closed）** | `ExtensionDevToolsClientHost`（chrome.debugger 的 client 注册表）→ `DevToolsAgentHost::GetInputOwnershipSessionForClient()` → 同一 `DevToolsSession*` token；找不到 attach 时 `grantInput`/`begin` 返回 `NO_DEBUGGER_SESSION`，**不会**全局放行 |
 | K17 | InputHandler 来源 session 归因 | 028 已具备 | 028 的 `InputHandler` 已在事件/文本/命令三路把 `session()` 作为 token 传入；029 只新增“由 chrome 解析同一个 token”的出口 |
@@ -680,9 +681,9 @@ third_party/ninja/ninja.exe -C out/WinDev -n chrome content_unittests
 - `--gtest_filter=InputOwnership*`：**51/51 PASS**（harness 分片执行，各分片均 `PASSED`；
   0 FAILED）。新增覆盖：stale 降级/恢复、版本幂等/冲突/低版本、grant/begin/end 与 scope
   绝对截止、cancel 退费、Feature off 惰性、free-function 贯通、human presence 回调去抖。
-- `chrome.browserCli.inputOwnership` 的生成注册已出现在
+- `chrome.browserCliInputOwnership` 的生成注册已出现在
   `gen/chrome/browser/extensions/api/generated_api_registration.cc`（6 个 Function），
-  `api_features.cc` 含 `browserCli.inputOwnership`。
+  `api_features.cc` 含顶层 `browserCliInputOwnership`。
 - 新增 chrome 单测 `browser_cli_extension_identity_unittest.cc` 已编译进 `unit_tests`
   目标对象（`obj/chrome/browser/extensions/unit_tests/...obj`，EXIT=0）；**未链接/运行
   `unit_tests`**（成本高，按任务约定以“可编译 + content 全量单测”为准）。
@@ -723,12 +724,93 @@ service worker 的 `source_context_type` 是否为 `kPrivilegedExtension`（若�
 
 | 项 | 路径 / 值 |
 |---|---|
-| patch 029 | `D:\work\browsercli\chromium\patches\029-input-ownership-api.patch`，**3511 行**，31 个文件段（+2937/−23） |
-| patch sha256 | `4db90062f589dade23c0182c00c2e131dd0d0acb88a9d5ee4e3878077228e9ac` |
+| patch 029 | `D:\work\browsercli\chromium\patches\029-input-ownership-api.patch`，**3611 行**，33 个文件段（+3020/−23） |
+| patch sha256 | `b3354b10205adb2d9abba5fc91599fc02f4fbfcc8437526da851a35c058c4f9c` |
 | 回退校验 | `git apply --check -R` 通过（EXIT=0） |
 | 基线 | 由 patch 001-028 重建到临时树后取 diff，patch 只含本轮 029 改动 |
-| 构建日志 | `/tmp/build-content-unittests3.log`、`/tmp/build-chrome4.log`（本机临时） |
-| 单测日志 | `/tmp/final-input-ownership-tests.log`，51/51 PASS |
+| 构建日志 | `/tmp/build-content-final.log`、`/tmp/build-rename2.log`（本机临时） |
+| 单测日志 | `/tmp/final-input-ownership-tests3.log`，51/51 PASS |
+| 真实探针 | `build-logs/029e-probe-input-ownership.js`、`.out`、`029e-probe-*.err` |
 | manifest / commit | `patch-manifest.json` **未修改**；未 commit / push；工作区保留 |
+
+### 13.11 真实 E2E 根因与命名修订（2026-10-29 第二轮）
+
+#### 根因（已由真实探针与源码确认）
+
+`extensions/renderer/feature_cache.cc:150-155` 在枚举可安装的 API namespace 时：
+
+```cpp
+// Exclude child features (like events or specific functions).
+if (api_feature_provider->GetParent(*feature) != nullptr)
+  continue;
+```
+
+`_api_features.json` 里同时存在父 feature `"browserCli"`（`getCapabilities`）和子 feature
+`"browserCli.inputOwnership"`，后者被 `GetParent()` 判定为 `browserCli` 的子 feature，
+**BindingAccessor 从未安装**，因此扩展页面/SW 里 `chrome.browserCli.inputOwnership` 永远
+`undefined`（`chrome.browserCli.getCapabilities` 正常）。
+
+排除项：
+- renderer 命令行确实有 `--enable-features=InputOwnershipEnforcement` 与
+  `--browser-cli-background-presentation`（L 的 E2E renderer 证据 + 本轮探针 positive case）；
+- delegated availability 回调只在 browser 侧以 `context=kWebUi` 被调用（临时日志），
+  说明 extension renderer 根本没走到 availability 计算；
+- schema/`generated_api_registration.cc`/`api_features.cc` 都包含该命名空间。
+
+#### 选择：方案 B（顶层命名空间）
+
+- 命名空间改为 **`chrome.browserCliInputOwnership`**（无父 feature），
+  `_api_features.json` 键为 `"browserCliInputOwnership"`，保留独立 allowlist +
+  `requires_delegated_availability_check`。
+- **未修改** `extensions/renderer/feature_cache.cc`（影响所有 child feature，风险大）。
+- 扩展客户端 `D:\work\BrowserPilot\src\background\input-ownership-api.ts` 优先探测
+  `chrome.browserCliInputOwnership`，并保留旧嵌套名回退；客户端单测已改为新名字并覆盖回退。
+- 设计文档 §1.1 的 `browserCli.inputOwnership` 名称与实现不一致，**以本节为准**：
+  这是为绕开 Chromium 子 feature 安装规则的实现修订，语义/参数/错误码不变。
+- 另外把 `--browser-cli-background-presentation` 加入
+  `ChromeContentBrowserClient::AppendExtraCommandLineSwitches` 的 renderer 公共 switch，
+  因为 availability 在 renderer 里求值；否则 managed 模式在 renderer 看不到，
+  命名空间会被误隐藏。
+
+#### 真实探针（headless + 临时 profile + unpacked 扩展，无可见窗口）
+
+脚本：`build-logs/029e-probe-input-ownership.js`（`--headless=new --in-process-gpu`，
+隔离 `--user-data-dir`，只 kill 自己启动的子进程）。原始结果：
+
+| 场景 | 受信扩展 popup | 受信扩展 SW | 非受信扩展 page | 普通网页 |
+|---|---|---|---|---|
+| feature on + managed | `namespace=object`，7 个方法均 `function`，`onHumanPresence=true`，`legacyIo=false` | `io=true` | — | `undefined` |
+| feature off + managed | `undefined`（`browserCli.getCapabilities` 仍在） | `undefined` | — | `undefined` |
+| feature on + managed off | `undefined` | `undefined` | — | `undefined` |
+| feature on + managed（非受信扩展） | — | — | `namespace=undefined`（连 `browserCli` 也 `undefined`） | `undefined` |
+
+关键断言（受信 popup，feature+managed）：
+
+```
+namespace: "object"
+setOwnership: "function"    grantInput: "function"
+beginInputCommand: "function"  endInputCommand: "function"
+heartbeat: "function"       getOwnership: "function"
+onHumanPresence: true       legacyIo: false
+```
+
+同一轮还验证了：`chrome.browserCli` 顶层（capabilities）仍正常；
+受信 SW 也看到新命名空间；非受信扩展与普通网页完全看不到。
+
+#### 最小 chrome 层测试
+
+- 新增 `chrome/browser/extensions/api/browser_cli/browser_cli_input_ownership_availability_unittest.cc`
+  （编译进 `unit_tests` 目标对象，EXIT=0）：断言 map 键是顶层
+  `browserCliInputOwnership`；feature off / managed off / 非 privileged context 均不可用，
+  只有 feature+managed+privileged extension 可用。
+- `unit_tests` 全量链接需 4516 步，本轮未链接/运行；功能验证以真实探针为准。
+
+#### P0 回归记录（本轮不修）
+
+managed hidden 窗口的产品截图失败：`fromSurface=true` 8s 超时；`fromSurface=false` 返回
+`-32000 Only screenshots from surface are allowed`。同一 tab 的原始 CDP
+`Page.captureScreenshot{fromSurface:true}` 成功（10092 bytes），说明内核能出帧，
+问题在产品截图路径/超时或 cursor policy。归主代理后续处理，本轮未改截图代码。
+
 
 
