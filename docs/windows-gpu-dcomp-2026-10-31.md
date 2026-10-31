@@ -506,7 +506,7 @@ overlay 信息也正确，应把 `InitializePlatformOverlaySettings()` 移到本
    需确认 `DCompPresenter` 对 `IsGraphiteDawnD3D12` 的 DCHECK/`kDCompOnD3D12` 条件。
 5. `GpuInit::InitializeInProcess` 也被 `--single-process` 等模式复用；补丁需单独回归这些
    模式，不能只看 `--in-process-gpu`。
-5. 如果上游不接受 in-process DComp 初始化，产品侧只能选择：
+6. 如果上游不接受 in-process DComp 初始化，产品侧只能选择：
    - 修复 GPU-A（Sogou TSF `ExitProcess(3)`）后移除 `--in-process-gpu`；或
    - 使用 §6.2 workaround 并承担后端切换风险；或
    - 保持后台/不可见窗口模式，不把窗口呈现当作已修复。
