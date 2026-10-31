@@ -204,9 +204,16 @@ Surface::CommitFrame (content)            ts=334840233848
 Surface::ActivateFrame (content)          ts=334840233850
 SkiaOutputSurfaceImplOnGpu::SwapBuffers   ts=334840272096
 SkiaOutputDeviceDComp::BeginOverlayAccess ts=334840272135
+    args: debug_label="RenderPassBacking", image_size="884x692",
+          mailbox="84:55:A2:7E:3B:11:4F:F6:97:75:A6:B2:4C:56:AC:55"
 DCompPresenter::Present                   ts=334840274892
 DCLayerTree::CommitAndClearPendingOverlays{num_overlays:1} ts=334840274896
 ```
+
+`BeginOverlayAccess` 的 mailbox 是这次 DComp 主平面使用的 SharedImage 标识；随后
+`DCompPresenter::Present` 把 `DCLayerTree` 的 1 个 overlay（主平面）提交给
+`IDCompositionDevice::Commit`。in-process run 中该事件和 mailbox 都不存在——不是
+“DComp surface 创建了但没提交”，而是**根本没有创建 DComp presenter/overlay surface**。
 
 官方 `--in-process-gpu`（run `official-inproc-dcomp2`）：
 
