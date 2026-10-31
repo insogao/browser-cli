@@ -453,3 +453,16 @@ git apply --check -R /path/to/browser-cli/chromium/patches/013-command-line-inte
   人工核对：managed 后台下无来源的程序化 `OpenURLFromTab` 不激活 app/不授 HUMAN、
   不出现窗口；context-menu Preferences/Search 等按用户点击只呈现目标窗口并 HUMAN；
   stock Chromium 行为不变。
+
+## Proposed patch（不在 manifest，未应用、未编译）
+
+- `proposed/034-browser-cli-cookie-import.patch`：v2 原生 Cookie 导入目标
+  （Windows named pipe + 目标浏览器内授权弹窗 + CookieManager/CookieStore 写入）。
+  当前状态：**proposed，未加入 `patch-manifest.json`，未编译、未运行单测、未集成**。
+  已用只读 `git apply --check` 在 post-033 checkout 上验证可应用；这不等于可构建或通过
+  runtime 验收。契约、威胁模型、线路协议与验收清单见
+  `docs/p1-cookie-import-native-v2-2026-11-01.md`。
+- 静态门禁：`tests/tools/test_cookie_import_native.py`（patch 必需 API/规则、LF、
+  未进入 manifest、文档不虚报集成状态）。
+- 协议参考测试：`tests/tools/cookie-import/test_reference_target.mjs`（命名管道参考目标，
+  测试替身，`native:false`/`authorization.simulated:true`，不启动浏览器）。

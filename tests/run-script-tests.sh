@@ -1690,6 +1690,39 @@ else
 fi
 
 echo
+echo "== 100. cookie-import v2 contract (test-only, no browser) =="
+COOKIE_REF_TEST="$REPO_ROOT/tests/tools/cookie-import/test_reference_target.mjs"
+if command -v node >/dev/null 2>&1 && [ -f "$COOKIE_REF_TEST" ]; then
+  if node "$COOKIE_REF_TEST" >"$TMP/out.txt" 2>&1; then
+    ok "cookie-import v2 named-pipe reference target/tests"
+  else
+    bad "cookie-import v2 named-pipe reference target/tests"
+    sed 's/^/      /' "$TMP/out.txt" | tail -12
+  fi
+else
+  printf 'SKIP  cookie-import v2 reference target (node or test file unavailable)
+'
+fi
+COOKIE_STATIC_TEST="$REPO_ROOT/tests/tools/test_cookie_import_native.py"
+PYTHON_BIN=""
+if python3 -c 'import sys' >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif python -c 'import sys' >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
+if [ -n "$PYTHON_BIN" ] && [ -f "$COOKIE_STATIC_TEST" ]; then
+  if "$PYTHON_BIN" "$COOKIE_STATIC_TEST" >"$TMP/out.txt" 2>&1; then
+    ok "cookie-import v2 proposed-patch static gates"
+  else
+    bad "cookie-import v2 proposed-patch static gates"
+    sed 's/^/      /' "$TMP/out.txt" | tail -12
+  fi
+else
+  printf 'SKIP  cookie-import v2 static gates (python or test file unavailable)
+'
+fi
+
+echo
 echo "== summary: ${PASS} passed, ${FAIL} failed =="
 if [ "$FAIL" -gt 0 ]; then
   exit 1

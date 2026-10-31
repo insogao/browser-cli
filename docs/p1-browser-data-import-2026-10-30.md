@@ -107,3 +107,16 @@ v20 App-Bound 环境下可行，且不需要复制/解密源 Profile。来源扩
 §8；导入脚本 `D:\work\BrowserPilot\scripts\import\import-extension-export.mjs`。
 
 证据与源码引用：`D:\work\BrowserPilot\docs\windows-ego-import-applicability-2026-10-31.md`。
+
+## 2026-11-01 v2 安全硬化（P1 native）
+
+- 契约升级为 `browser-cli.cookie-import/v2`：160-bit 一次性导入票据（5 分钟 TTL、
+  失败/速率限制、不可重用）、目标进程/Profile/job/用户勾选域名范围绑定、
+  目标浏览器内独立授权弹窗、HostOnly/Domain/Public Suffix/前缀/SameSite/Partitioned
+  规则、Session Cookie 重启不保证提示。
+- 传输改为 **BrowserPilot Native Messaging Host（import-only relay）→ Browser CLI
+  Windows named pipe**，不再使用产品 localhost HTTP API。
+- BrowserPilot 侧已实现并测试；Browser CLI 原生端点仍是 **proposed，未编译/未集成**。
+- 详见 `docs/p1-cookie-import-native-v2-2026-11-01.md` 与
+  `chromium/patches/proposed/034-browser-cli-cookie-import.patch`。
+- 不得据此宣称产品闭环完成；真实登录仍只能由用户本人确认。
