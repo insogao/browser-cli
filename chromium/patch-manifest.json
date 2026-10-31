@@ -168,6 +168,11 @@
       "order": 33,
       "file": "033-windows-user-explicit-browserview-show.patch",
       "sha256": "91321ed22d2358400b1080338b8bc84ee3491a3e256c5fb98cde38b93e28b4f8"
+    },
+    {
+      "order": 34,
+      "file": "034-gpu-inprocess-direct-composition.patch",
+      "sha256": "1185dd0be8fb174befdafcac620f5ef45c9205b4f36f65d6501308b7fc5d57c4"
     }
   ]
 }

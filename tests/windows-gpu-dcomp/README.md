@@ -13,7 +13,10 @@ Windows GPU/DComp 黑屏（GPU-B）的诊断工具与 A/B harness。**诊断不�
   Browser CLI 窗口 patch 的问题，而是上游 in-process GPU 路径缺失 DComp 初始化。
 - 现有 `--in-process-gpu --disable-direct-composition` **不是有效 workaround**：窗口表面
   由黑变白，仍然是空白而不是页面内容。不得再把它当作可见窗口修复。
-- 见 `docs/windows-gpu-dcomp-2026-10-31.md` 的完整证据、提议补丁和候选 workaround。
+- 根因补丁 `chromium/patches/034-gpu-inprocess-direct-composition.patch` 已构建验证：
+  `bcli-dcomp` WGC 出现 `Intermediate D3D Window`、3 帧彩色（294/296/292 色），不再黑。
+- 普通模式已改用默认 GPU 进程；`--in-process-gpu` 不再是产品正常路径。
+- 见 `docs/windows-gpu-dcomp-2026-10-31.md` 的完整证据、patch 034 和候选 workaround。
 
 ## 工具
 
@@ -90,5 +93,5 @@ node harness/gpu-dcomp-ab.mjs --variant bcli-dcomp --chrome D:/c/src/out/WinDev/
   仍可采集。日志记录 `foreground=false` 与真实 `foreground_hwnd`。
 - Browser CLI 窗口在 managed/延迟展示模式下启动时可能是 hidden；harness 显式 show 是
   为了复现“HWND 可见但表面黑”的原场景，不代表产品启动路径。
-- 不修改 `D:/c/src`（共享 Chromium checkout）；提议的 Chromium diff 只放在
-  `tests/windows-gpu-dcomp/proposed/`，需主 agent 应用并单独构建验证。
+- 不修改 `D:/c/src`（共享 Chromium checkout）；patch 034 是唯一 Chromium 改动，
+  已由主代理在构建验证时临时应用，并由 browser-cli patch 链正式承载。

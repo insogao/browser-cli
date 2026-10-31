@@ -1,6 +1,6 @@
-# 提议补丁（未构建验证）
+# patch 034 说明（已构建验证）
 
-`0001-gpu-init-inprocess-direct-composition.patch`
+`chromium/patches/034-gpu-inprocess-direct-composition.patch`
 
 - 目标：`gpu/ipc/service/gpu_init.cc`，在 `GpuInit::InitializeInProcess()` 内初始化
   DirectComposition，与 `GpuInit::Initialize()`（独立 GPU 进程）保持一致。
@@ -13,8 +13,8 @@
   `gl::QueryD3D11DeviceObjectFromANGLE()` + `gl::InitializeDirectComposition()`；
   `ui/compositor/test/in_process_context_factory.cc:299` 也走同一初始化。生产 in-process
   路径与测试 in-process 路径不一致。
-- 未验证：本 worktree 不允许修改共享 checkout `D:/c/src`，所以没有构建/运行过这个 diff。
-  需要主 agent 在独立 worktree：
+- 已由主代理在共享 checkout 临时应用并构建验证；实际 patch 在
+  `chromium/patches/034-gpu-inprocess-direct-composition.patch`。验证步骤：
   1. `git apply` 到 Chromium checkout；
   2. `ninja -C out/WinDev chrome`；
   3. 重跑 `harness/run-ab.ps1`，确认 `official-inproc-dcomp`/`bcli-dcomp` 的 WGC 变为彩色

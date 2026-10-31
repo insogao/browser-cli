@@ -1,6 +1,8 @@
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index 2bdbe86d..7b19ead5 100644
 --- a/gpu/ipc/service/gpu_init.cc
 +++ b/gpu/ipc/service/gpu_init.cc
-@@ -1240,6 +1240,40 @@
+@@ -1240,6 +1240,40 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
    }
  #endif  // BUILDFLAG(IS_ANDROID)
  

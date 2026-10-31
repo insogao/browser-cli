@@ -1,14 +1,15 @@
 # Windows GPU-B：DComp 黑屏的 trusted A/B、首分歧与根因（2026-10-31）
 
 状态：**黑屏已用可信窗口捕获复现；根因已定位到 in-process GPU 未初始化 DirectComposition；
-提议补丁未构建验证。未修复，不宣称修复。** PR 保持 Draft。
+补丁 034 已构建并验证（WGC 彩色）。普通模式已改用默认 GPU 进程；in-process 路径的修复
+进入 Draft PR。** PR 保持 Draft。
 
 范围：Browser CLI `--in-process-gpu` 默认 DComp 路径；真实 HWND 900×700、可见但表面黑，
 CDP renderer 内容彩色。构建 `D:/c/src/out/WinDev`（Chromium 156.0.8067.0，patch 001–033）；
 官方 Chrome 156.0.8078.48 作为上游基线。
 
 关联：`tests/windows-gpu-dcomp/`（WGC 工具 + A/B harness + 汇总脚本）、
-`tests/windows-gpu-dcomp/proposed/0001-gpu-init-inprocess-direct-composition.patch`。
+`chromium/patches/034-gpu-inprocess-direct-composition.patch`（实际构建验证）。
 
 ---
 
@@ -38,9 +39,10 @@ CDP renderer 内容彩色。构建 `D:/c/src/out/WinDev`（Chromium 156.0.8067.0
    `--in-process-gpu --enable-features=SkiaGraphite --skia-graphite-dawn-backend=d3d12`
    走 `SkiaOutputDeviceDawnSwapChain`（自建 `Intermediate D3D Window` 子窗口并 reparent），
    WGC 抓到彩色 3×3 页面；官方 Chrome 同样有效。见 §6。
-6. **提议根修复**：在 `GpuInit::InitializeInProcess()` 中补上 DirectComposition 初始化
-   （diff 见 §7），预期使 in-process 与独立 GPU 进程一样使用 `DCompPresenter`。**本 worktree
-   不能修改共享 `D:/c/src`，因此该 diff 未构建、未运行验证。**
+6. **根修复已构建验证**：patch 034 在 `GpuInit::InitializeInProcess()` 中补上
+   DirectComposition 初始化；应用后 `bcli-dcomp` WGC 出现 `Intermediate D3D Window`
+   子窗口（pid==浏览器 pid），3 帧均为彩色（294/296/292 unique colors），不再黑。
+   `--disable-direct-composition` 仍会禁用 DComp/变白，已从正常启动器移除。
 
 ---
 
@@ -378,9 +380,9 @@ HWND 83496178 pid 28828
 
 ---
 
-## 7. 提议根修复（未构建验证）
+## 7. 根修复（patch 034，已构建验证）
 
-补丁：`tests/windows-gpu-dcomp/proposed/0001-gpu-init-inprocess-direct-composition.patch`
+补丁：`chromium/patches/034-gpu-inprocess-direct-composition.patch`
 
 内容：在 `GpuInit::InitializeInProcess()` 的 Dawn 初始化之后、`SetSkiaBackendType()` 之前，
 加入与 `GpuInit::Initialize()` 相同的 DComp 初始化块：
@@ -425,8 +427,14 @@ HWND 83496178 pid 28828
 - WGC 顶层窗口应出现 `Intermediate D3D Window` 且变为彩色；trace 应出现
   `DCompPresenter::Present` / `DCLayerTree::CommitAndClearPendingOverlays`。
 
-未验证原因：本 worktree 禁止修改共享 `D:/c/src`（Chromium checkout），也没有独立构建目录；
-补丁只做了 `git -C D:/c/src apply --check`（**只读**，rc=0），未编译/未运行。
+验证结果（主代理在共享 checkout 临时应用、构建后撤销/重建）：
+
+- `git apply --check` rc=0；`ninja -C out/WinDev -j 6 chrome` 成功；
+- `bcli-dcomp` WGC：顶层 HWND 出现 `Intermediate D3D Window`（pid==浏览器 pid），
+  3 帧 294/296/292 unique colors，hash 变化，页面彩色；
+- 普通 GPU 进程路径（`bcli-gpuproc`，无 `--in-process-gpu`）同样彩色；
+- patch 027 的 CDP hidden/bottom 截图仍彩色（见 harness 回归）；
+- 共享 `D:/c/src` 已重新应用 001–033 + 034 的构建验证状态；patch 034 只包含这一处改动。
 
 注意：`InitializePlatformOverlaySettings()` 在 `InitializeInProcess()` 中位于本补丁之前
 （`:1163`），因此 `GPUInfo::overlay_info.direct_composition` 可能仍记录为 false；
@@ -492,9 +500,9 @@ overlay 信息也正确，应把 `InitializePlatformOverlaySettings()` 移到本
 
 ## 10. 未决问题 / 下一步
 
-1. **构建验证 §7 diff**：这是唯一可能同时去掉 `--in-process-gpu` 黑屏和
-   `--disable-direct-composition` 白屏的根修复候选。需主 agent 在独立 worktree 构建并
-   重跑本 harness。
+1. **构建验证 §7 diff**：已完成；patch 034 构建后 `bcli-dcomp` WGC 彩色。
+   仍需在正式 patch 链 001–034 上重跑 GPU-B harness 和后台截图回归，再决定是否作为
+   产品内 in-process 路径的修复；普通模式已经不再依赖 in-process GPU。
 2. in-process GPU 线程的 COM apartment：`DCompositionCreateDevice3` 通常不需要显式
    COM 初始化，但 patch 构建后应在 `InitializeInProcess` 验证；若失败，考虑在
    `InProcessGpuThread::Init` 增加 MTA 初始化并单独评估。
