@@ -20,8 +20,9 @@
      Chrome/Edge 的 exe 为 `Valid`。
    - component build 下 `chrome_content_browser_client.cc` 的 **启动前 CIG**
      整段被 `#if !defined(COMPONENT_BUILD)` 排除；renderer 仍通过 delayed mitigation
-     得到 `MicrosoftSignedOnly=1`，但大量未签名 component DLL 在 CIG 生效前已映射。
-     该差异是**时序/覆盖范围**差异，`GetProcessMitigationPolicy` 的稳态 bit 看不出来。
+     得到 `MicrosoftSignedOnly=1`，但 component DLL 在进程启动期加载，启动前 CIG 缺失；
+     模块加载与 CIG 生效的精确时序未测（逐模块签名亦未验证）。该差异是**时序/覆盖
+     范围**差异，`GetProcessMitigationPolicy` 的稳态 bit 看不出来。
    - `--in-process-gpu` 不是安全等价的 fallback：GPU 工作进入 browser 进程后，进程
      仍是 Medium IL、无 CIG/ACG、无 Win32k/extension-point/child-process/font/image-load
      限制，且加载 648 个模块；独立 GPU 进程则是 Low IL + CIG + 上述限制。正常模式使用
@@ -80,7 +81,9 @@
 
 ### 1.2 测试隔离
 
-- 每个场景独立 `--user-data-dir=D:\c\logs\rc-sec\<run>\profile`；不使用真实用户 profile。
+- 每个场景独立 `--user-data-dir=D:\c\logs\rc-sec\<run>\profile-*`（DComp harness 用
+  `fs.mkdtempSync`，Node 的 mktemp 等价物；matrix 用每次清空的独立目录），不使用真实
+  用户 profile。
 - 不使用 `--no-sandbox`，不使用 `--use-mock-keychain`（Windows 无此需求），不启动任何
   “先显示再隐藏”的窗口作为通过条件。
 - 只终止本次启动的根进程及其后代，且后代必须同时满足：镜像路径在本次安装目录内、
@@ -189,8 +192,9 @@ ACG/CIG/CFG/DEP/ASLR-BU/ASLR-HI/EXT-PT/CHILD/FONT/IMG-NOREMOTE/IMG-NOLOW/WIN32K/
    `Valid`（Google/Microsoft）。影响 SmartScreen/AppLocker/EDR 信誉、基于发布者的
    CIG 白名单、企业策略，不可用进程缓解位表达。
 2. **模块面（component build）**：browser 631 vs 141/164；renderer 513 vs 20/21；
-   安装目录模块 493/495 vs 5/3、8/4。即使 CIG=1，也在 CIG 生效前已加载大量
-   component DLL；逐模块签名未验证（NOT-TESTED）。
+   安装目录模块 493/495 vs 5/3、8/4。主 `chrome.dll` 已确认 `NotSigned`，但 495 个
+   安装目录模块未逐个验签；CIG=1 的稳态值与官方 Chrome 相同，差异在启动前 CIG 缺失与
+   模块加载时序（NOT-TESTED）。
 3. **Edge 独有强化**：renderer `AppContainer=1`（Chrome/BCLI 为 0）与
    `ASLR-RELOC=1`（Chrome/BCLI 为 0）。这是 Edge 比 Chrome/BCLI 更严，不是 BCLI
    相对 Chrome 的回归。
@@ -331,7 +335,8 @@ Medium IL、ACG/CIG/ExtPt/Child/Font/Img 全 0。
   `presenter_->DestroyDCLayerTree()`；`DCompPresenter` 是 per-output-surface 的
   refcounted 对象，析构时 `ChildWindowWin` 析构会把 `Intermediate D3D Window` 的
   `DestroyWindow` post 到 window owner thread（`ui/gl/child_window_win.cc:177`）。
-  全局 DComp device 不会因窗口关闭而重建或泄漏。
+  全局 DComp device 不随窗口关闭重建；per-window 资源跟随 presenter 释放。进程退出
+  前的全局 device 生命周期依赖 OS 回收，**未显式 shutdown**。
 
 **风险**：`CHECK(!g_dcomp_device)` 使得“同进程第二次 `InitializeInProcess`”直接 FATAL。
 当前只有 `InProcessGpuThread::Init()` 调用它，且一个 browser 进程只创建一个
