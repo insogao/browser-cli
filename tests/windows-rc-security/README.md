@@ -30,8 +30,10 @@ Windows RC 安全基线验证：进程缓解策略对照、`disable_fieldtrial_t
   patch 034 生命周期：隐藏窗口下的 in-process/GPU 进程 DComp 子窗口、`GPUInfo`
   overlay 字段（CDP `SystemInfo.getInfo`）、隐藏窗口
   `Page.captureScreenshot(fromSurface=true)`（patch 027 copy 路径）、
-  `Browser.close`/关闭最后一个 tab 的干净退出、崩溃转储计数。默认不创建新窗口、
-  不调用任何 ShowWindow。
+  `Browser.close`/关闭最后一个 tab/`WM_CLOSE` 隐藏窗口的干净退出、崩溃转储计数。默认
+  不创建新窗口、不调用任何 ShowWindow。
+- `harness/close-window.ps1`
+  只对给定 HWND `PostMessage(WM_CLOSE)`（不 Show），用于“关闭隐藏窗口”的生命周期边界。
 - `proposed/035-gpu-inprocess-overlay-info-after-dcomp.patch`
   提议补丁（未应用、未进 `chromium/patch-manifest.json`）：把
   `InitializePlatformOverlaySettings()` 移到 in-process DComp 初始化之后，修复
@@ -63,6 +65,10 @@ node tests/windows-rc-security/harness/dcomp-lifecycle.mjs `
 # 5. 关闭最后一个 tab 的退出路径（仍不显示窗口）
 node tests/windows-rc-security/harness/dcomp-lifecycle.mjs `
   --mode inproc --close-tab --root D:\c\logs\rc-sec\dcomp-close-tab
+
+# 6. WM_CLOSE 关闭隐藏顶层窗口的退出路径（仍不显示窗口）
+node tests/windows-rc-security/harness/dcomp-lifecycle.mjs `
+  --mode inproc --close-window --root D:\c\logs\rc-sec\dcomp-close-window
 ```
 
 ## 安全边界与已知偏差

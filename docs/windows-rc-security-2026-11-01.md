@@ -45,8 +45,8 @@
    - 隐藏窗口 `Page.captureScreenshot(fromSurface=true)`（patch 027 copy 路径）在
      in-process 与 out-of-process 均连续彩色（4/4 帧、9–10 种采样色），窗口 12 s
      采样始终 `visible=false`。
-   - 干净退出：5 次独立启动（in-process 3 次、out-of-process 2 次）+ 1 次“关闭最后一个
-     tab”均为 exit 0、无 crash dump、无挂起。
+   - 干净退出：7 次独立启动（in-process 5 次，其中两次分别走“关闭最后一个 tab”与
+     “WM_CLOSE 隐藏窗口”路径；out-of-process 2 次）均为 exit 0、无 crash dump、无挂起。
    - **FAIL**：`GPUInfo.overlay_info.direct_composition` / `supportsOverlays` 在
      in-process 下为 `false/false`（out-of-process 为 `true/true`），因为
      `InitializePlatformOverlaySettings()` 在 DComp 初始化之前执行。提议 patch 035
@@ -351,7 +351,8 @@ in-process GPU thread；`Browser.crashGpuProcess` 在 in-process 下会
 ### 4.2 干净测试结果（默认不显示窗口）
 
 证据目录：`D:\c\logs\rc-sec\dcomp-inproc-final`、`dcomp-gpuproc-final`、
-`dcomp-close-tab2`、`dcomp-inproc4`、`dcomp-inproc5`、`dcomp-gpuproc2`。
+`dcomp-close-tab2`、`dcomp-close-window`、`dcomp-inproc4`、`dcomp-inproc5`、
+`dcomp-gpuproc2`。
 
 | 运行 | 模式 | browser PID | GPU PID | DComp 子窗口 owner | 窗口 visible（12 s 采样） | overlay directComposition / supportsOverlays | 隐藏截图 | 退出 | crash dump |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -361,14 +362,16 @@ in-process GPU thread；`Browser.crashGpuProcess` 在 in-process 下会
 | dcomp-inproc5 | `--in-process-gpu` | 42960 | 无 | 42960 | false/false/false | false / false | 4/4 彩色 | 0 | 0 |
 | dcomp-gpuproc2 | 默认 GPU 进程 | 45052 | 32412 | 32412 | false/false/false | true / true | 4/4 彩色 | 0 | 0 |
 | dcomp-close-tab2 | `--in-process-gpu`，关闭最后一个 tab | 22764 | 无 | 进程已退出 | false（关闭前 12 s） | false / false | 4/4 彩色（10 色） | 0 | 0 |
+| dcomp-close-window | `--in-process-gpu`，WM_CLOSE 隐藏顶层窗口 | 21556 | 无 | 进程已退出 | false（关闭前 12 s） | false / false | 4/4 彩色 | 0 | 0 |
 
 解读：
 - **PASS**：in-process 下 DComp 已初始化（隐藏窗口也有 `Intermediate D3D Window`，
   owner = browser pid），且隐藏窗口截图连续 4 帧彩色 → patch 034 的呈现修复有效，
   patch 027 copy 路径未回归。out-of-process 的 DComp 子窗口 owner 是 GPU 进程，
   两者行为对齐。
-- **PASS**：三次独立 in-process 启动（2104、42960、26536）+ 两次 out-of-process 启动，
-  均 exit 0、0 crash dump、无挂起；关闭最后一个 tab 也是 exit 0。
+- **PASS**：五次 in-process 启动（2104、42960、26536，以及两条关闭路径 22764/21556）
+  + 两次 out-of-process 启动，均 exit 0、0 crash dump、无挂起；关闭最后一个 tab 与
+  WM_CLOSE 隐藏顶层窗口都 exit 0，关闭后 `top_windows=0`、`dcomp_children=[]`。
 - **FAIL**：in-process 的 `GPUInfo.overlay_info` 报告 `false/false`，而同一页面
   out-of-process 报告 `true/true`。DComp 实际工作（子窗口/截图），因此这是**报告字段
   的顺序缺陷**，不是功能失败。根因：`InitializeInProcess()` 在 DComp 块之前调用
@@ -405,8 +408,13 @@ in-process GPU thread；`Browser.crashGpuProcess` 在 in-process 下会
 `visible=false`。
 
 因此：**“窗口关闭时 DComp 子窗口/visual/swapchain 在进程仍存活时被释放” = NOT-TESTED
-（干净条件）**；可用的干净证据是“关闭最后一个 tab → 整个进程 exit 0、子窗口随进程
-销毁、0 crash dump”。
+（干净条件）**；可用的干净证据是两条关闭边界：
+- 关闭最后一个 tab（`dcomp-close-tab2`）→ 进程 exit 0；
+- 对隐藏顶层 HWND 直接 `PostMessage(WM_CLOSE)`（`dcomp-close-window`，不调用
+  `ShowWindow`）→ 进程 exit 0，关闭后 `top_windows=0`、`dcomp_children=[]`、0 crash dump。
+
+两条路径都只证明“进程退出边界没有残留窗口/崩溃”，没有证明 browser 在无窗口状态下
+继续存活时的 per-window 释放时序。
 
 ### 4.5 后台截图（patch 027 copy 路径）
 
@@ -467,12 +475,12 @@ in-process GPU thread；`Browser.crashGpuProcess` 在 in-process 下会
 | 19 | overlay 修复后的值 | **NOT-TESTED** | patch 035 仅 `git apply --check`，未构建 |
 | 20 | `--single-process` + patch 034 | **FAIL（模式）** | 0x80000003，`extensions_client.cc:38`；034 未触达 |
 | 21 | 进程重启（两次独立启动） | **PASS** | inproc 2104/42960/26536，均 exit 0 |
-| 22 | 关闭最后一个 tab 的退出 | **PASS** | dcomp-close-tab2 exit 0，0 crash |
-| 23 | per-window DComp 释放（进程存活时） | **NOT-TESTED（干净）** | 仅 deviation 数据；默认 harness 不再创建窗口 |
+| 22 | 关闭最后一个 tab / WM_CLOSE 隐藏窗口的退出 | **PASS** | dcomp-close-tab2 (22764) / dcomp-close-window (21556) exit 0，0 crash，关闭后无顶层/DComp 子窗口 |
+| 23 | per-window DComp 释放（进程存活时） | **NOT-TESTED（干净）** | 关闭边界只证明进程退出无残留；deviation 数据不计入 |
 | 24 | 同一进程二次 `InitializeInProcess` | **NOT-TESTED** | 当前不可达；`CHECK(!g_dcomp_device)` 风险 |
 | 25 | 隐藏窗口后台截图（patch 027） | **PASS** | inproc/gpuproc 各 4/4 彩色；12 s hidden |
 | 26 | 遮挡窗口后台截图 | **NOT-TESTED** | 需要显示窗口；既有 10-28 证据未复跑 |
-| 27 | 无泄漏/无残留状态（进程退出） | **PASS** | 5 次独立启动 + 1 次关最后一个 tab，均 exit 0、0 crash dump、无挂起 |
+| 27 | 无泄漏/无残留状态（进程退出） | **PASS** | 7 次独立启动（含两条关闭路径），均 exit 0、0 crash dump、无挂起 |
 | 28 | 测试过程不上屏（默认路径） | **PASS** | 12 s 采样 visible=false；§4.2 |
 | 29 | 测试过程不上屏（历史 cycles 步骤） | **DEVIATION / 已修复** | `dcomp-inproc2` 窗口 visible=true；已移除默认步骤 |
 | 30 | 逐模块签名 | **NOT-TESTED** | 只验证 exe 与 chrome.dll |
@@ -516,6 +524,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 node tests/windows-rc-security/harness/dcomp-lifecycle.mjs --mode inproc  --root D:\c\logs\rc-sec\dcomp-inproc-final
 node tests/windows-rc-security/harness/dcomp-lifecycle.mjs --mode gpuproc --root D:\c\logs\rc-sec\dcomp-gpuproc-final
 node tests/windows-rc-security/harness/dcomp-lifecycle.mjs --mode inproc --close-tab --root D:\c\logs\rc-sec\dcomp-close-tab
+node tests/windows-rc-security/harness/dcomp-lifecycle.mjs --mode inproc --close-window --root D:\c\logs\rc-sec\dcomp-close-window
 ```
 
 ### 7.1 静态门禁

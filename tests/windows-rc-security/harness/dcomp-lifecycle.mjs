@@ -41,6 +41,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const WT = path.join(here, "..", "..", "windows-gpu-dcomp", "harness", "window-tree.ps1");
 const SAMPLE = path.join(here, "..", "..", "windows-gpu-dcomp", "harness", "png-sample.ps1");
 const PROBE = path.join(here, "process-mitigations.ps1");
+const CLOSEWIN = path.join(here, "close-window.ps1");
 
 function parseArgs(argv) {
   const out = {};
@@ -461,6 +462,30 @@ if (args["close-tab"] === true) {
   };
 }
 
+// Optional: post WM_CLOSE to the hidden top-level HWND and observe whether the
+// browser process stays alive and releases the DComp child window. PostMessage
+// never shows the window, so this exercises per-window teardown without a
+// visible-window hygiene violation.
+let windowClose = null;
+if (args["close-window"] === true && win0) {
+  const before = await counters("before-window-close");
+  const r = await ps(CLOSEWIN, ["-Hwnd", String(win0.hwnd)]);
+  await new Promise((res) => setTimeout(res, 3500));
+  const alive = !childExit;
+  const tree = alive ? await windowTree("after-window-close") : null;
+  windowClose = {
+    hwnd: win0.hwnd,
+    post_output: r.stdout.trim(),
+    post_stderr: r.stderr.trim(),
+    browser_alive: alive,
+    child_exit: childExit,
+    counters_before: before,
+    counters_after: alive ? await counters("after-window-close") : null,
+    top_windows_after: tree ? topWindows(tree).length : 0,
+    dcomp_children_after: tree ? dcompChildren(tree).map((c) => ({ hwnd: c.hwnd, pid: c.pid, cls: c.cls, visible: c.visible })) : [],
+  };
+}
+
 // Graceful shutdown.
 let closeResult = null;
 try {
@@ -525,6 +550,7 @@ const summary = {
   dcomp_children_after_cycles: dcompChildren(treeFinal).map((c) => ({ hwnd: c.hwnd, pid: c.pid, cls: c.cls, visible: c.visible, parent: c.parent })),
   counters_after_cycles: countersAfterCycles,
   tab_close: tabClose,
+  window_close: windowClose,
   close_result: closeResult,
   child_exit: childExit,
   crash_dumps: crashReports,
