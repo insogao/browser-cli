@@ -1,5 +1,12 @@
 // GPU-B DComp A/B harness.
 //
+// browser-launch-hygiene: windows-only (no keychain)
+//
+// Windows-only entry point: there is no macOS login keychain here, so
+// --use-mock-keychain is intentionally absent (AGENTS.md section 1 is
+// macOS-conditioned). The profile is still a fresh per-run mkdtemp directory
+// (the Node equivalent of shell mktemp), never the user's real profile.
+//
 // Runs one variant: launches Chrome/Browser CLI with an isolated profile,
 // loads a saturated 3x3 color page, takes a CDP renderer reference frame and a
 // trusted Windows Graphics Capture (WGC) frame of the real HWND, then repeats
@@ -36,14 +43,15 @@ const args = parseArgs(process.argv);
 const variant = String(args.variant || "bcli-dcomp");
 const earlyShow = args["early-show"] === true || args.earlyShow === "true";
 const root = path.resolve(String(args.root || `D:/c/logs/gpu-b2/${variant}-${stamp()}`));
-const profile = path.join(root, "profile");
+fs.mkdirSync(root, { recursive: true });
+// mkdtemp is the Node mktemp: a fresh, unpredictable profile directory.
+const profile = fs.mkdtempSync(path.join(root, "profile-"));
 const chromeExe = String(
   args.chrome ||
     (variant.startsWith("bcli")
       ? "D:/c/src/out/WinDev/chrome.exe"
       : "C:/Program Files/Google/Chrome/Application/chrome.exe"),
 );
-fs.mkdirSync(profile, { recursive: true });
 
 const FLAGS = {
   "bcli-dcomp": ["--in-process-gpu"],
