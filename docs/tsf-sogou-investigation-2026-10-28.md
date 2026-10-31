@@ -3,6 +3,17 @@
 日期：2026-10-28
 范围：`chromium/patches/023-windows-tsf-managed-skip.patch` 及其根因
 状态：**调查完成，未修改任何正式代码**
+
+> **2026-10-31 更新（第二阶段，根因已定位）**：首个 C++ 异常是
+> `Xbyak::Error(ERR_CANT_PROTECT=14)`；失败调用是搜狗 JIT 的
+> `VirtualProtect(PAGE_EXECUTE_READWRITE)`，被浏览器进程的 ACG 以
+> `ERROR_DYNAMIC_CODE_BLOCKED` 拒绝。ACG 来自 Chromium 在非 Google 品牌构建上
+> **默认应用**的 `testing/variations/fieldtrial_testing_config.json`
+> （`BrowserDynamicCodeDisabled`），不是线程数/句柄数。详见
+> [`windows-tsf-sogou-exitprocess3-acg-xbyak-2026-10-31.md`](windows-tsf-sogou-exitprocess3-acg-xbyak-2026-10-31.md)。
+> 本文第 3.4 节 H5-A 的“+1 线程 / +7 句柄”已被证明是伴随现象，不是原因；
+> 第 5 节的 H5 方向据此关闭。
+
 相关 PR：[browser-cli#1](https://github.com/insogao/browser-cli/pull/1)、[BrowserPilot#1](https://github.com/insogao/BrowserPilot/pull/1)
 
 ---

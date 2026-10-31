@@ -34,3 +34,11 @@ branding_file_path = "//chrome/app/theme/browser_cli/BRANDING"
 # scripts/generate-windows-icons.py and are NOT committed; run
 # scripts/configure-windows.sh, which generates them before gn gen.
 browser_cli_win_icon_dir = "app/theme/browser_cli/win"
+
+# Do not apply Chromium's test-only field-trial configuration to a non-branded
+# product build. On Windows that config enables BrowserDynamicCodeDisabled,
+# which sets ACG before TSF initialization; Sogou's Xbyak JIT then fails
+# VirtualProtect(PAGE_EXECUTE_READWRITE) and SogouPY calls ExitProcess(3).
+# Google-branded Chrome does not apply this config. Tests that need the test
+# config must opt in with --enable-field-trial-config.
+disable_fieldtrial_testing_config = true
