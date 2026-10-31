@@ -502,7 +502,10 @@ overlay 信息也正确，应把 `InitializePlatformOverlaySettings()` 移到本
    也不显示内容：这是 fallback 的第二个上游缺陷；DComp 修复落地后可作为独立问题记录，
    不影响根修复判定。
 4. D3D12 + `kDCompOnD3D12` 组合；`SkiaOutputDeviceDawnSwapChain` workaround 的硬件/
-   驱动矩阵与产品风险。
+   驱动矩阵与产品风险。DComp 初始化后，D3D12 Graphite 也会优先走 `DCompPresenter`；
+   需确认 `DCompPresenter` 对 `IsGraphiteDawnD3D12` 的 DCHECK/`kDCompOnD3D12` 条件。
+5. `GpuInit::InitializeInProcess` 也被 `--single-process` 等模式复用；补丁需单独回归这些
+   模式，不能只看 `--in-process-gpu`。
 5. 如果上游不接受 in-process DComp 初始化，产品侧只能选择：
    - 修复 GPU-A（Sogou TSF `ExitProcess(3)`）后移除 `--in-process-gpu`；或
    - 使用 §6.2 workaround 并承担后端切换风险；或
