@@ -155,6 +155,11 @@
       "sha256": "a5f97b9447334781fe3e088efe6a42cf3ea5c19fb80f954540d39636cf1e0ba0"
     },
     {
+      "order": 31,
+      "file": "031-input-ownership-new-tab-inheritance.patch",
+      "sha256": "ea19872405d88055967d5a44024978e10eaef39fb97ef09270b9bb01ad41159a"
+    },
+    {
       "order": 33,
       "file": "033-windows-user-explicit-browserview-show.patch",
       "sha256": "91321ed22d2358400b1080338b8bc84ee3491a3e256c5fb98cde38b93e28b4f8"

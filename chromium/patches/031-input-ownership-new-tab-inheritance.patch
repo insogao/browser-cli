@@ -1,0 +1,1359 @@
+diff --git a/content/public/browser/input_ownership.h b/content/public/browser/input_ownership.h
+--- a/content/public/browser/input_ownership.h
++++ b/content/public/browser/input_ownership.h
+@@ -63,11 +63,24 @@
+   kTap,
+ };
+ 
++// Origin of the currently accepted mode/version (patch 031).
++//
++// `kExplicit` is a per-tab write from the trusted extension (`tabId` target);
++// `kInherited` is a window snapshot applied to a tab. The two version spaces
++// never compare against each other: an explicit override always wins and can
++// never be replaced by an inherited write.
++enum class InputOwnershipOrigin {
++  kNone,
++  kExplicit,
++  kInherited,
++};
++
+ // Snapshot of the arbitration state.
+ //
+ // `mode` is the *configured* mode written by the trusted embedder and `version`
+ // is the monotonically increasing version accepted for the target. They are
+-// never rewritten behind the embedder's back.
++// never rewritten behind the embedder's back. `origin` records whether the
++// current values came from a per-tab explicit write or a window snapshot.
+ //
+ // `stale`/`last_update` implement the 30s heartbeat contract: when a target has
+ // not been refreshed for 30s the *effective* mode degrades to kAssist (and all
+@@ -78,6 +91,7 @@
+   // kAssist while `stale` is true, `mode` otherwise.
+   InputOwnershipMode effective_mode = InputOwnershipMode::kAssist;
+   uint64_t version = 0;
++  InputOwnershipOrigin origin = InputOwnershipOrigin::kNone;
+   bool stale = false;
+   base::TimeTicks last_update;
+ };
+@@ -94,6 +108,9 @@
+   kVersionUnknown,
+   kGrantRequired,
+   kUnknownCommand,
++  // Patch 031: an inherited (window) write was rejected because this
++  // WebContents already has an explicit per-tab override.
++  kOverridePresent,
+ };
+ 
+ // Result of SetInputOwnership() / HeartbeatInputOwnership(). `snapshot` always
+@@ -156,17 +173,37 @@
+ // disabled or when the WebContents has no controller (feature off never creates
+ // one), so a half-wired caller cannot grant anything.
+ 
+-// Writes the configured mode for `web_contents` with monotonic `version`
+-// semantics (design §1.2):
+-//  - version > current: accepted, clears every session grant;
+-//  - version == current and same mode: idempotent, only refreshes last_update;
+-//  - version == current and different mode: kVersionConflict;
+-//  - version < current: kStaleVersion;
++// Writes the configured mode for `web_contents` (patch 031 adds `origin`).
++//
++// Version semantics are scoped to the write origin:
++//  - kExplicit always replaces a kNone/kInherited state (version spaces are
++//    independent); within kExplicit the existing monotonic/conflict rules
++//    apply;
++//  - kInherited is rejected with kOverridePresent while the tab has an
++//    explicit override, and otherwise follows the monotonic rules within
++//    kInherited;
+ //  - version == 0 or mode invalid: kInvalidArgument.
++// A successful write refreshes last_update and clears every session grant.
+ CONTENT_EXPORT InputOwnershipApplyResult SetInputOwnership(
+     WebContents* web_contents,
+     InputOwnershipMode mode,
+-    uint64_t version);
++    uint64_t version,
++    InputOwnershipOrigin origin);
++
++// Clears an inherited (window-derived) state when the tab leaves its window.
++// A no-op for kExplicit/kNone. Returns kAccepted when the state was cleared.
++CONTENT_EXPORT InputOwnershipWriteResult ClearInheritedInputOwnership(
++    WebContents* web_contents);
++
++// Refreshes last_update without changing mode/version/origin. Used by a window
++// heartbeat to keep an explicit per-tab override alive without touching its
++// values. Rejects a target that never had an accepted write.
++CONTENT_EXPORT InputOwnershipWriteResult TouchInputOwnership(
++    WebContents* web_contents);
++
++// The configured 30s liveness window, exposed so the chrome window registry
++// does not duplicate the constant.
++CONTENT_EXPORT base::TimeDelta InputOwnershipStaleAfter();
+ 
+ // Refreshes last_update without changing mode/version (design §1.6). The
+ // version must equal the currently accepted one; a higher version is
+@@ -311,8 +348,11 @@
+   // above, after the chrome layer has authenticated the calling extension.
+   InputOwnershipApplyResult SetOwnership(InputOwnershipMode mode,
+                                          uint64_t version,
++                                         InputOwnershipOrigin origin,
+                                          base::TimeTicks now);
+   InputOwnershipApplyResult Heartbeat(uint64_t version, base::TimeTicks now);
++  InputOwnershipWriteResult ClearInherited(base::TimeTicks now);
++  InputOwnershipWriteResult Touch(base::TimeTicks now);
+   InputOwnershipGrantInfo GrantDebuggerInput(
+       InputOwnershipSessionToken session,
+       int actions,
+@@ -449,6 +489,7 @@
+   // mode, arbitration must fail closed (no grant => debugger input is dropped).
+   InputOwnershipMode mode_ = InputOwnershipMode::kAssist;
+   uint64_t version_ = 0;
++  InputOwnershipOrigin origin_ = InputOwnershipOrigin::kNone;
+   // Last accepted setOwnership()/heartbeat(). Null means "never refreshed";
+   // such a target is never stale, it is simply already in kAssist.
+   base::TimeTicks last_update_;
+diff --git a/content/browser/input_ownership/input_ownership_decider.cc b/content/browser/input_ownership/input_ownership_decider.cc
+--- a/content/browser/input_ownership/input_ownership_decider.cc
++++ b/content/browser/input_ownership/input_ownership_decider.cc
+@@ -119,6 +119,7 @@
+   snapshot.effective_mode =
+       stale_ ? InputOwnershipMode::kAssist : mode_;
+   snapshot.version = version_;
++  snapshot.origin = origin_;
+   snapshot.stale = stale_;
+   snapshot.last_update = last_update_;
+   return snapshot;
+@@ -440,6 +441,8 @@
+ }
+ 
+ void InputOwnershipDecider::SetModeForTesting(InputOwnershipMode mode) {
++  // Testing writes model a per-tab explicit override, never a window snapshot.
++  origin_ = InputOwnershipOrigin::kExplicit;
+   if (mode == mode_) {
+     return;
+   }
+@@ -481,6 +484,7 @@
+ InputOwnershipApplyResult InputOwnershipDecider::SetOwnership(
+     InputOwnershipMode mode,
+     uint64_t version,
++    InputOwnershipOrigin origin,
+     base::TimeTicks now) {
+   InputOwnershipApplyResult result;
+   if (!IsFeatureEnabled()) {
+@@ -491,33 +495,47 @@
+   Refresh(now);
+   result.snapshot = snapshot();
+ 
+-  if (version == 0) {
++  if (version == 0 || origin == InputOwnershipOrigin::kNone) {
+     result.result = InputOwnershipWriteResult::kInvalidArgument;
+     return result;
+   }
+-  if (version < version_) {
+-    result.result = InputOwnershipWriteResult::kStaleVersion;
++  // An explicit per-tab override is permanent. A window snapshot must never
++  // replace it, regardless of the two independent version spaces.
++  if (origin == InputOwnershipOrigin::kInherited &&
++      origin_ == InputOwnershipOrigin::kExplicit) {
++    result.result = InputOwnershipWriteResult::kOverridePresent;
+     return result;
+   }
+-  if (version == version_) {
+-    if (mode != mode_) {
+-      result.result = InputOwnershipWriteResult::kVersionConflict;
++  // Versions are only comparable inside one origin. An explicit write from
++  // none/inherited starts a fresh explicit version space; an inherited write
++  // from none likewise needs no comparison.
++  if (origin == origin_) {
++    if (version < version_) {
++      result.result = InputOwnershipWriteResult::kStaleVersion;
+       return result;
+     }
+-    // Idempotent replay (same version, same mode): only refresh last_update so
+-    // a replayed setOwnership() also acts as a heartbeat.
+-    last_update_ = now;
+-    stale_ = false;
+-    result.result = InputOwnershipWriteResult::kAccepted;
+-    result.snapshot = snapshot();
+-    return result;
+-  }
+-
+-  // A newer version always wins. A mode change clears the grants (and stale
+-  // gesture/scope state); a pure version bump also clears them, because the
+-  // embedder is re-establishing the whole target state (design §1.2).
++    if (version == version_) {
++      if (mode != mode_) {
++        result.result = InputOwnershipWriteResult::kVersionConflict;
++        return result;
++      }
++      // Idempotent replay (same version, same mode): only refresh last_update
++      // so a replayed setOwnership() also acts as a heartbeat.
++      last_update_ = now;
++      stale_ = false;
++      result.result = InputOwnershipWriteResult::kAccepted;
++      result.snapshot = snapshot();
++      return result;
++    }
++  }
++
++  // A newer version, or a transition into a different origin, wins. A mode
++  // change clears the grants (and stale gesture/scope state); a pure version
++  // bump also clears them, because the embedder is re-establishing the whole
++  // target state (design §1.2).
+   mode_ = mode;
+   version_ = version;
++  origin_ = origin;
+   ClearDebuggerSessions();
+   ClearAutomationEventWindow();
+   last_update_ = now;
+@@ -526,6 +544,43 @@
+   result.result = InputOwnershipWriteResult::kAccepted;
+   result.snapshot = snapshot();
+   return result;
++}
++
++InputOwnershipWriteResult InputOwnershipDecider::ClearInherited(
++    base::TimeTicks now) {
++  if (!IsFeatureEnabled()) {
++    return InputOwnershipWriteResult::kFeatureDisabled;
++  }
++  if (origin_ != InputOwnershipOrigin::kInherited) {
++    // A no-op, not an error: explicit overrides and never-written tabs are
++    // outside the window-derived state this call removes.
++    return InputOwnershipWriteResult::kAccepted;
++  }
++  mode_ = InputOwnershipMode::kAssist;
++  version_ = 0;
++  origin_ = InputOwnershipOrigin::kNone;
++  last_update_ = base::TimeTicks();
++  stale_ = false;
++  ClearDebuggerSessions();
++  ClearAutomationEventWindow();
++  return InputOwnershipWriteResult::kAccepted;
++}
++
++InputOwnershipWriteResult InputOwnershipDecider::Touch(base::TimeTicks now) {
++  if (!IsFeatureEnabled()) {
++    return InputOwnershipWriteResult::kFeatureDisabled;
++  }
++  if (version_ == 0 || origin_ == InputOwnershipOrigin::kNone) {
++    return InputOwnershipWriteResult::kUnknownTarget;
++  }
++  Refresh(now);
++  last_update_ = now;
++  stale_ = false;
++  return InputOwnershipWriteResult::kAccepted;
++}
++
++base::TimeDelta InputOwnershipStaleAfter() {
++  return kOwnershipStaleAfter;
+ }
+ 
+ InputOwnershipApplyResult InputOwnershipDecider::Heartbeat(
+diff --git a/content/browser/input_ownership/input_ownership_controller.h b/content/browser/input_ownership/input_ownership_controller.h
+--- a/content/browser/input_ownership/input_ownership_controller.h
++++ b/content/browser/input_ownership/input_ownership_controller.h
+@@ -115,8 +115,11 @@
+   // content/public/browser/input_ownership.h, i.e. from the chrome extension
+   // API after it authenticated the calling extension).
+   InputOwnershipApplyResult SetOwnership(InputOwnershipMode mode,
+-                                         uint64_t version);
++                                         uint64_t version,
++                                         InputOwnershipOrigin origin);
+   InputOwnershipApplyResult Heartbeat(uint64_t version);
++  InputOwnershipWriteResult ClearInherited();
++  InputOwnershipWriteResult Touch();
+   InputOwnershipGrantInfo GrantSessionInput(InputOwnershipSessionToken session,
+                                             int actions,
+                                             base::TimeDelta ttl);
+diff --git a/content/browser/input_ownership/input_ownership_controller.cc b/content/browser/input_ownership/input_ownership_controller.cc
+--- a/content/browser/input_ownership/input_ownership_controller.cc
++++ b/content/browser/input_ownership/input_ownership_controller.cc
+@@ -126,13 +126,23 @@
+ 
+ InputOwnershipApplyResult InputOwnershipController::SetOwnership(
+     InputOwnershipMode mode,
+-    uint64_t version) {
+-  return decider_.SetOwnership(mode, version, base::TimeTicks::Now());
++    uint64_t version,
++    InputOwnershipOrigin origin) {
++  return decider_.SetOwnership(mode, version, origin,
++                               base::TimeTicks::Now());
+ }
+ 
+ InputOwnershipApplyResult InputOwnershipController::Heartbeat(
+     uint64_t version) {
+   return decider_.Heartbeat(version, base::TimeTicks::Now());
++}
++
++InputOwnershipWriteResult InputOwnershipController::ClearInherited() {
++  return decider_.ClearInherited(base::TimeTicks::Now());
++}
++
++InputOwnershipWriteResult InputOwnershipController::Touch() {
++  return decider_.Touch(base::TimeTicks::Now());
+ }
+ 
+ InputOwnershipGrantInfo InputOwnershipController::GrantSessionInput(
+diff --git a/content/browser/input_ownership/input_ownership_api.cc b/content/browser/input_ownership/input_ownership_api.cc
+--- a/content/browser/input_ownership/input_ownership_api.cc
++++ b/content/browser/input_ownership/input_ownership_api.cc
+@@ -53,7 +53,8 @@
+ 
+ InputOwnershipApplyResult SetInputOwnership(WebContents* web_contents,
+                                             InputOwnershipMode mode,
+-                                            uint64_t version) {
++                                            uint64_t version,
++                                            InputOwnershipOrigin origin) {
+   InputOwnershipController* controller = GetController(web_contents);
+   if (!controller) {
+     if (base::FeatureList::IsEnabled(features::kInputOwnershipEnforcement)) {
+@@ -63,7 +64,24 @@
+     result.result = InputOwnershipWriteResult::kFeatureDisabled;
+     return result;
+   }
+-  return controller->SetOwnership(mode, version);
++  return controller->SetOwnership(mode, version, origin);
++}
++
++InputOwnershipWriteResult ClearInheritedInputOwnership(
++    WebContents* web_contents) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    return FeatureDisabledOrUnknownTarget(web_contents);
++  }
++  return controller->ClearInherited();
++}
++
++InputOwnershipWriteResult TouchInputOwnership(WebContents* web_contents) {
++  InputOwnershipController* controller = GetController(web_contents);
++  if (!controller) {
++    return FeatureDisabledOrUnknownTarget(web_contents);
++  }
++  return controller->Touch();
+ }
+ 
+ InputOwnershipApplyResult HeartbeatInputOwnership(WebContents* web_contents,
+diff --git a/content/browser/input_ownership/input_ownership_controller_unittest.cc b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+--- a/content/browser/input_ownership/input_ownership_controller_unittest.cc
++++ b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+@@ -997,7 +997,7 @@
+ TEST_F(InputOwnershipDeciderTest, StaleDegradesToAssistWithoutRewritingMode) {
+   EnableFeature();
+   const base::TimeTicks t0 = T0();
+-  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 1, t0);
++  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 1, InputOwnershipOrigin::kExplicit, t0);
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
+   EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
+   EXPECT_FALSE(applied.snapshot.stale);
+@@ -1038,39 +1038,121 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+ 
+-  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5, now);
++  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5, InputOwnershipOrigin::kExplicit, now);
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
+   EXPECT_EQ(5u, applied.snapshot.version);
+ 
+   // Same version, same mode: idempotent and refreshes last_update.
+-  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5,
+-                                  now + base::Seconds(10));
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5, InputOwnershipOrigin::kExplicit, now + base::Seconds(10));
+   EXPECT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
+   EXPECT_EQ(5u, applied.snapshot.version);
+   EXPECT_EQ(now + base::Seconds(10), applied.snapshot.last_update);
+ 
+   // Same version, different mode: conflict, state unchanged.
+-  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 5, now);
++  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 5, InputOwnershipOrigin::kExplicit, now);
+   EXPECT_EQ(InputOwnershipWriteResult::kVersionConflict, applied.result);
+   EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
+   EXPECT_EQ(5u, applied.snapshot.version);
+ 
+   // Lower version: stale, state unchanged.
+-  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 4, now);
++  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 4, InputOwnershipOrigin::kExplicit, now);
+   EXPECT_EQ(InputOwnershipWriteResult::kStaleVersion, applied.result);
+   EXPECT_EQ(InputOwnershipMode::kAi, applied.snapshot.mode);
+ 
+   // Higher version wins, even with the same mode, and clears grants.
+   decider_.GrantDebuggerInput(SessionA(), 3, base::Seconds(10), now);
+   ASSERT_EQ(3, Remaining(SessionA()));
+-  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 6, now);
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 6, InputOwnershipOrigin::kExplicit, now);
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
+   EXPECT_EQ(6u, applied.snapshot.version);
+   EXPECT_EQ(0, Remaining(SessionA()));
+ 
+   // Version zero is never valid.
+-  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 0, now);
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 0, InputOwnershipOrigin::kExplicit, now);
+   EXPECT_EQ(InputOwnershipWriteResult::kInvalidArgument, applied.result);
++}
++
++// K15: origin separates inherited window snapshots from explicit per-tab
++// overrides. The two version spaces never compare; explicit always wins.
++TEST_F(InputOwnershipDeciderTest, OriginSeparatesInheritedAndExplicitWrites) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++
++  auto applied = decider_.SetOwnership(InputOwnershipMode::kAi, 5,
++                                       InputOwnershipOrigin::kInherited, now);
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(InputOwnershipOrigin::kInherited, applied.snapshot.origin);
++  EXPECT_EQ(5u, applied.snapshot.version);
++
++  // Explicit starts its own version space: even a lower version is accepted.
++  applied = decider_.SetOwnership(InputOwnershipMode::kHuman, 1,
++                                  InputOwnershipOrigin::kExplicit,
++                                  now + base::Seconds(1));
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(InputOwnershipOrigin::kExplicit, applied.snapshot.origin);
++  EXPECT_EQ(1u, applied.snapshot.version);
++  EXPECT_EQ(InputOwnershipMode::kHuman, applied.snapshot.mode);
++
++  // A window snapshot (even with a much higher version) can never replace it.
++  applied = decider_.SetOwnership(InputOwnershipMode::kAi, 99,
++                                  InputOwnershipOrigin::kInherited,
++                                  now + base::Seconds(2));
++  EXPECT_EQ(InputOwnershipWriteResult::kOverridePresent, applied.result);
++  EXPECT_EQ(InputOwnershipOrigin::kExplicit, applied.snapshot.origin);
++  EXPECT_EQ(InputOwnershipMode::kHuman, applied.snapshot.mode);
++  EXPECT_EQ(1u, applied.snapshot.version);
++
++  // ClearInherited is a no-op for an explicit override.
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.ClearInherited(now + base::Seconds(3)));
++  EXPECT_EQ(InputOwnershipOrigin::kExplicit, decider_.snapshot().origin);
++}
++
++// K15: inherited writes are monotonic inside their own origin, Touch only
++// refreshes liveness, and ClearInherited returns the tab to fail-closed ASSIST.
++TEST_F(InputOwnershipDeciderTest, InheritedVersionTouchAndClear) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAi, 5,
++                                  InputOwnershipOrigin::kInherited, now)
++                .result);
++  // Same origin: lower/stale and same-version/different-mode are rejected.
++  EXPECT_EQ(InputOwnershipWriteResult::kStaleVersion,
++            decider_.SetOwnership(InputOwnershipMode::kHuman, 4,
++                                  InputOwnershipOrigin::kInherited, now)
++                .result);
++  EXPECT_EQ(InputOwnershipWriteResult::kVersionConflict,
++            decider_.SetOwnership(InputOwnershipMode::kHuman, 5,
++                                  InputOwnershipOrigin::kInherited, now)
++                .result);
++  // A newer inherited version is accepted.
++  auto applied = decider_.SetOwnership(InputOwnershipMode::kAssist, 6,
++                                       InputOwnershipOrigin::kInherited,
++                                       now + base::Seconds(1));
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
++  EXPECT_EQ(6u, applied.snapshot.version);
++
++  // Stale after 30s, then Touch revives liveness without changing values.
++  const base::TimeTicks stale_at = now + base::Seconds(40);
++  EXPECT_TRUE(decider_.IsStale(stale_at));
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.Touch(stale_at + base::Seconds(1)));
++  EXPECT_FALSE(decider_.IsStale(stale_at + base::Seconds(1)));
++  EXPECT_EQ(InputOwnershipMode::kAssist, decider_.snapshot().mode);
++  EXPECT_EQ(6u, decider_.snapshot().version);
++  EXPECT_EQ(InputOwnershipOrigin::kInherited, decider_.snapshot().origin);
++
++  // Clear returns the tab to the fail-closed state; Touch then has no target.
++  EXPECT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.ClearInherited(stale_at + base::Seconds(2)));
++  const InputOwnershipSnapshot cleared = decider_.snapshot();
++  EXPECT_EQ(InputOwnershipMode::kAssist, cleared.mode);
++  EXPECT_EQ(0u, cleared.version);
++  EXPECT_EQ(InputOwnershipOrigin::kNone, cleared.origin);
++  EXPECT_EQ(InputOwnershipWriteResult::kUnknownTarget,
++            decider_.Touch(stale_at + base::Seconds(3)));
+ }
+ 
+ // K11/K12: heartbeat must not advance the version, must reject an unknown
+@@ -1079,7 +1161,7 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
+-            decider_.SetOwnership(InputOwnershipMode::kAssist, 2, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 2, InputOwnershipOrigin::kExplicit, now).result);
+   decider_.GrantDebuggerInput(SessionA(), 2, base::Seconds(30), now);
+ 
+   auto applied = decider_.Heartbeat(2, now + base::Seconds(5));
+@@ -1101,7 +1183,7 @@
+   DisableFeature();
+   const base::TimeTicks now = T0();
+   EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
+-            decider_.SetOwnership(InputOwnershipMode::kAi, 1, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kAi, 1, InputOwnershipOrigin::kExplicit, now).result);
+   EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
+             decider_.Heartbeat(1, now).result);
+   EXPECT_FALSE(
+@@ -1119,7 +1201,7 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
+-            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, InputOwnershipOrigin::kExplicit, now).result);
+   decider_.GrantDebuggerInput(SessionA(), 2, base::Seconds(60), now);
+ 
+   auto scope = decider_.BeginCommand(SessionA(), "cmd-1", base::Seconds(10),
+@@ -1164,7 +1246,7 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
+-            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, InputOwnershipOrigin::kExplicit, now).result);
+   decider_.GrantDebuggerInput(SessionA(), 2, base::Seconds(60), now);
+ 
+   ASSERT_TRUE(decider_.BeginCommand(SessionA(), "unused", base::Seconds(10),
+@@ -1190,7 +1272,7 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
+-            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, InputOwnershipOrigin::kExplicit, now).result);
+   decider_.GrantDebuggerInput(SessionA(), 1, base::Seconds(60), now);
+   ASSERT_TRUE(decider_.BeginCommand(SessionA(), "cmd", base::Seconds(2), now)
+                   .ok());
+@@ -1206,13 +1288,13 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
+-            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1, InputOwnershipOrigin::kExplicit, now).result);
+   EXPECT_EQ(InputOwnershipWriteResult::kGrantRequired,
+             decider_.BeginCommand(SessionA(), "cmd", base::Seconds(5), now)
+                 .result);
+ 
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
+-            decider_.SetOwnership(InputOwnershipMode::kHuman, 2, now).result);
++            decider_.SetOwnership(InputOwnershipMode::kHuman, 2, InputOwnershipOrigin::kExplicit, now).result);
+   decider_.GrantDebuggerInput(SessionA(), 5, base::Seconds(60), now);
+   EXPECT_EQ(InputOwnershipWriteResult::kGrantRequired,
+             decider_.BeginCommand(SessionA(), "cmd", base::Seconds(5), now)
+@@ -1232,7 +1314,8 @@
+ 
+   const base::TimeTicks now = base::TimeTicks::Now();
+   auto applied =
+-      SetInputOwnership(web_contents(), InputOwnershipMode::kAssist, 3);
++      SetInputOwnership(web_contents(), InputOwnershipMode::kAssist, 3,
++                        InputOwnershipOrigin::kExplicit);
+   ASSERT_EQ(InputOwnershipWriteResult::kAccepted, applied.result);
+   EXPECT_EQ(InputOwnershipMode::kAssist, applied.snapshot.mode);
+   EXPECT_EQ(3u, applied.snapshot.version);
+@@ -1277,7 +1360,8 @@
+   feature_list.InitWithFeatureState(features::kInputOwnershipEnforcement,
+                                      false);
+   EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
+-            SetInputOwnership(web_contents(), InputOwnershipMode::kAi, 1)
++            SetInputOwnership(web_contents(), InputOwnershipMode::kAi, 1,
++                              InputOwnershipOrigin::kExplicit)
+                 .result);
+   EXPECT_EQ(InputOwnershipWriteResult::kFeatureDisabled,
+             HeartbeatInputOwnership(web_contents(), 1).result);
+@@ -1296,7 +1380,8 @@
+   base::test::ScopedFeatureList feature_list;
+   feature_list.InitAndEnableFeature(features::kInputOwnershipEnforcement);
+ 
+-  SetInputOwnership(web_contents(), InputOwnershipMode::kAi, 1);
++  SetInputOwnership(web_contents(), InputOwnershipMode::kAi, 1,
++                    InputOwnershipOrigin::kExplicit);
+ 
+   int callbacks = 0;
+   InputOwnershipHumanPresenceKind last_kind =
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
+--- a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.cc
+@@ -4,7 +4,6 @@
+ 
+ #include "chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_api.h"
+ 
+-#include <map>
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -14,14 +13,15 @@
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/scoped_refptr.h"
+-#include "base/no_destructor.h"
+ #include "base/time/time.h"
+ #include "base/values.h"
+ #include "chrome/browser/extensions/api/browser_cli/browser_cli_extension_identity.h"
++#include "chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.h"
+ #include "chrome/browser/extensions/api/debugger/debugger_api_client_lookup.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/browser/extensions/window_controller.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/common/extensions/api/browser_cli_input_ownership.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/devtools_agent_host.h"
+@@ -40,6 +40,9 @@
+ namespace {
+ 
+ namespace api_io = api::browser_cli_input_ownership;
++using browser_cli_input_ownership::WindowApplyResult;
++using browser_cli_input_ownership::WindowOwnershipRegistry;
++using browser_cli_input_ownership::WindowRecord;
+ 
+ // --- Result codes ----------------------------------------------------------
+ 
+@@ -74,6 +77,8 @@
+       return kGrantRequired;
+     case Result::kUnknownCommand:
+       return kUnknownCommand;
++    case Result::kOverridePresent:
++      return "OVERRIDE_PRESENT";
+   }
+ }
+ 
+@@ -157,55 +162,6 @@
+     return false;
+   }
+   return true;
+-}
+-
+-// --- Window snapshot ledger ------------------------------------------------
+-//
+-// The content controller is per WebContents. A window target is expanded into
+-// its current tabs (and, at every heartbeat, into the tabs that exist by then).
+-// The ledger below remembers the last accepted window snapshot so a tab created
+-// after setOwnership() can be bound by the next heartbeat even if the observer
+-// path is unavailable. It is a cache, never a second source of truth: content
+-// per-tab state wins on every conflicting read.
+-struct WindowRecord {
+-  content::InputOwnershipMode mode = content::InputOwnershipMode::kAssist;
+-  uint64_t version = 0;
+-};
+-
+-using WindowKey = std::pair<content::BrowserContext*, int>;
+-
+-std::map<WindowKey, WindowRecord>& WindowRecords() {
+-  static base::NoDestructor<std::map<WindowKey, WindowRecord>> records;
+-  return *records;
+-}
+-
+-// Keeps the ledger bounded if windows come and go without an explicit close
+-// (window ids are recycled, so the entry is refreshed on every setOwnership).
+-constexpr size_t kMaxWindowRecords = 256;
+-
+-void StoreWindowRecord(content::BrowserContext* context,
+-                       int window_id,
+-                       content::InputOwnershipMode mode,
+-                       uint64_t version) {
+-  auto& records = WindowRecords();
+-  if (records.size() >= kMaxWindowRecords &&
+-      !records.contains(WindowKey(context, window_id))) {
+-    records.erase(records.begin());
+-  }
+-  records[WindowKey(context, window_id)] = WindowRecord{mode, version};
+-}
+-
+-void EraseWindowRecord(content::BrowserContext* context, int window_id) {
+-  WindowRecords().erase(WindowKey(context, window_id));
+-}
+-
+-std::optional<WindowRecord> GetWindowRecord(content::BrowserContext* context,
+-                                            int window_id) {
+-  auto it = WindowRecords().find(WindowKey(context, window_id));
+-  if (it == WindowRecords().end()) {
+-    return std::nullopt;
+-  }
+-  return it->second;
+ }
+ 
+ // --- Session resolution (K16) ----------------------------------------------
+@@ -388,7 +344,8 @@
+     }
+     const content::InputOwnershipApplyResult apply =
+         content::SetInputOwnership(web_contents, mode,
+-                                   static_cast<uint64_t>(version));
++                                   static_cast<uint64_t>(version),
++                                   content::InputOwnershipOrigin::kExplicit);
+     result.accepted =
+         apply.result == content::InputOwnershipWriteResult::kAccepted;
+     result.mode = ToApiMode(apply.snapshot.mode);
+@@ -410,36 +367,28 @@
+         ArgumentList(api_io::SetOwnership::Results::Create(result)));
+   }
+ 
+-  // Apply to every current tab. A rejection caused by a higher kernel version
+-  // is reported back so the extension can adopt it; tabs that already accepted
+-  // are idempotent on replay.
+-  bool accepted = true;
+-  content::InputOwnershipSnapshot highest;
+-  for (int i = 0; i < window->GetTabCount(); ++i) {
+-    content::WebContents* web_contents = window->GetWebContentsAt(i);
+-    if (!web_contents) {
+-      continue;
+-    }
+-    const content::InputOwnershipApplyResult apply =
+-        content::SetInputOwnership(web_contents, mode,
+-                                   static_cast<uint64_t>(version));
+-    if (apply.snapshot.version > highest.version) {
+-      highest = apply.snapshot;
+-    }
+-    if (apply.result != content::InputOwnershipWriteResult::kAccepted) {
+-      accepted = false;
+-      result.reason = ToReason(apply.result);
+-      result.mode = ToApiMode(apply.snapshot.mode);
+-      result.version = static_cast<int>(apply.snapshot.version);
+-    }
+-  }
+-
+-  result.accepted = accepted;
+-  if (accepted) {
+-    StoreWindowRecord(browser_context(), *target.window_id, mode,
+-                      static_cast<uint64_t>(version));
+-    result.mode = ToApiMode(mode);
+-    result.version = static_cast<int>(version);
++  BrowserWindowInterface* browser = window->GetBrowserWindowInterface();
++  WindowOwnershipRegistry* registry =
++      WindowOwnershipRegistry::GetForBrowserContext(browser_context());
++  if (!browser || !registry) {
++    result.accepted = false;
++    result.reason = kUnknownTarget;
++    return RespondNow(
++        ArgumentList(api_io::SetOwnership::Results::Create(result)));
++  }
++
++  // The registry owns the window version space and the tab-strip observer. It
++  // skips explicit tab overrides and applies inherited state to every current
++  // tab; an idempotent replay also binds any tab that appeared since the last
++  // call.
++  const WindowApplyResult apply =
++      registry->SetOwnership(browser, mode, static_cast<uint64_t>(version));
++  result.accepted =
++      apply.result == content::InputOwnershipWriteResult::kAccepted;
++  result.mode = ToApiMode(apply.record.mode);
++  result.version = static_cast<int>(apply.record.version);
++  if (!result.accepted) {
++    result.reason = ToReason(apply.result);
+   }
+   return RespondNow(ArgumentList(api_io::SetOwnership::Results::Create(result)));
+ }
+@@ -509,67 +458,26 @@
+   std::string reason;
+   if (!ResolveWindow(browser_context(), include_incognito_information(),
+                      target, &window, &reason)) {
+-    EraseWindowRecord(browser_context(), *target.window_id);
+     result.reason = reason;
+     return finish();
+   }
+ 
+-  const std::optional<WindowRecord> record =
+-      GetWindowRecord(browser_context(), *target.window_id);
+-  bool ok = true;
+-  content::InputOwnershipSnapshot highest;
+-  bool any_tab = false;
+-  for (int i = 0; i < window->GetTabCount(); ++i) {
+-    content::WebContents* web_contents = window->GetWebContentsAt(i);
+-    if (!web_contents) {
+-      continue;
+-    }
+-    any_tab = true;
+-    content::InputOwnershipApplyResult apply;
+-    const content::InputOwnershipSnapshot before =
+-        content::GetInputOwnershipSnapshot(web_contents);
+-    if (record) {
+-      if (before.version == 0) {
+-        // A tab created after setOwnership(): bind it to the window snapshot.
+-        apply = content::SetInputOwnership(web_contents, record->mode,
+-                                           record->version);
+-      } else if (before.version == record->version) {
+-        apply = content::HeartbeatInputOwnership(
+-            web_contents, static_cast<uint64_t>(version));
+-      } else {
+-        // A tab-level state that does not match the window snapshot: it was
+-        // set through an exact tabId target (which has priority over the
+-        // window) or by another window owner. Leave it untouched and do not
+-        // fail the window heartbeat.
+-        if (before.version > highest.version) {
+-          highest = before;
+-        }
+-        continue;
+-      }
+-    } else {
+-      apply = content::HeartbeatInputOwnership(web_contents,
+-                                               static_cast<uint64_t>(version));
+-    }
+-    if (apply.snapshot.version > highest.version) {
+-      highest = apply.snapshot;
+-    }
+-    if (apply.result != content::InputOwnershipWriteResult::kAccepted) {
+-      ok = false;
+-      result.reason = ToReason(apply.result);
+-    }
+-  }
+-  if (!any_tab) {
+-    EraseWindowRecord(browser_context(), *target.window_id);
++  BrowserWindowInterface* browser = window->GetBrowserWindowInterface();
++  WindowOwnershipRegistry* registry =
++      WindowOwnershipRegistry::GetForBrowserContext(browser_context());
++  if (!browser || !registry) {
+     result.reason = kUnknownTarget;
+     return finish();
+   }
+ 
+-  result.ok = ok;
+-  result.mode = ToApiMode(highest.mode);
+-  result.version = static_cast<int>(highest.version);
+-  result.stale = highest.stale;
+-  if (ok) {
+-    result.reason = std::nullopt;
++  const WindowApplyResult apply =
++      registry->Heartbeat(browser, static_cast<uint64_t>(version));
++  result.ok = apply.result == content::InputOwnershipWriteResult::kAccepted;
++  result.mode = ToApiMode(apply.record.mode);
++  result.version = static_cast<int>(apply.record.version);
++  result.stale = !apply.record.IsFresh(base::TimeTicks::Now());
++  if (!result.ok) {
++    result.reason = ToReason(apply.result);
+   }
+   return finish();
+ }
+@@ -599,56 +507,59 @@
+     return RespondNow(Error(kInvalidTarget));
+   }
+ 
+-  content::InputOwnershipSnapshot snapshot;
+-  bool found = false;
+   if (target.tab_id.has_value()) {
+     content::WebContents* web_contents = nullptr;
+     std::string reason;
++    api_io::Snapshot result;
++    result.mode = api_io::Mode::kAssist;
++    result.version = 0;
++    result.stale = true;
+     if (!ResolveTab(browser_context(), include_incognito_information(), target,
+                     &web_contents, &reason)) {
+-      api_io::Snapshot result;
+-      result.mode = api_io::Mode::kAssist;
+-      result.version = 0;
+-      result.stale = true;
+       result.reason = reason;
+       return RespondNow(
+           ArgumentList(api_io::GetOwnership::Results::Create(result)));
+     }
+-    snapshot = content::GetInputOwnershipSnapshot(web_contents);
+-    found = true;
+-  } else {
+-    WindowController* window = nullptr;
+-    std::string reason;
+-    if (!ResolveWindow(browser_context(), include_incognito_information(),
+-                       target, &window, &reason)) {
+-      api_io::Snapshot result;
+-      result.mode = api_io::Mode::kAssist;
+-      result.version = 0;
+-      result.stale = true;
+-      result.reason = reason;
+-      return RespondNow(
+-          ArgumentList(api_io::GetOwnership::Results::Create(result)));
+-    }
+-    for (int i = 0; i < window->GetTabCount(); ++i) {
+-      content::WebContents* web_contents = window->GetWebContentsAt(i);
+-      if (!web_contents) {
+-        continue;
+-      }
+-      snapshot = content::GetInputOwnershipSnapshot(web_contents);
+-      found = true;
+-      break;
+-    }
+-  }
+-
++    const content::InputOwnershipSnapshot snapshot =
++        content::GetInputOwnershipSnapshot(web_contents);
++    result.mode = ToApiMode(snapshot.mode);
++    result.version = static_cast<int>(snapshot.version);
++    result.stale = snapshot.stale;
++    if (!snapshot.last_update.is_null()) {
++      result.last_update_at =
++          static_cast<double>(ToEpochMs(snapshot.last_update));
++    }
++    return RespondNow(
++        ArgumentList(api_io::GetOwnership::Results::Create(result)));
++  }
++
++  WindowController* window = nullptr;
++  std::string reason;
+   api_io::Snapshot result;
+-  result.mode = ToApiMode(snapshot.mode);
+-  result.version = static_cast<int>(snapshot.version);
+-  result.stale = snapshot.stale;
+-  if (!snapshot.last_update.is_null()) {
+-    result.last_update_at = static_cast<double>(ToEpochMs(snapshot.last_update));
+-  }
+-  if (!found) {
++  result.mode = api_io::Mode::kAssist;
++  result.version = 0;
++  result.stale = true;
++  if (!ResolveWindow(browser_context(), include_incognito_information(),
++                     target, &window, &reason)) {
++    result.reason = reason;
++    return RespondNow(
++        ArgumentList(api_io::GetOwnership::Results::Create(result)));
++  }
++  BrowserWindowInterface* browser = window->GetBrowserWindowInterface();
++  WindowOwnershipRegistry* registry =
++      WindowOwnershipRegistry::GetForBrowserContext(browser_context());
++  WindowRecord record;
++  if (!browser || !registry || !registry->GetOwnership(browser, &record)) {
+     result.reason = kUnknownTarget;
++    return RespondNow(
++        ArgumentList(api_io::GetOwnership::Results::Create(result)));
++  }
++  result.mode = ToApiMode(record.mode);
++  result.version = static_cast<int>(record.version);
++  result.stale = !record.IsFresh(base::TimeTicks::Now());
++  if (!record.last_ack.is_null()) {
++    result.last_update_at =
++        static_cast<double>(ToEpochMs(record.last_ack));
+   }
+   return RespondNow(ArgumentList(api_io::GetOwnership::Results::Create(result)));
+ }
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn b/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn
+--- a/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/BUILD.gn
+@@ -11,6 +11,8 @@
+   sources = [
+     "browser_cli_input_ownership_api.cc",
+     "browser_cli_input_ownership_api.h",
++    "browser_cli_input_ownership_window_bindings.cc",
++    "browser_cli_input_ownership_window_bindings.h",
+   ]
+ 
+   deps = [
+@@ -19,7 +21,10 @@
+     "//chrome/browser/extensions/api/browser_cli",
+     "//chrome/browser/extensions/api/debugger",
+     "//chrome/browser/profiles:profile",
++    "//chrome/browser/ui/browser_window",
++    "//chrome/browser/ui/tabs",
+     "//chrome/common/extensions/api",
++    "//components/sessions:session_id",
+     "//content/public/browser",
+     "//extensions/browser",
+     "//extensions/common",
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.h b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.h
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.h
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_BROWSER_CLI_INPUT_OWNERSHIP_WINDOW_BINDINGS_H_
++#define CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_BROWSER_CLI_INPUT_OWNERSHIP_WINDOW_BINDINGS_H_
++
++#include <map>
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "base/supports_user_data.h"
++#include "base/time/time.h"
++#include "components/sessions/core/session_id.h"
++#include "content/public/browser/input_ownership.h"
++
++class BrowserWindowInterface;
++class TabStripModel;
++
++namespace content {
++class BrowserContext;
++class WebContents;
++}  // namespace content
++
++namespace extensions::browser_cli_input_ownership {
++
++// Last accepted window snapshot. This is a cache of the extension-owned truth,
++// never a second source of truth: per-WebContents state remains authoritative.
++struct WindowRecord {
++  content::InputOwnershipMode mode = content::InputOwnershipMode::kAssist;
++  uint64_t version = 0;
++  base::TimeTicks last_ack;
++  SessionID session_id = SessionID::InvalidValue();
++  bool dead = false;
++
++  bool IsFresh(base::TimeTicks now) const {
++    return !dead && version != 0 && !last_ack.is_null() &&
++           now - last_ack <= content::InputOwnershipStaleAfter();
++  }
++};
++
++struct WindowApplyResult {
++  content::InputOwnershipWriteResult result =
++      content::InputOwnershipWriteResult::kFeatureDisabled;
++  WindowRecord record;
++};
++
++// Per-BrowserContext registry of window snapshots and their tab-strip
++// observers. It is created lazily by the first successful
++// setOwnership({windowId}); feature-off/untrusted callers never create it.
++class WindowOwnershipRegistry : public base::SupportsUserData::Data {
++ public:
++  static WindowOwnershipRegistry* GetForBrowserContext(
++      content::BrowserContext* browser_context);
++  static WindowOwnershipRegistry* GetIfExistsForBrowserContext(
++      content::BrowserContext* browser_context);
++
++  WindowOwnershipRegistry();
++  ~WindowOwnershipRegistry() override;
++
++  WindowOwnershipRegistry(const WindowOwnershipRegistry&) = delete;
++  WindowOwnershipRegistry& operator=(const WindowOwnershipRegistry&) = delete;
++
++  WindowApplyResult SetOwnership(BrowserWindowInterface* browser,
++                                 content::InputOwnershipMode mode,
++                                 uint64_t version);
++  WindowApplyResult Heartbeat(BrowserWindowInterface* browser,
++                              uint64_t version);
++  bool GetOwnership(BrowserWindowInterface* browser, WindowRecord* out) const;
++  void EraseWindow(const SessionID& session_id);
++
++ private:
++  class Binding;
++
++  Binding* GetBinding(const SessionID& session_id) const;
++  Binding* GetOrCreateBinding(BrowserWindowInterface* browser);
++
++  std::map<SessionID, std::unique_ptr<Binding>> bindings_;
++};
++
++}  // namespace extensions::browser_cli_input_ownership
++
++#endif  // CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_INPUT_OWNERSHIP_BROWSER_CLI_INPUT_OWNERSHIP_WINDOW_BINDINGS_H_
+diff --git a/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.cc b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.cc
+new file mode 100644
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.cc
+@@ -0,0 +1,326 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/extensions/api/browser_cli_input_ownership/browser_cli_input_ownership_window_bindings.h"
++
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/web_contents.h"
++
++namespace extensions::browser_cli_input_ownership {
++
++namespace {
++// Independent user-data key; address identity is the key, not the value.
++const char kWindowRegistryKey = 0;
++}  // namespace
++
++class WindowOwnershipRegistry::Binding : public TabStripModelObserver {
++ public:
++  Binding(WindowOwnershipRegistry* registry, BrowserWindowInterface* browser)
++      : registry_(registry),
++        model_(browser->GetTabStripModel()),
++        session_id_(browser->GetSessionID()) {
++    record_.session_id = session_id_;
++    if (model_) {
++      model_->AddObserver(this);
++    }
++    close_subscription_ = browser->RegisterBrowserDidClose(
++        base::BindRepeating(&Binding::OnBrowserDidClose,
++                            weak_factory_.GetWeakPtr()));
++  }
++
++  ~Binding() override {
++    if (model_) {
++      model_->RemoveObserver(this);
++    }
++  }
++
++  Binding(const Binding&) = delete;
++  Binding& operator=(const Binding&) = delete;
++
++  const WindowRecord& record() const { return record_; }
++
++  void Set(WindowRecord record) {
++    record_ = std::move(record);
++    ApplyToExistingContents();
++  }
++
++  void Touch(base::TimeTicks now) { record_.last_ack = now; }
++
++  void ApplyToExistingContents() {
++    if (!model_) {
++      return;
++    }
++    const int count = model_->count();
++    for (int i = 0; i < count; ++i) {
++      content::WebContents* contents = model_->GetWebContentsAt(i);
++      if (contents) {
++        ApplyToNewContents(contents);
++      }
++    }
++  }
++
++  // TabStripModelObserver:
++  void OnTabStripModelChanged(
++      TabStripModel* tab_strip_model,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override {
++    switch (change.type()) {
++      case TabStripModelChange::kInserted:
++        if (const TabStripModelChange::Insert* insert = change.GetInsert()) {
++          for (const TabStripModelChange::ContentsWithIndex& item :
++               insert->contents) {
++            if (item.contents) {
++              ApplyToNewContents(item.contents);
++            }
++          }
++        }
++        break;
++      case TabStripModelChange::kRemoved:
++        if (const TabStripModelChange::Remove* remove = change.GetRemove()) {
++          for (const TabStripModelChange::RemovedTab& item :
++               remove->contents) {
++            // A tab moved to another window must not keep this window's
++            // inherited mode. Explicit overrides survive the move by design.
++            if (item.contents &&
++                item.tab_detach_reason ==
++                    tabs::TabInterface::DetachReason::kInsertIntoOtherWindow) {
++              content::ClearInheritedInputOwnership(item.contents);
++            }
++          }
++        }
++        break;
++      case TabStripModelChange::kReplaced:
++        if (const TabStripModelChange::Replace* replace =
++                change.GetReplace()) {
++          ApplyReplace(replace->old_contents, replace->new_contents);
++        }
++        break;
++      case TabStripModelChange::kMoved:
++      case TabStripModelChange::kSelectionOnly:
++        break;
++    }
++  }
++
++  void OnTabStripModelDestroyed(TabStripModel* tab_strip_model) override {
++    // Do not RemoveObserver() from here: the model is being destroyed and is
++    // iterating its observer list.
++    model_ = nullptr;
++    record_.dead = true;
++  }
++
++ private:
++  void OnBrowserDidClose(BrowserWindowInterface*) {
++    if (registry_) {
++      registry_->EraseWindow(session_id_);
++    }
++  }
++
++  void ApplyToNewContents(content::WebContents* contents) {
++    if (!record_.IsFresh(base::TimeTicks::Now())) {
++      return;
++    }
++    // kOverridePresent is a normal skip: an explicit tab override always wins.
++    const content::InputOwnershipApplyResult applied =
++        content::SetInputOwnership(contents, record_.mode, record_.version,
++                                   content::InputOwnershipOrigin::kInherited);
++    if (applied.result ==
++        content::InputOwnershipWriteResult::kStaleVersion) {
++      // A tab moved from a window with a higher inherited version: the target
++      // window is now authoritative, so drop the old inherited state and retry.
++      content::ClearInheritedInputOwnership(contents);
++      content::SetInputOwnership(contents, record_.mode, record_.version,
++                                 content::InputOwnershipOrigin::kInherited);
++    }
++  }
++
++  void ApplyReplace(content::WebContents* old_contents,
++                    content::WebContents* new_contents) {
++    if (!new_contents) {
++      return;
++    }
++    if (old_contents) {
++      const content::InputOwnershipSnapshot old =
++          content::GetInputOwnershipSnapshot(old_contents);
++      if (old.origin == content::InputOwnershipOrigin::kExplicit &&
++          old.version != 0) {
++        // A per-tab override must survive prerender/discard replacement.
++        content::SetInputOwnership(new_contents, old.mode, old.version,
++                                   content::InputOwnershipOrigin::kExplicit);
++        return;
++      }
++    }
++    ApplyToNewContents(new_contents);
++  }
++
++  raw_ptr<WindowOwnershipRegistry> registry_;
++  raw_ptr<TabStripModel> model_;
++  const SessionID session_id_;
++  WindowRecord record_;
++  base::CallbackListSubscription close_subscription_;
++  base::WeakPtrFactory<Binding> weak_factory_{this};
++};
++
++WindowOwnershipRegistry::WindowOwnershipRegistry() = default;
++
++WindowOwnershipRegistry::~WindowOwnershipRegistry() = default;
++
++// static
++WindowOwnershipRegistry* WindowOwnershipRegistry::GetForBrowserContext(
++    content::BrowserContext* browser_context) {
++  if (!browser_context || browser_context->IsOffTheRecord()) {
++    return nullptr;
++  }
++  if (auto* existing = GetIfExistsForBrowserContext(browser_context)) {
++    return existing;
++  }
++  auto registry = std::make_unique<WindowOwnershipRegistry>();
++  auto* raw = registry.get();
++  browser_context->SetUserData(&kWindowRegistryKey, std::move(registry));
++  return raw;
++}
++
++// static
++WindowOwnershipRegistry* WindowOwnershipRegistry::GetIfExistsForBrowserContext(
++    content::BrowserContext* browser_context) {
++  if (!browser_context) {
++    return nullptr;
++  }
++  return static_cast<WindowOwnershipRegistry*>(
++      browser_context->GetUserData(&kWindowRegistryKey));
++}
++
++WindowOwnershipRegistry::Binding* WindowOwnershipRegistry::GetBinding(
++    const SessionID& session_id) const {
++  auto it = bindings_.find(session_id);
++  return it == bindings_.end() ? nullptr : it->second.get();
++}
++
++WindowOwnershipRegistry::Binding*
++WindowOwnershipRegistry::GetOrCreateBinding(BrowserWindowInterface* browser) {
++  if (!browser) {
++    return nullptr;
++  }
++  const SessionID& session_id = browser->GetSessionID();
++  if (!session_id.is_valid()) {
++    return nullptr;
++  }
++  if (Binding* existing = GetBinding(session_id)) {
++    return existing;
++  }
++  auto binding = std::make_unique<Binding>(this, browser);
++  Binding* raw = binding.get();
++  bindings_[session_id] = std::move(binding);
++  return raw;
++}
++
++WindowApplyResult WindowOwnershipRegistry::SetOwnership(
++    BrowserWindowInterface* browser,
++    content::InputOwnershipMode mode,
++    uint64_t version) {
++  WindowApplyResult result;
++  Binding* binding = GetOrCreateBinding(browser);
++  if (!binding) {
++    result.result = content::InputOwnershipWriteResult::kUnknownTarget;
++    return result;
++  }
++  const WindowRecord& current = binding->record();
++  if (current.dead) {
++    result.result = content::InputOwnershipWriteResult::kUnknownTarget;
++    result.record = current;
++    return result;
++  }
++  if (current.version != 0 && version < current.version) {
++    result.result = content::InputOwnershipWriteResult::kStaleVersion;
++    result.record = current;
++    return result;
++  }
++  if (current.version != 0 && version == current.version &&
++      mode != current.mode) {
++    result.result = content::InputOwnershipWriteResult::kVersionConflict;
++    result.record = current;
++    return result;
++  }
++
++  WindowRecord next = current;
++  next.mode = mode;
++  next.version = version;
++  next.last_ack = base::TimeTicks::Now();
++  next.dead = false;
++  binding->Set(next);
++  result.result = content::InputOwnershipWriteResult::kAccepted;
++  result.record = binding->record();
++  return result;
++}
++
++WindowApplyResult WindowOwnershipRegistry::Heartbeat(
++    BrowserWindowInterface* browser,
++    uint64_t version) {
++  WindowApplyResult result;
++  Binding* binding = browser ? GetBinding(browser->GetSessionID()) : nullptr;
++  if (!binding || binding->record().dead) {
++    result.result = content::InputOwnershipWriteResult::kUnknownTarget;
++    return result;
++  }
++  const WindowRecord& current = binding->record();
++  if (version < current.version) {
++    result.result = content::InputOwnershipWriteResult::kStaleVersion;
++    result.record = current;
++    return result;
++  }
++  if (version > current.version) {
++    result.result = content::InputOwnershipWriteResult::kVersionUnknown;
++    result.record = current;
++    return result;
++  }
++
++  binding->Touch(base::TimeTicks::Now());
++  if (binding->record().IsFresh(base::TimeTicks::Now())) {
++    binding->ApplyToExistingContents();
++  }
++  // `ApplyToExistingContents` deliberately skips explicit tabs through the
++  // content kOverridePresent result; touch their liveness separately.
++  if (TabStripModel* model = browser->GetTabStripModel()) {
++    for (int i = 0; i < model->count(); ++i) {
++      content::WebContents* contents = model->GetWebContentsAt(i);
++      if (!contents) {
++        continue;
++      }
++      const content::InputOwnershipSnapshot snapshot =
++          content::GetInputOwnershipSnapshot(contents);
++      if (snapshot.origin == content::InputOwnershipOrigin::kExplicit) {
++        content::TouchInputOwnership(contents);
++      }
++    }
++  }
++
++  result.result = content::InputOwnershipWriteResult::kAccepted;
++  result.record = binding->record();
++  return result;
++}
++
++bool WindowOwnershipRegistry::GetOwnership(BrowserWindowInterface* browser,
++                                           WindowRecord* out) const {
++  if (!browser || !out) {
++    return false;
++  }
++  Binding* binding = GetBinding(browser->GetSessionID());
++  if (!binding || binding->record().dead || binding->record().version == 0) {
++    return false;
++  }
++  *out = binding->record();
++  return true;
++}
++
++void WindowOwnershipRegistry::EraseWindow(const SessionID& session_id) {
++  bindings_.erase(session_id);
++}
++
++}  // namespace extensions::browser_cli_input_ownership
