@@ -173,6 +173,11 @@
       "order": 34,
       "file": "034-gpu-inprocess-direct-composition.patch",
       "sha256": "1185dd0be8fb174befdafcac620f5ef45c9205b4f36f65d6501308b7fc5d57c4"
+    },
+    {
+      "order": 35,
+      "file": "035-gpu-inprocess-overlay-info-after-dcomp.patch",
+      "sha256": "2108bcb2261ddc9926dfe08f5d41c0badc3ebed73507ba0ec6cebae582c95cb2"
     }
   ]
 }

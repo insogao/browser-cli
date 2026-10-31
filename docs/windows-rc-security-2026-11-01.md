@@ -1,6 +1,6 @@
 # Windows RC 安全基线：进程缓解对照、field trial 配置与 patch 034 生命周期
 
-状态：**Draft / 本地验证完成，不得据此宣称发布安全等价**。
+状态：**Draft / 本地验证完成；patch 035 已构建验证；不得据此宣称发布安全等价**。
 日期：2026-11-01。证据根目录：`D:\c\logs\rc-sec\`（本机，不在仓库内）。
 关联：`chromium/patches/034-gpu-inprocess-direct-composition.patch`、
 `tests/windows-rc-security/`、`docs/windows-gpu-dcomp-2026-10-31.md`。
@@ -47,10 +47,9 @@
      采样始终 `visible=false`。
    - 干净退出：7 次独立启动（in-process 5 次，其中两次分别走“关闭最后一个 tab”与
      “WM_CLOSE 隐藏窗口”路径；out-of-process 2 次）均为 exit 0、无 crash dump、无挂起。
-   - **FAIL**：`GPUInfo.overlay_info.direct_composition` / `supportsOverlays` 在
-     in-process 下为 `false/false`（out-of-process 为 `true/true`），因为
-     `InitializePlatformOverlaySettings()` 在 DComp 初始化之前执行。提议 patch 035
-     已写好并验证可应用（未构建、未进 manifest）。
+   - **FIXED/VERIFIED**：patch 035 把 `InitializePlatformOverlaySettings()` 移到 DComp 初始化之后；
+     构建后 WGC 彩色（293/290/295 colors），`SystemInfo.getInfo` 显示
+     `directComposition=true`、`supportsOverlays=true`。video overlay/HDR/D3D12 未回归。
    - **FAIL/NOT-EXERCISED**：`--single-process` 在 `extensions_client.cc:38`
      `Check failed: !g_client` 处 FATAL（0x80000003），发生在 GPU 初始化之前，patch 034
      未被触达。
