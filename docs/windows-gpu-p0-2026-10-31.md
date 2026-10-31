@@ -157,3 +157,23 @@ DComp 路径（`--in-process-gpu`，不加 `--disable-direct-composition`）：
 
 实验产物：`D:\c\logs\gpu-b-dcomp-2026-10-31T04-23-49-009Z`（HWND 4526636，黑）、`D:\c\logs\gpu-b-nodcomp-2026-10-31T04-24-22-096Z`（HWND 12587316，白）；
 本文件只记录结论和证据路径。
+
+---
+
+## 3. GPU-B 更新（2026-10-31，WGC trusted A/B）
+
+后续轮次见 [windows-gpu-dcomp-2026-10-31.md](windows-gpu-dcomp-2026-10-31.md)。要点：
+
+- 用 Windows Graphics Capture 在窗口被遮挡、`foreground=false` 时取得可信 A/B：
+  DComp 路径 9 点 `#1F2023` 黑，`--disable-direct-composition` 9 点 `#FFFFFF` 白；
+  CDP `fromSurface=true` 始终彩色。**白不是内容**，原 workaround 不成立。
+- 官方 Chrome 156 加 `--in-process-gpu` 复现**逐字节相同**的黑表面
+  （WGC hash `14864142134207728000`），证明不是 Browser CLI 窗口 patch。
+- 根因：`GpuInit::InitializeInProcess()` 未调用 `gl::InitializeDirectComposition()`，
+  `DirectCompositionSupported()` 恒 false，`DCompPresenter` 无法创建；trace 中
+  `DCompPresenter::Present`/`DCLayerTree::CommitAndClearPendingOverlays` 为 0。
+- 提议补丁：`tests/windows-gpu-dcomp/proposed/0001-gpu-init-inprocess-direct-composition.patch`
+  （未构建验证）。候选 workaround：强制 Graphite Dawn D3D12 swap chain，实测彩色，
+  但仍标注为 workaround。
+- patch 027 回归：上述所有路径的 `cdp_hidden`/`cdp_bottom` 仍彩色。
+

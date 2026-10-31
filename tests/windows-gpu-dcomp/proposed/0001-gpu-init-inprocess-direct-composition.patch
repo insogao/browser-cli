@@ -1,0 +1,43 @@
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -1240,6 +1240,40 @@
+   }
+ #endif  // BUILDFLAG(IS_ANDROID)
+ 
++#if BUILDFLAG(IS_WIN)
++  // Browser CLI GPU-B: the in-process GPU path must initialize
++  // DirectComposition exactly like the out-of-process GPU service. Without
++  // this, gl::DirectCompositionSupported() stays false, DCompPresenter can
++  // never be created, and the display compositor falls back to the GL/Dawn
++  // output paths that do not present to the browser window (black or white
++  // surface while the renderer, CDP content and copy-output path are healthy).
++  {
++    Microsoft::WRL::ComPtr<ID3D11Device> d3d11_device;
++    Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_command_queue;
++    gl::SolidColorPoolFactory solid_color_factory;
++    if (dawn_context_provider_) {
++      d3d11_device = dawn_context_provider_->GetD3D11Device();
++      d3d12_command_queue = dawn_context_provider_->GetD3D12CommandQueue();
++#if BUILDFLAG(SKIA_USE_DAWN)
++      if (d3d12_command_queue &&
++          base::FeatureList::IsEnabled(features::kDCompOnD3D12)) {
++        solid_color_factory = CreateDawnTextureSolidColorPoolFactory(
++            dawn_context_provider_->GetDevice(), d3d12_command_queue);
++      }
++#endif  // BUILDFLAG(SKIA_USE_DAWN)
++    } else {
++      d3d11_device = gl::QueryD3D11DeviceObjectFromANGLE();
++    }
++    if (!solid_color_factory) {
++      solid_color_factory =
++          gl::CreateDCSurfaceSolidColorPoolFactory(d3d11_device);
++    }
++    gl::InitializeDirectComposition(std::move(d3d11_device),
++                                    std::move(d3d12_command_queue),
++                                    std::move(solid_color_factory));
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   SetSkiaBackendType();
+   RecordUMA();
+ }
