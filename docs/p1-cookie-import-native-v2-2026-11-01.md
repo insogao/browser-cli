@@ -6,7 +6,7 @@ Worktree：`D:\work\wt\bc-rc-p1`
 
 - BrowserPilot 侧契约与来源扩展：`D:\work\wt\bp-rc-p1\scripts\import\contract.mjs`、
   `D:\work\wt\bp-rc-p1\extensions\import-source\`
-- 本仓库 proposed patch：`chromium/patches/proposed/034-browser-cli-cookie-import.patch`
+- 本仓库 proposed patch：`chromium/patches/proposed/036-browser-cli-cookie-import.patch`
 - 原 P1 背景：`docs/p1-browser-data-import-2026-10-30.md`
 
 ---
@@ -219,7 +219,7 @@ CookieManager/持久化后端决定，本 proposed patch 未构建，因此未�
 
 ## 9. Native Chromium 映射（proposed patch）
 
-文件（全部在 `chromium/patches/proposed/034-browser-cli-cookie-import.patch`）：
+文件（全部在 `chromium/patches/proposed/036-browser-cli-cookie-import.patch`）：
 
 - `chrome/browser/browser_cli/cookie_import/cookie_import_policy.{h,cc}`：
   票据、domain digest、job digest、字段校验、PSL/前缀/Partitioned 规则、

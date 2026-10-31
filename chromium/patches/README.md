@@ -456,7 +456,7 @@ git apply --check -R /path/to/browser-cli/chromium/patches/013-command-line-inte
 
 ## Proposed patch（不在 manifest，未应用、未编译）
 
-- `proposed/034-browser-cli-cookie-import.patch`：v2 原生 Cookie 导入目标
+- `proposed/036-browser-cli-cookie-import.patch`：v2 原生 Cookie 导入目标
   （Windows named pipe + 目标浏览器内授权弹窗 + CookieManager/CookieStore 写入）。
   当前状态：**proposed，未加入 `patch-manifest.json`，未编译、未运行单测、未集成**。
   已用只读 `git apply --check` 在 post-033 checkout 上验证可应用；这不等于可构建或通过

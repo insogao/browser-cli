@@ -118,5 +118,5 @@ v20 App-Bound 环境下可行，且不需要复制/解密源 Profile。来源扩
   Windows named pipe**，不再使用产品 localhost HTTP API。
 - BrowserPilot 侧已实现并测试；Browser CLI 原生端点仍是 **proposed，未编译/未集成**。
 - 详见 `docs/p1-cookie-import-native-v2-2026-11-01.md` 与
-  `chromium/patches/proposed/034-browser-cli-cookie-import.patch`。
+  `chromium/patches/proposed/036-browser-cli-cookie-import.patch`。
 - 不得据此宣称产品闭环完成；真实登录仍只能由用户本人确认。
