@@ -130,6 +130,9 @@ WGC 的 PNG 是 DWM 对该窗口的合成结果，因此“窗口表面黑、CDP
   DWM redirection bitmap，观察到白色表面；**不是页面内容**。所以“白=工作”是误判。
 - 颜色采样中顶行 `#3C3C3C/#282828`（或 Browser CLI 的 `#363840/#22242A`）是浏览器
   工具栏/标签栏，不是页面；页面色块在中心/中/下部 6 个采样点，均为高饱和色。
+- 黑/白 run 的 WGC 整帧是**空的 client 区域**：连标签栏/工具栏都没有（官方默认的
+  WGC 帧能清楚看到 tab strip、地址栏和页面）。因此失败发生在 display compositor 的
+  **输出/呈现**，不是 WebContents/HTML，也不只是页面 surface。
 - 官方默认与 Dawn D3D12 的 WGC 在窗口被 `send-to-bottom` 完全遮挡后仍连续产出 3 帧，
   且 hash 不同（动画在推进）；说明 DWM 合成表面是活的，不是陈旧帧。
 
