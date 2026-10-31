@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "upstream": "https://chromium.googlesource.com/chromium/src.git",
+  "baseline_revision": "7d0f28c30d1c0fadbce17ecec0ee2565aef9a940",
+  "baseline_version": "156.0.8067.0",
+  "patches": [
+    {
+      "order": 1,
+      "file": "001-managed-window-mode.patch",
+      "sha256": "5e1bd1e47a7a180dddfce28aca43eea2b801dd56c0f184fa2a717c8cec99aafb"
+    },
+    {
+      "order": 2,
+      "file": "002-browser-cli-branding.patch",
+      "sha256": "acd496a18a0c2d1c2133b2cf1848974e6d40332bc4f959a5e989e19a45cccf61"
+    },
+    {
+      "order": 3,
+      "file": "003-user-explicit.patch",
+      "sha256": "9852de6570056b0f4d5bc72749e9dc17d54fb42d7e50f03017db54f8d8192e43"
+    },
+    {
+      "order": 4,
+      "file": "004-foreground-lease.patch",
+      "sha256": "4fb2bd2a9b66f93d3e47b623ba729d67b2d2ab9cb10e0e8adf67114799c838d4"
+    },
+    {
+      "order": 5,
+      "file": "005-foreground-assist-integration.patch",
+      "sha256": "7517c427aa346a71f091f7d3c13b2d072aa76b1c9e5452d5ce2645a39faf6e66"
+    },
+    {
+      "order": 6,
+      "file": "006-dock-reopen-timing.patch",
+      "sha256": "90c7a6c1dd4ba1830a09fb27414d148d9aababb367dc878f150517c1d91d5a64"
+    },
+    {
+      "order": 7,
+      "file": "007-origin-fail-closed.patch",
+      "sha256": "e6d85e631663ae31583f05780a42e80a8c7ada976de15bbc803a902421221054"
+    },
+    {
+      "order": 8,
+      "file": "008-lease-generation-aba.patch",
+      "sha256": "d7468870a824c0750e89fd431888e488828bce2fd163a30fdbdde4c546d7bf2f"
+    },
+    {
+      "order": 9,
+      "file": "009-visible-assist-dock-takeover.patch",
+      "sha256": "c96af999f8caf100c6468d64a011cc3906c30c07045d8e4b1ddc655fd2848577"
+    },
+    {
+      "order": 10,
+      "file": "010-user-menu-origin-propagation.patch",
+      "sha256": "4694aeb6d285b65588de6bb2186df96c86ede74ad451ac5c658df9d127b0b977"
+    },
+    {
+      "order": 11,
+      "file": "011-omnibox-everywhere-activation-attribution.patch",
+      "sha256": "48b1376760dcc51d19b2a64d65223a532d949483b599061eacc942c81a36767a"
+    },
+    {
+      "order": 12,
+      "file": "012-user-history-menu-origin.patch",
+      "sha256": "d68f34f764aaeed74df7c6a3192e6b3a895b4c346a2fb4f1987d1f01a2475d79"
+    },
+    {
+      "order": 13,
+      "file": "013-command-line-intent-arbitration.patch",
+      "sha256": "bcf96d316fc5d3e0987dc022c396434b7918e05ddc074893bade9bfa6e305757"
+    },
+    {
+      "order": 14,
+      "file": "014-presentation-origin-default-comment.patch",
+      "sha256": "5a0d98328b28982b910da59bfd3095407386a41c616540d7fc426f167ebbb240"
+    },
+    {
+      "order": 15,
+      "file": "015-windows-views-export.patch",
+      "sha256": "3fc27375ac8ff55f95487f35603e4ecdf1446eabb44c007ee45a278e9c28a6be"
+    },
+    {
+      "order": 16,
+      "file": "016-windows-native-presentation-gateway.patch",
+      "sha256": "422a33fa37aa32d17b0062d92390f1592e2f7af311cc7fab0beb8ff9e3bb7e73"
+    },
+    {
+      "order": 17,
+      "file": "017-windows-foreground-assist.patch",
+      "sha256": "2db6344cb931590442b01daedf111baab521b40a2828a08ca36c29d4e80b7d2c"
+    },
+    {
+      "order": 18,
+      "file": "018-windows-extension-origin.patch",
+      "sha256": "8f0d021f254d99f9051f127827c4c65e3025ad11af198db292aecd29ef7b0a7c"
+    },
+    {
+      "order": 19,
+      "file": "019-windows-user-entry-origin.patch",
+      "sha256": "3b05d1fe538d73c32a79ab0295a94f84cc1810279b05fcf40ca48412113d3a3a"
+    },
+    {
+      "order": 20,
+      "file": "020-windows-session-restore-origin.patch",
+      "sha256": "cc6a1c8d7b3da542ed590f1f5465c9f731155306f232f2a98ea8c1b8f81f0d2b"
+    },
+    {
+      "order": 21,
+      "file": "021-windows-accelerator-origin.patch",
+      "sha256": "f8574e04da7eb472c16793cab252b12d4eccc3a17d25663aaa80374604220571"
+    },
+    {
+      "order": 22,
+      "file": "022-windows-user-explicit-presentation.patch",
+      "sha256": "645ba87118eb5c376ccbf8082d0c322be9d9fc1fe892b6a275e1fbe84a7e65dc"
+    },
+    {
+      "order": 23,
+      "file": "023-windows-tsf-ime-support.patch",
+      "sha256": "01a6b329a7dad3380f89eeb9a1755943f0a63b2e429d3676530d80c6ff20c392"
+    },
+    {
+      "order": 24,
+      "file": "024-windows-user-explicit-window-creation.patch",
+      "sha256": "fa1b75a94353ce47be68e1c308bb8f45fddc8b9da92a5c857d60740555c78d15"
+    },
+    {
+      "order": 25,
+      "file": "025-windows-icon-branding.patch",
+      "sha256": "a4a6893999a99433e7d2c0e8bc4c55900255d14cdd19c4b397ec212f218bb475"
+    },
+    {
+      "order": 26,
+      "file": "026-browser-cli-capability-api.patch",
+      "sha256": "20d83a5d86f5fa8d469bb4817a0ddef9b4d27f5df415cbef98583f16c1d5a9fc"
+    },
+    {
+      "order": 27,
+      "file": "027-viz-activate-pending-root-frame-for-copy.patch",
+      "sha256": "a6e923b6dc9f65cb16a2a7382a4bddc10c6f21c46d73bb7d620c05eab6763c9e"
+    },
+    {
+      "order": 28,
+      "file": "028-input-ownership-arbitration.patch",
+      "sha256": "c129b42baeef335b62e4f6b0ad684db550e21a72078efae07782446f646ea86e"
+    },
+    {
+      "order": 29,
+      "file": "029-input-ownership-api.patch",
+      "sha256": "585f6de3e8fd9814ec36e7cdc70ad96a306bd7ece620624c3562939f2cc7d1d5"
+    },
+    {
+      "order": 30,
+      "file": "030-windows-explicit-show-first-show-retry.patch",
+      "sha256": "a5f97b9447334781fe3e088efe6a42cf3ea5c19fb80f954540d39636cf1e0ba0"
+    },
+    {
+      "order": 31,
+      "file": "031-input-ownership-new-tab-inheritance.patch",
+      "sha256": "ea19872405d88055967d5a44024978e10eaef39fb97ef09270b9bb01ad41159a"
+    },
+    {
+      "order": 32,
+      "file": "032-human-input-latch-30s.patch",
+      "sha256": "9ba00d82ff9047fe56dbd05ea6f6062e3d804afbc1ce194a16f03ee60c5cadeb"
+    },
+    {
+      "order": 33,
+      "file": "033-windows-user-explicit-browserview-show.patch",
+      "sha256": "91321ed22d2358400b1080338b8bc84ee3491a3e256c5fb98cde38b93e28b4f8"
+    }
+  ]
+}

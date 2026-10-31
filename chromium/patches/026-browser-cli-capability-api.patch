@@ -1,0 +1,311 @@
+diff --git a/chrome/browser/extensions/api/BUILD.gn b/chrome/browser/extensions/api/BUILD.gn
+index 3bbbbf599d07ec182ca51771f951dd3ec946f8bb..add5bf978e4e8488619f450fe09912b14c1b6e1e 100644
+--- a/chrome/browser/extensions/api/BUILD.gn
++++ b/chrome/browser/extensions/api/BUILD.gn
+@@ -70,6 +70,7 @@ group("api_implementations") {
+     public_deps += [
+       "//chrome/browser/extensions/api/autofill_private",
+       "//chrome/browser/extensions/api/braille_display_private",
++      "//chrome/browser/extensions/api/browser_cli",
+       "//chrome/browser/extensions/api/command_line_private",
+       "//chrome/browser/extensions/api/dictation_private",
+       "//chrome/browser/extensions/api/experimental_actor",
+diff --git a/chrome/browser/extensions/api/browser_cli/BUILD.gn b/chrome/browser/extensions/api/browser_cli/BUILD.gn
+new file mode 100644
+index 0000000000000000000000000000000000000000..83044efa56ecd862d2ea39206d00f702adab2776
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/BUILD.gn
+@@ -0,0 +1,23 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//extensions/buildflags/buildflags.gni")
++
++assert(enable_extensions,
++       "Cannot depend on extensions because enable_extensions=false.")
++
++source_set("browser_cli") {
++  sources = [
++    "browser_cli_api.cc",
++    "browser_cli_api.h",
++  ]
++
++  deps = [
++    "//base",
++    "//chrome/common/extensions/api",
++    "//components/version_info",
++    "//extensions/browser",
++    "//ui/views",
++  ]
++}
+diff --git a/chrome/browser/extensions/api/browser_cli/browser_cli_api.cc b/chrome/browser/extensions/api/browser_cli/browser_cli_api.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..b757c65751ca5ee9bc8b028059808f803eb78b55
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/browser_cli_api.cc
+@@ -0,0 +1,65 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/extensions/api/browser_cli/browser_cli_api.h"
++
++#include <string>
++
++#include "base/values.h"
++#include "chrome/common/extensions/api/browser_cli.h"
++#include "components/version_info/version_info.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++
++namespace extensions {
++
++namespace browser_cli = api::browser_cli;
++
++namespace {
++
++// Bumped whenever the meaning of a capability field changes. A caller that does
++// not understand the value must degrade instead of guessing: guessing is the
++// exact failure mode this API exists to prevent.
++constexpr int kCapabilityProtocolVersion = 1;
++
++// Recommended ceiling for concurrently driven windows. The scheduler owns
++// enforcement (development plan Phase 7, requirement 8); this value only tells
++// the extension what the browser has been validated for.
++constexpr int kMaxConcurrentWindows = 8;
++
++}  // namespace
++
++BrowserCliGetCapabilitiesFunction::BrowserCliGetCapabilitiesFunction() = default;
++BrowserCliGetCapabilitiesFunction::~BrowserCliGetCapabilitiesFunction() =
++    default;
++
++ExtensionFunction::ResponseAction BrowserCliGetCapabilitiesFunction::Run() {
++  // Every capability below is answered from live state rather than from a build
++  // flag. The presentation policy is inert unless
++  // --browser-cli-background-presentation is on the command line, so this single
++  // reading decides every enhanced capability at once: without managed mode
++  // there is no presentation gate, no origin attribution and no lease, and
++  // claiming any of them would be a lie.
++  const bool managed_mode =
++      views::BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled();
++
++  browser_cli::Capabilities capabilities;
++  capabilities.product = std::string(version_info::GetProductName());
++  capabilities.browser_version = std::string(version_info::GetVersionNumber());
++  capabilities.protocol_version = kCapabilityProtocolVersion;
++  capabilities.managed_mode = managed_mode;
++  capabilities.background_windows = managed_mode;
++  capabilities.background_capture = managed_mode;
++  capabilities.hard_focus_isolation = managed_mode;
++  capabilities.foreground_assist = managed_mode;
++
++  // A generic browser can still drive one window at a time. Reporting 1 instead
++  // of 0 keeps "no enhanced capability" and "zero windows allowed" distinct.
++  capabilities.max_concurrent_windows =
++      managed_mode ? kMaxConcurrentWindows : 1;
++
++  return RespondNow(ArgumentList(
++      browser_cli::GetCapabilities::Results::Create(capabilities)));
++}
++
++}  // namespace extensions
+diff --git a/chrome/browser/extensions/api/browser_cli/browser_cli_api.h b/chrome/browser/extensions/api/browser_cli/browser_cli_api.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1008d443128690a5e5911a543d679cb3942bbe2b
+--- /dev/null
++++ b/chrome/browser/extensions/api/browser_cli/browser_cli_api.h
+@@ -0,0 +1,43 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_BROWSER_CLI_API_H_
++#define CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_BROWSER_CLI_API_H_
++
++#include "extensions/browser/extension_function.h"
++#include "extensions/browser/extension_function_histogram_value.h"
++
++namespace extensions {
++
++// chrome.browserCli.getCapabilities (development plan Phase 7).
++//
++// Answers "is this Browser CLI, and which capabilities does it actually
++// guarantee right now?" without handing a web page any observable signal.
++//
++// The reply is derived from live browser state, not from a build flag alone:
++// `managedMode` reads the presentation policy, so a run without
++// --browser-cli-background-presentation reports false for every enhanced
++// capability and the extension falls back to its generic path.
++class BrowserCliGetCapabilitiesFunction : public ExtensionFunction {
++ public:
++  DECLARE_EXTENSION_FUNCTION("browserCli.getCapabilities",
++                             BROWSERCLI_GETCAPABILITIES)
++
++  BrowserCliGetCapabilitiesFunction();
++
++  BrowserCliGetCapabilitiesFunction(const BrowserCliGetCapabilitiesFunction&) =
++      delete;
++  BrowserCliGetCapabilitiesFunction& operator=(
++      const BrowserCliGetCapabilitiesFunction&) = delete;
++
++ protected:
++  ~BrowserCliGetCapabilitiesFunction() override;
++
++  // ExtensionFunction:
++  ResponseAction Run() override;
++};
++
++}  // namespace extensions
++
++#endif  // CHROME_BROWSER_EXTENSIONS_API_BROWSER_CLI_BROWSER_CLI_API_H_
+diff --git a/chrome/common/extensions/api/_api_features.json b/chrome/common/extensions/api/_api_features.json
+index 271791346ec43a2367c5242013b4da9d49589563..eb656bf3ec018857467422a00310202fbb1d11f6 100644
+--- a/chrome/common/extensions/api/_api_features.json
++++ b/chrome/common/extensions/api/_api_features.json
+@@ -313,6 +313,20 @@
+     // true.
+     "requires_delegated_availability_check": true
+   }],
++  "browserCli": {
++    // Only the trusted automation extension may probe the host's capabilities.
++    // Allowlisting by id hash keeps the namespace invisible to web pages and to
++    // arbitrary extensions (development plan Phase 7, requirement 6). Both the
++    // SHA-1 and SHA-256 hashes of BrowserPilot's id are listed because the
++    // SHA-256 rollout is still behind a feature flag; only one matches at a
++    // time. Do NOT add an entry here without the matching manifest "key".
++    "allowlist": [
++      "4E0786F5E275D23D7B66E0B522A104AE22613E3F",  // SHA-1 of BrowserPilot id
++      "0FC2B72BF7525EEFA66518C54DB602118B38EB5E8AE1B2992EEB0E57911C1722"
++    ],
++    "dependencies": [],
++    "contexts": ["privileged_extension"]
++  },
+   "commandLinePrivate": {
+     "dependencies": ["permission:commandLinePrivate"],
+     "contexts": ["privileged_extension"]
+diff --git a/chrome/common/extensions/api/api_sources.gni b/chrome/common/extensions/api/api_sources.gni
+index 3f933694eafda218d4637bd997ab130dca930e2c..c28f54cfcc2255e2008e0f8ac4b7b3a6a305de7b 100644
+--- a/chrome/common/extensions/api/api_sources.gni
++++ b/chrome/common/extensions/api/api_sources.gni
+@@ -80,6 +80,7 @@ if (enable_extensions) {
+     "autotest_private.webidl",
+     "bookmark_manager_private.json",
+     "braille_display_private.webidl",
++    "browser_cli.json",
+     "command_line_private.json",
+     "crash_report_private.webidl",
+     "dictation_private.webidl",
+diff --git a/chrome/common/extensions/api/browser_cli.json b/chrome/common/extensions/api/browser_cli.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ee7ba4ac8ebd8b2ded71be6e2cb9df29c2fcceb
+--- /dev/null
++++ b/chrome/common/extensions/api/browser_cli.json
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Browser CLI capability discovery.
++//
++// This API exists so a single extension build (BrowserPilot) can decide at
++// runtime whether it is running inside Browser CLI or inside stock Chrome,
++// without inspecting the User-Agent, the product name or any other spoofable
++// signal. Its presence is the capability signal: stock Chrome does not generate
++// this namespace at all, so `chrome.browserCli` is simply undefined there and
++// the extension takes its generic path.
++//
++// It is allowlisted to trusted extension ids only (see _api_features.json), so
++// web pages and arbitrary extensions can never read it.
++[
++  {
++    "namespace": "browserCli",
++    "description": "none",
++    "types": [
++      {
++        "id": "Capabilities",
++        "type": "object",
++        "description": "Capabilities the running browser guarantees to an automation extension.",
++        "properties": {
++          "product": {
++            "type": "string",
++            "description": "Product name of the host browser, for logging only. Never infer capabilities from it; use the explicit flags below."
++          },
++          "browserVersion": {
++            "type": "string",
++            "description": "Full host browser version, for example \"156.0.8067.0\"."
++          },
++          "protocolVersion": {
++            "type": "integer",
++            "description": "Version of this capability contract. A caller that does not understand the value must degrade instead of guessing."
++          },
++          "managedMode": {
++            "type": "boolean",
++            "description": "True when the browser runs with managed background presentation enabled, so the AI presentation policy is in force."
++          },
++          "backgroundWindows": {
++            "type": "boolean",
++            "description": "True when extension-created windows can stay off the desktop and keep rendering."
++          },
++          "backgroundCapture": {
++            "type": "boolean",
++            "description": "True when a background window can be captured without being brought to the foreground."
++          },
++          "hardFocusIsolation": {
++            "type": "boolean",
++            "description": "True when automation origins are hard-denied focus on a window the user owns."
++          },
++          "foregroundAssist": {
++            "type": "boolean",
++            "description": "True when the browser exposes a foreground assist lease for login, captcha or confirmation."
++          },
++          "maxConcurrentWindows": {
++            "type": "integer",
++            "description": "Recommended upper bound for concurrently driven windows. The scheduler owns enforcement; this is the browser's recommendation."
++          }
++        }
++      }
++    ],
++    "functions": [
++      {
++        "name": "getCapabilities",
++        "type": "function",
++        "description": "Returns the capability descriptor of the running host browser.",
++        "parameters": [],
++        "returns_async": {
++          "name": "callback",
++          "parameters": [
++            {
++              "$ref": "Capabilities",
++              "name": "capabilities"
++            }
++          ]
++        }
++      }
++    ]
++  }
++]
+diff --git a/extensions/browser/extension_function_histogram_value.h b/extensions/browser/extension_function_histogram_value.h
+index 4f8efeb0d3dc9d682c5c5fa31c2a9a0f58746b47..9d8fab2b015defc3805d0e6385287d94b43e97c7 100644
+--- a/extensions/browser/extension_function_histogram_value.h
++++ b/extensions/browser/extension_function_histogram_value.h
+@@ -2051,6 +2051,7 @@ enum HistogramValue {
+   ENTERPRISE_WEBRTC_STARTCAPTURE = 1986,
+   ENTERPRISE_WEBRTC_GETCAPTURESTATUS = 1987,
+   ENTERPRISE_WEBRTC_STOPCAPTURE = 1988,
++  BROWSERCLI_GETCAPABILITIES = 1989,
+   // Last entry: Add new entries above, then run:
+   // tools/metrics/histograms/update_extension_histograms.py
+   ENUM_BOUNDARY
+diff --git a/tools/metrics/histograms/metadata/extensions/enums.xml b/tools/metrics/histograms/metadata/extensions/enums.xml
+index 460630d8491054408e0e404cb576d147822515a9..dc4483beea20b6a572bf9f061a59eaf027cf497f 100644
+--- a/tools/metrics/histograms/metadata/extensions/enums.xml
++++ b/tools/metrics/histograms/metadata/extensions/enums.xml
+@@ -2921,6 +2921,7 @@ Called by update_extension_histograms.py.-->
+   <int value="1986" label="ENTERPRISE_WEBRTC_STARTCAPTURE"/>
+   <int value="1987" label="ENTERPRISE_WEBRTC_GETCAPTURESTATUS"/>
+   <int value="1988" label="ENTERPRISE_WEBRTC_STOPCAPTURE"/>
++  <int value="1989" label="BROWSERCLI_GETCAPABILITIES"/>
+ </enum>
+ 
+ <!-- LINT.ThenChange(//extensions/browser/extension_function_histogram_value.h:HistogramValue) -->

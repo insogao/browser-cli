@@ -1,0 +1,102 @@
+# Browser CLI — Windows static gates.
+#
+# Scope: checks that need no Chromium checkout and no build. They run on every
+# push and pull request and must stay under a few minutes.
+#
+# The full Windows build (28k ninja targets, ~16 GiB output, hours of CPU) is
+# NOT run here: it needs a machine with VS2026 BuildTools 18.x, Windows SDK
+# 10.0.28000.0, ATL/MFC, Debugging Tools and >= 100 GiB free disk. See
+# .github/workflows/windows-full.yml (self-hosted, manual dispatch) and
+# docs/windows-environment-2026-10-22.md.
+name: windows-static
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax of every script
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do
+            [ -f "$f" ] || continue
+            if ! bash -n "$f"; then
+              echo "syntax error: $f"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Patch manifest integrity (no checkout needed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply-patches.py --check | tee patch-check.log
+          grep -q 'STATE unverified' patch-check.log
+
+      - name: Every patch is LF-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -rlU $'\r' chromium/patches/*.patch; then
+            echo "CRLF found in a patch file; see .gitattributes"
+            exit 1
+          fi
+
+      - name: Windows args are Windows-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'target_cpu = "x64"' chromium/args-windows.gn
+          # macOS-ONLY values must never leak into the Windows args.
+          # branding_file_path and browser_cli_win_icon_dir are NOT macOS-only:
+          # Windows needs both for its version resources and .ico assets, and
+          # tests/tools/test_windows_scripts.py requires them to be present.
+          active="$(grep -vE '^[[:space:]]*#' chromium/args-windows.gn)"
+          if printf '%s\n' "$active" | grep -qE 'arm64|mac_app_icon_dir|\.icns'; then
+            echo "chromium/args-windows.gn carries macOS-only values"
+            exit 1
+          fi
+          printf '%s\n' "$active" | \
+            grep -q 'branding_file_path = "//chrome/app/theme/browser_cli/BRANDING"'
+          printf '%s\n' "$active" | \
+            grep -q 'browser_cli_win_icon_dir = "app/theme/browser_cli/win"'
+
+      - name: Script regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A Windows host cannot pass the macOS-only sections: setup-mac.sh,
+          # preflight.sh's disk breaker, generate-icons.sh (.icns/Assets.car)
+          # and prepare-app's Developer ID preflight all refuse to run here by
+          # design. The documented baseline in tests/windows-host-failures.txt
+          # must match EXACTLY, so a new failure (or a silently fixed one that
+          # was never removed from the baseline) still turns this red.
+          bash tests/run-script-tests.sh > suite.log 2>&1 || true
+          grep '^FAIL' suite.log | sed 's/^FAIL  //' \
+            | sed -E 's/ \(rc=[0-9]+, .*\)$//; s/ \(rc=[0-9]+\)$//; s/ \(want=[a-z]+ rc=[0-9]+\)$//' \
+            | sort -u > actual-failures.txt
+          sort -u tests/windows-host-failures.txt | tr -d '\r' > expected-failures.txt
+          if ! diff -u expected-failures.txt actual-failures.txt; then
+            echo "::error::script suite failures differ from tests/windows-host-failures.txt"
+            exit 1
+          fi
+          echo "script suite matches the documented Windows-host baseline ($(wc -l < expected-failures.txt) known failures)"
+          grep -E '^== summary' suite.log
+
+      - name: Python tool tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest tests.tools.test_apply_patches tests.tools.test_windows_scripts -v

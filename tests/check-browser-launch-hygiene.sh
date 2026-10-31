@@ -2,17 +2,24 @@
 # Static regression gate: browser launch hygiene (keychain / profile isolation).
 #
 # Every test or automation entry in this repo that launches Chromium or
-# Backlight MUST:
-#   1. pass `--use-mock-keychain` (never read/write the real login keychain and
-#      never trigger a "Chromium Safe Storage" password prompt), and
-#   2. use an isolated throwaway profile via `--user-data-dir` created with
-#      `mktemp` (never the user's real profile).
+# Backlight MUST use an isolated throwaway profile via `--user-data-dir` created
+# on the spot with `mktemp` (shell) or `tempfile.mkdtemp` (python) -- never the
+# user's real profile.
 #
-# Reason: ad-hoc / linker-signed development builds have an unstable code
-# signature, so macOS cannot match the existing keychain ACL and pops a system
-# password dialog. See AGENTS.md and
-# docs/phase2-background-presentation-2026-09-22.md for the full root cause and
-# the mandatory hygiene rules for future work.
+# On top of that, an entry that launches a macOS app bundle MUST also pass
+# `--use-mock-keychain` (never read/write the real login keychain and never
+# trigger a "Chromium Safe Storage" password prompt).
+#
+# Reason for the macOS-only part: ad-hoc / linker-signed development builds have
+# an unstable code signature, so macOS cannot match the existing keychain ACL and
+# pops a system password dialog. Windows has no login keychain -- it protects
+# secrets with DPAPI -- so the flag is inapplicable there instead of merely
+# unnecessary. See AGENTS.md section 1 (explicitly conditioned on macOS) and
+# docs/phase2-background-presentation-2026-09-22.md for the full root cause.
+#
+# This is a platform split, not a relaxation: a Windows-only entry declares
+# itself explicitly (see WINDOWS_ONLY_MARK), it still has to isolate its profile,
+# and an undeclared entry is still rejected.
 #
 # Production Browser CLI must NOT use `--use-mock-keychain`: it relies on a
 # stable code signature and a stable install path instead.
@@ -65,6 +72,19 @@ EXCLUDE_NAMES=(check-browser-launch-hygiene.sh run-script-tests.sh sign-browser-
 # (`.../Contents/MacOS/...` or `$APP_BIN` / `$PRODUCT_APP_BIN`), plus explicit
 # remote-debugging launches (covers launchers that receive the app path).
 LAUNCH_RE='Contents/MacOS/|Backlight\.app|\$APP_BIN|\$PRODUCT_APP_BIN|--remote-debugging-(pipe|port)'
+# Platform adaptation marker, in a comment, for entry points that only ever
+# launch a non-macOS binary:
+#
+#   # browser-launch-hygiene: windows-only (no keychain)
+#
+# AGENTS.md section 1 (--use-mock-keychain) is conditioned on macOS: it works
+# around the login-keychain ACL of ad-hoc-signed Mac builds. Windows protects
+# secrets with DPAPI, so the flag has no meaning there and must not be
+# cargo-culted onto it. This is an explicit, reviewable declaration rather than
+# an inference, so a macOS launcher can never drift out of the rule by accident.
+# Profile isolation (--user-data-dir + mktemp/tempfile) still applies to every
+# entry point, Windows ones included.
+WINDOWS_ONLY_MARK='browser-launch-hygiene: windows-only'
 
 VIOLATIONS=0
 CHECKED=0
@@ -83,7 +103,15 @@ for dir in "${SCAN_DIRS[@]}"; do
     CHECKED=$((CHECKED + 1))
 
     missing=""
-    if ! grep -q -- '--use-mock-keychain' "$file"; then
+    # AGENTS.md §1 is macOS-specific. An entry point that declares itself
+    # windows-only must not be forced to carry --use-mock-keychain: Windows has
+    # no login keychain, and the flag is forbidden in production (§1.5). The
+    # declaration is an explicit comment so it stays reviewable.
+    windows_only=0
+    if grep -qF "$WINDOWS_ONLY_MARK" "$file"; then
+      windows_only=1
+    fi
+    if [ "$windows_only" -eq 0 ] && ! grep -q -- '--use-mock-keychain' "$file"; then
       missing="${missing} --use-mock-keychain"
     fi
     # Require an explicit --user-data-dir plus real temp-directory creation in
@@ -104,6 +132,8 @@ for dir in "${SCAN_DIRS[@]}"; do
     if [ -n "$missing" ]; then
       VIOLATIONS=$((VIOLATIONS + 1))
       printf 'VIOLATION %s: browser launch entry missing:%s\n' "${file#"$ROOT"/}" "$missing"
+    elif [ "$windows_only" -eq 1 ]; then
+      printf 'OK        %s (Windows platform: macOS keychain rule does not apply)\n' "${file#"$ROOT"/}"
     else
       printf 'OK        %s\n' "${file#"$ROOT"/}"
     fi

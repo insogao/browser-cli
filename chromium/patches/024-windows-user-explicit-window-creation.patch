@@ -1,0 +1,129 @@
+diff --git a/chrome/browser/browser_cli/BUILD.gn b/chrome/browser/browser_cli/BUILD.gn
+index d367c905..d9f5c690 100644
+--- a/chrome/browser/browser_cli/BUILD.gn
++++ b/chrome/browser/browser_cli/BUILD.gn
+@@ -145,7 +145,12 @@ if (is_win) {
+       ":foreground_assist_presentation_win",
+       ":user_explicit_show",
+       "//base",
++      "//chrome/browser:browser_process",
++      "//chrome/browser/profiles:profile",
++      "//chrome/browser/profiles:profile_manager",
++      "//chrome/browser/ui",
+       "//chrome/browser/ui/browser_window",
++      "//chrome/browser/ui/startup",
+       "//ui/aura",
+       "//ui/base",
+       "//ui/gfx:native_ui_types",
+diff --git a/chrome/browser/browser_cli/user_explicit_presentation_win.cc b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+index dbca7f6b..dd8244e8 100644
+--- a/chrome/browser/browser_cli/user_explicit_presentation_win.cc
++++ b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+@@ -13,8 +13,14 @@
+ #include "base/notreached.h"
+ #include "chrome/browser/browser_cli/foreground_assist_presentation.h"
+ #include "chrome/browser/browser_cli/user_explicit_show.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/startup/startup_browser_creator.h"
++#include "chrome/browser/ui/startup/startup_browser_creator_impl.h"
+ #include "ui/aura/window.h"
+ #include "ui/aura/window_tree_host.h"
+ #include "ui/base/base_window.h"
+@@ -103,11 +109,30 @@ ReusableWindow FindReusableWindow() {
+   return candidate;
+ }
+ 
++// Resolves the profile an explicit `show` should use. Returns null when the
++// startup path would show a profile picker or a non-window startup, so this
++// path never invents a profile the user did not select.
++Profile* ResolveLoadedProfileForUserExplicitShow(
++    const base::CommandLine& command_line,
++    const base::FilePath& current_directory) {
++  ProfileManager* profile_manager =
++      g_browser_process ? g_browser_process->profile_manager() : nullptr;
++  if (!profile_manager) {
++    return nullptr;
++  }
++  const StartupProfilePathInfo path_info = GetStartupProfilePath(
++      current_directory, command_line, /*ignore_profile_picker=*/true);
++  if (path_info.mode != StartupProfileMode::kBrowserWindow) {
++    return nullptr;
++  }
++  return profile_manager->GetProfileByPath(path_info.path);
++}
++
+ }  // namespace
+ 
+ bool HandleUserExplicitShowRequest(
+     const base::CommandLine& command_line,
+-    const base::FilePath& /*current_directory*/) {
++    const base::FilePath& current_directory) {
+   const UserExplicitShowRequestClass request_class =
+       ClassifyUserExplicitShowRequest(command_line);
+   if (request_class == UserExplicitShowRequestClass::kNotRequested) {
+@@ -170,13 +195,54 @@ bool HandleUserExplicitShowRequest(
+       return true;
+     }
+ 
+-    case UserExplicitShowPlan::kCreateWindowThenPresent:
+-      // Window creation is patch 023. Fail closed: never fall through to a
+-      // native Show() or to ordinary command-line processing that could create
+-      // a visible window.
+-      LogProducerOutcome("failed", "window-creation-not-implemented",
+-                         managed_mode, /*window_id=*/0);
++    case UserExplicitShowPlan::kCreateWindowThenPresent: {
++      // No reusable window exists: create exactly one empty window for the
++      // already-loaded profile and present it. Session restore stays disabled,
++      // so the new window cannot pull in tabs the user did not ask for, and
++      // the created pointer is the only window this path ever presents.
++      Profile* profile = ResolveLoadedProfileForUserExplicitShow(
++          command_line, current_directory);
++      if (!profile) {
++        LogProducerOutcome("failed", "profile-not-loaded", managed_mode,
++                           /*window_id=*/0);
++        return true;
++      }
++      BrowserWindowInterface* created = chrome::OpenEmptyWindow(
++          profile, /*should_trigger_session_restore=*/false);
++      if (!created) {
++        LogProducerOutcome("failed", "window-creation-failed", managed_mode,
++                           /*window_id=*/0);
++        return true;
++      }
++      ui::BaseWindow* base_window = created->GetWindow();
++      views::Widget* widget =
++          base_window ? views::Widget::GetWidgetForNativeWindow(
++                            base_window->GetNativeWindow())
++                      : nullptr;
++      if (!widget) {
++        LogProducerOutcome("failed", "created-window-without-views-host",
++                           managed_mode, /*window_id=*/0);
++        return true;
++      }
++      const uint64_t window_id = views::BrowserCliWindowIdForHwnd(
++          widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget());
++      {
++        views::ScopedForegroundOrigin origin_scope(
++            views::ForegroundOrigin::kUserExplicit);
++        widget->Show();
++        widget->Activate();
++      }
++      if (widget->IsVisible()) {
++        GetForegroundAssistController()->OnLeaseReleasedByUserTakeover(
++            window_id);
++        LogProducerOutcome("handled", "window-created-and-presented",
++                           managed_mode, window_id);
++      } else {
++        LogProducerOutcome("failed", "created-window-presentation-denied",
++                           managed_mode, window_id);
++      }
+       return true;
++    }
+   }
+ 
+   NOTREACHED();

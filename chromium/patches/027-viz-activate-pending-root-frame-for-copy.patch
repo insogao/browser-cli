@@ -1,0 +1,99 @@
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index a7c11cba..917d4ce8 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -550,6 +550,7 @@ void FrameSinkManagerImpl::RequestCopyOfOutput(
+       ack.has_damage = true;
+       surface_manager_.SurfaceModified(
+           surface_id, ack, SurfaceObserver::HandleInteraction::kNoChange);
++      ActivatePendingRootFrameForCopy(surface_id);
+       return;
+     }
+   }
+@@ -575,6 +576,20 @@ void FrameSinkManagerImpl::RequestCopyOfOutput(
+   }
+ 
+   support->RequestCopyOfOutput(std::move(pending_request));
++  ActivatePendingRootFrameForCopy(surface_id);
++}
++
++void FrameSinkManagerImpl::ActivatePendingRootFrameForCopy(
++    const SurfaceId& surface_id) {
++  const FrameSinkId root_frame_sink_id =
++      GetOldestRootCompositorFrameSinkId(surface_id.frame_sink_id());
++  if (!root_frame_sink_id.is_valid())
++    return;
++  RootCompositorFrameSinkImpl* root_frame_sink =
++      base::FindPtrOrNull(root_sink_map_, root_frame_sink_id);
++  if (!root_frame_sink)
++    return;
++  root_frame_sink->ActivatePendingRootFrameIfNeeded();
+ }
+ 
+ void FrameSinkManagerImpl::DestroyFrameSinkBundle(const FrameSinkBundleId& id) {
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.h b/components/viz/service/frame_sinks/frame_sink_manager_impl.h
+index c88844c3..36a3773b 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.h
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.h
+@@ -364,6 +364,10 @@ class VIZ_SERVICE_EXPORT FrameSinkManagerImpl
+   FrameSinkId GetOldestRootCompositorFrameSinkId(
+       const FrameSinkId& child_frame_sink_id) const;
+ 
++  // Makes the display that embeds `surface_id` able to produce a frame, so a
++  // copy request queued for it can be serviced.
++  void ActivatePendingRootFrameForCopy(const SurfaceId& surface_id);
++
+   // Returns children of a FrameSink that has |parent_frame_sink_id|.
+   // Returns an empty set if a parent doesn't have any children.
+   base::flat_set<FrameSinkId> GetChildrenByParent(
+diff --git a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
+index be30bdc5..7167ae1d 100644
+--- a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
++++ b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
+@@ -354,6 +354,30 @@ const SurfaceId& RootCompositorFrameSinkImpl::CurrentSurfaceId() const {
+   return display_->CurrentSurfaceId();
+ }
+ 
++void RootCompositorFrameSinkImpl::ActivatePendingRootFrameIfNeeded() {
++  const SurfaceId& root_surface_id = display_->CurrentSurfaceId();
++  if (!root_surface_id.is_valid())
++    return;
++
++  Surface* root_surface = support_->frame_sink_manager()
++                              ->surface_manager()
++                              ->GetSurfaceForId(root_surface_id);
++  if (!root_surface || !root_surface->HasPendingFrame())
++    return;
++
++  TRACE_EVENT0("viz",
++               "RootCompositorFrameSinkImpl::ActivatePendingRootFrameIfNeeded");
++  // A copy request can only be serviced by an aggregation, i.e. by a real
++  // display frame. If the root frame is still blocked on surface
++  // synchronization (for example a browser window whose toolbar surface never
++  // paints while the window is occluded), the display has no active root
++  // surface to draw and the request would stay queued until its deadline
++  // expires - which can take thousands of frames. Activate the pending frame
++  // now, using the same fallback semantics as an expired deadline, so the next
++  // display frame aggregates the embedded surfaces and services the request.
++  root_surface->ActivatePendingFrameForDeadline();
++}
++
+ void RootCompositorFrameSinkImpl::SetDisplayVisible(bool visible) {
+   display_->SetVisible(visible);
+ }
+diff --git a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h
+index 91a24340..f9050f14 100644
+--- a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h
++++ b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h
+@@ -71,6 +71,11 @@ class VIZ_SERVICE_EXPORT RootCompositorFrameSinkImpl
+ 
+   void DidEvictSurface(const SurfaceId& surface_id);
+ 
++  // Activates the display's pending root frame, if any, so that the display
++  // can produce a frame to service a copy request. See
++  // FrameSinkManagerImpl::RequestCopyOfOutput().
++  void ActivatePendingRootFrameIfNeeded();
++
+   const SurfaceId& CurrentSurfaceId() const;
+ 
+   // mojom::DisplayPrivate:

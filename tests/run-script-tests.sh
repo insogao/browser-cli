@@ -16,6 +16,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASS=0
 FAIL=0
+HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
+macos_only() { [ "$HOST_OS" = "Darwin" ]; }
+skip_macos() { printf 'SKIP  %s (macOS release/preflight only; see docs/windows-build-gates-2026-10-31.md)\n' "$*"; }
 ok()  { PASS=$((PASS + 1)); printf 'PASS  %s\n' "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL  %s\n' "$*"; }
 
@@ -65,7 +68,7 @@ for f in "$SCRIPTS"/*.sh "$SCRIPTS"/lib/*.sh; do
 done
 
 echo "== 2. --help =="
-for s in preflight checkout configure build verify-phase1; do
+for s in preflight checkout configure build verify-phase1 configure-windows build-windows verify-windows; do
   expect_rc 0 "$s --help" -- "$SCRIPTS/$s.sh" --help
 done
 
@@ -75,6 +78,7 @@ for s in preflight checkout configure build verify-phase1; do
   expect_rc 0 "$s --dry-run (fresh host)" -- env CHROMIUM_ROOT="$FRESH" "$SCRIPTS/$s.sh" --dry-run
 done
 
+if macos_only; then
 echo "== 4. checkout dry-run shows pinned revision + revision-aware sync =="
 OUT="$(env CHROMIUM_ROOT="$FRESH" "$SCRIPTS/checkout.sh" --dry-run 2>&1)"
 if printf '%s' "$OUT" | grep -q 'revision src@7d0f28c30d1c'; then ok "dry-run shows gclient sync --revision src@<VERSION rev>"; else bad "dry-run missing revision-aware gclient sync"; fi
@@ -85,6 +89,11 @@ echo "== 5. verify-phase1 dry-run documents strict HEAD rule =="
 OUT="$(env CHROMIUM_ROOT="$FRESH" "$SCRIPTS/verify-phase1.sh" --dry-run 2>&1)"
 if printf '%s' "$OUT" | grep -q 'HEAD mismatch is FAIL by default'; then ok "dry-run documents HEAD mismatch FAIL"; else bad "dry-run does not document HEAD mismatch FAIL"; fi
 
+else
+  skip_macos "macOS checkout/verify-phase1 dry-run checks"
+fi
+
+if macos_only; then
 echo "== 6. runtime disk breaker hard floor (25 GiB) =="
 expect_fail_msg "DISK_MIN_GIB=24 rejected" "hard floor" -- env DISK_MIN_GIB=24 "$SCRIPTS/preflight.sh" --dry-run
 expect_fail_msg "DISK_MIN_GIB=0 DISK_MIN_FRESH_GIB=0 rejected" "hard floor" -- env DISK_MIN_GIB=0 DISK_MIN_FRESH_GIB=0 "$SCRIPTS/preflight.sh" --dry-run
@@ -95,10 +104,15 @@ expect_rc 0 "DISK_MIN_GIB=25 DISK_MIN_FRESH_GIB=65 accepted" -- env DISK_MIN_GIB
 expect_rc 0 "DISK_MIN_GIB=30 (raised) accepted" -- env DISK_MIN_GIB=30 DISK_MIN_FRESH_GIB=65 "$SCRIPTS/checkout.sh" --dry-run
 expect_rc 0 "DISK_MIN_GIB=80 DISK_MIN_FRESH_GIB=120 accepted" -- env DISK_MIN_GIB=80 DISK_MIN_FRESH_GIB=120 "$SCRIPTS/build.sh" --dry-run
 
+else
+  skip_macos "macOS disk hard-floor checks"
+fi
+
 echo "== 7. build.sh has no watchdog bypass =="
 expect_rc nonzero "build.sh --no-watchdog rejected" -- "$SCRIPTS/build.sh" --no-watchdog
 if "$SCRIPTS/build.sh" --help | grep -qi "no-watchdog"; then bad "help advertises --no-watchdog"; else ok "help does not advertise --no-watchdog"; fi
 
+if macos_only; then
 echo "== 8. checkout --resume rejects HEAD != VERSION before network =="
 FAKE="$TMP/fake/chromium"
 make_fake_checkout "$FAKE"
@@ -114,6 +128,10 @@ mkdir -p "$FAKE2/src/out/Dev"
 cp "$REPO_ROOT/chromium/args.gn" "$FAKE2/src/out/Dev/args.gn"
 expect_fail_msg "check-only fails on HEAD != VERSION" "reproducibility FAIL" -- env CHROMIUM_ROOT="$FAKE2" "$SCRIPTS/verify-phase1.sh" --check-only
 expect_rc 0 "check-only --allow-tip passes as explicit opt-out" -- env CHROMIUM_ROOT="$FAKE2" "$SCRIPTS/verify-phase1.sh" --check-only --allow-tip
+
+else
+  skip_macos "macOS checkout/verify HEAD checks"
+fi
 
 echo "== 10. real checkout read-only revision check (skipped if absent) =="
 if [ -d "$HOME/dev/chromium/src/.git" ]; then
@@ -169,6 +187,40 @@ PROFILE="$(mktemp -d)"
 "/nonexistent/Chromium.app/Contents/MacOS/Chromium" --use-mock-keychain --user-data-dir="$PROFILE"
 EOF
 expect_rc 0 "compliant launch entry accepted" -- "$HYGIENE" --root "$GOOD_ROOT"
+
+# AGENTS.md §1 is conditioned on macOS: --use-mock-keychain is the keychain-ACL
+# workaround for ad-hoc-signed Mac builds. A windows-only entry point declares
+# itself with an explicit comment and then needs no keychain flag — but it must
+# still isolate the profile, and an undeclared entry must still be rejected.
+WIN_ROOT="$TMP/hygiene-win"
+mkdir -p "$WIN_ROOT/tests"
+cat > "$WIN_ROOT/tests/win-smoke.py" <<'EOF'
+# browser-launch-hygiene: windows-only (no keychain)
+import subprocess, tempfile
+profile = tempfile.mkdtemp()
+subprocess.run(["chrome.exe", "--remote-debugging-port=9222",
+                "--user-data-dir=%s" % profile])
+EOF
+expect_rc 0 "declared windows-only entry accepted without mock keychain" -- "$HYGIENE" --root "$WIN_ROOT"
+
+WIN_UNDECLARED_ROOT="$TMP/hygiene-win-undeclared"
+mkdir -p "$WIN_UNDECLARED_ROOT/tests"
+cat > "$WIN_UNDECLARED_ROOT/tests/win-undeclared.py" <<'EOF'
+import subprocess, tempfile
+profile = tempfile.mkdtemp()
+subprocess.run(["chrome.exe", "--remote-debugging-port=9222",
+                "--user-data-dir=%s" % profile])
+EOF
+expect_fail_msg "undeclared entry still requires mock keychain" "use-mock-keychain" -- "$HYGIENE" --root "$WIN_UNDECLARED_ROOT"
+
+WIN_NOPROFILE_ROOT="$TMP/hygiene-win-noprofile"
+mkdir -p "$WIN_NOPROFILE_ROOT/tests"
+cat > "$WIN_NOPROFILE_ROOT/tests/win-bad.py" <<'EOF'
+# browser-launch-hygiene: windows-only (no keychain)
+import subprocess
+subprocess.run(["chrome.exe", "--remote-debugging-port=9222"])
+EOF
+expect_fail_msg "declared windows-only entry without an isolated profile still rejected" "user-data-dir" -- "$HYGIENE" --root "$WIN_NOPROFILE_ROOT"
 
 echo "== 14. product identity + signature tooling (static) =="
 IDENTITY_CHECK="$REPO_ROOT/tests/check-identity-consistency.sh"
@@ -234,6 +286,7 @@ else
   printf 'SKIP  sign-browser-cli component-dylib plan (no out dir)\n'
 fi
 
+if macos_only; then
 echo "== 15. product icon generation (static) =="
 ICONS="$SCRIPTS/generate-icons.sh"
 expect_rc 0 "generate-icons --help" -- "$ICONS" --help
@@ -255,6 +308,10 @@ if [ -f "$REPO_ROOT/assets/branding/browser-cli-logo-source.png" ]; then
   ok "approved logo source present"
 else
   bad "approved logo source missing"
+fi
+
+else
+  skip_macos "macOS .icns/Assets.car icon checks"
 fi
 
 echo "== 16. Phase 2 HTTPS background-network check (static) =="
@@ -318,7 +375,7 @@ else
   sed 's/^/      /' "$TMP/out.txt"
 fi
 for tool in "$CDP_TOOL" "$PAGE_TOOL" "$REPO_ROOT/tests/tools/cdp_pipe_lib.py"; do
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$tool" 2>"$TMP/out.txt"; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$tool" 2>"$TMP/out.txt"; then
     ok "python syntax $(basename "$tool")"
   else
     bad "python syntax $(basename "$tool")"
@@ -367,7 +424,7 @@ else
   bad "bash -n phase2-window-open-popup.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$WOPEN_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$WOPEN_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax window-open-cdp-check.py"
 else
   bad "python syntax window-open-cdp-check.py"
@@ -408,7 +465,7 @@ else
   bad "bash -n phase2-extension-window-focus.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$EXTFOCUS_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$EXTFOCUS_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax extension-window-focus-cdp-check.py"
 else
   bad "python syntax extension-window-focus-cdp-check.py"
@@ -486,7 +543,7 @@ else
   bad "bash -n phase2-session-restore.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$RESTORE_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$RESTORE_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax session-restore-cdp-check.py"
 else
   bad "python syntax session-restore-cdp-check.py"
@@ -541,7 +598,7 @@ else
   bad "bash -n phase2-restart-crash-visibility.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$RESTART_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$RESTART_TOOL" 2>"$TMP/out.txt"; then
   ok "python syntax restart-cycles-cdp-check.py"
 else
   bad "python syntax restart-cycles-cdp-check.py"
@@ -646,7 +703,7 @@ else
   sed 's/^/      /' "$TMP/out.txt"
 fi
 for tool in "$HUMAN_COLLECT" "$HUMAN_SINK"; do
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$tool" 2>"$TMP/out.txt"; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$tool" 2>"$TMP/out.txt"; then
     ok "python syntax $(basename "$tool")"
   else
     bad "python syntax $(basename "$tool")"
@@ -744,6 +801,7 @@ if grep -q 'shell_quote "\$BIN"' "$HUMAN_CHECK" \
 else
   bad "runbook launch command still embeds raw paths"
 fi
+if macos_only; then
 SPACY_BIN="/tmp/bc dir/Browser CLI.app/Contents/MacOS/Browser CLI"
 SPACY_PROFILE="/tmp/bc dir/pro 'file'/profile"
 SPACY_LOG="/tmp/bc dir/log file.log"
@@ -778,6 +836,10 @@ then
   ok "quoted paths round-trip to the exact argv (spaces + embedded single quote)"
 else
   bad "quoted paths do not round-trip to the exact argv"
+fi
+
+else
+  skip_macos "macOS .app/--use-mock-keychain argv check"
 fi
 
 echo "== 24. CLI explicit show producer classification (deterministic fixtures; no browser) =="
@@ -900,13 +962,13 @@ else
   bad "bash -n phase4-foreground-assist-manual.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ASSIST_COLLECT" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$ASSIST_COLLECT" 2>"$TMP/out.txt"; then
   ok "foreground-assist-collect.py syntax"
 else
   bad "foreground-assist-collect.py syntax"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ASSIST_SERVER" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$ASSIST_SERVER" 2>"$TMP/out.txt"; then
   ok "assist-page-server.py syntax"
 else
   bad "assist-page-server.py syntax"
@@ -961,6 +1023,7 @@ if grep -q 'assist-lease-granted' "$DRYRUN_OUT" \
 else
   bad "runbook misses per-case evidence or the ABORT step"
 fi
+if macos_only; then
 CHROMIUM_ROOT="$TMP/assist-fake-chromium" expect_rc nonzero \
   "prepare refuses a missing/ad-hoc app (Developer ID preflight)" -- \
   env CHROMIUM_ROOT="$TMP/assist-fake-chromium" "$ASSIST_CHECK" prepare --evidence "$TMP/assist-neg"
@@ -968,6 +1031,10 @@ if grep -q 'signed app binary not found' "$TMP/out.txt"; then
   ok "missing app fails closed with a clear message"
 else
   bad "missing app did not fail closed"
+fi
+
+else
+  skip_macos "macOS Developer ID preflight checks"
 fi
 
 ASSIST_FIX="$TMP/assist-fixtures"
@@ -1204,7 +1271,7 @@ else
   bad "bash -n phase5-background-capture.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$CAPTURE_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$CAPTURE_TOOL" 2>"$TMP/out.txt"; then
   ok "capture-evidence-check.py syntax"
 else
   bad "capture-evidence-check.py syntax"
@@ -1328,7 +1395,7 @@ else
   bad "bash -n phase6-parallel-windows.sh"
   sed 's/^/      /' "$TMP/out.txt"
 fi
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$PARALLEL_TOOL" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$PARALLEL_TOOL" 2>"$TMP/out.txt"; then
   ok "parallel-evidence-check.py syntax"
 else
   bad "parallel-evidence-check.py syntax"
@@ -1470,7 +1537,7 @@ run_origin_checker() { # <label> <tool> <self-test|checkout> <summary-regex> [ch
 }
 
 for tool in "$USER_MENU_CHECK" "$OMNIBOX_CHECK"; do
-  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$tool" 2>"$TMP/out.txt"; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$tool" 2>"$TMP/out.txt"; then
     ok "python syntax $(basename "$tool")"
   else
     bad "python syntax $(basename "$tool")"
@@ -1492,7 +1559,7 @@ fi
 
 echo "== 29. command-line intent arbitration checker (static; no browser) =="
 ARBITRATION_CHECK="$REPO_ROOT/tests/tools/command-line-intent-arbitration-check.py"
-if python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$ARBITRATION_CHECK" 2>"$TMP/out.txt"; then
+if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$ARBITRATION_CHECK" 2>"$TMP/out.txt"; then
   ok "command-line-intent-arbitration-check.py syntax"
 else
   bad "command-line-intent-arbitration-check.py syntax"
@@ -1514,6 +1581,112 @@ if [ -d "$TEST_CHROMIUM_SRC/.git" ]; then
     "$ARBITRATION_CHECK" checkout 'COMMAND-LINE-INTENT-ARBITRATION: OK \([0-9]+ checks, 0 failed\)' "$TEST_CHROMIUM_SRC"
 else
   printf 'SKIP  command-line intent arbitration --checkout (no checkout at %s)\n' "$TEST_CHROMIUM_SRC"
+fi
+
+echo "== 30. Windows build/configure entry points (static; no build, no browser) =="
+# These scripts are cross-platform to *inspect*: --help and --dry-run do not
+# assert the Windows host, so they can be checked on the macOS developer host
+# too. Only a real run needs Windows, and this suite never performs one.
+WIN_CONFIGURE_OUT="$TMP/win-configure-plan.txt"
+"$SCRIPTS/configure-windows.sh" --checkout "$TMP/no-such-checkout" --dry-run >"$WIN_CONFIGURE_OUT" 2>&1
+WIN_CONFIGURE_RC=$?
+if [ "$WIN_CONFIGURE_RC" -eq 0 ] \
+   && grep -q 'gen out/WinDev' "$WIN_CONFIGURE_OUT" \
+   && grep -q 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' "$WIN_CONFIGURE_OUT" \
+   && grep -q 'vs2026_install=' "$WIN_CONFIGURE_OUT" \
+   && grep -q 'nothing executed' "$WIN_CONFIGURE_OUT"; then
+  ok "configure-windows --dry-run prints gn gen + toolchain env (rc=0)"
+else
+  bad "configure-windows --dry-run plan (rc=$WIN_CONFIGURE_RC)"
+fi
+if [ -e "$TMP/no-such-checkout" ]; then
+  bad "configure-windows --dry-run created its checkout/out dir"
+else
+  ok "configure-windows --dry-run writes nothing"
+fi
+WIN_LOG_DIR_PRE=0
+[ -d "$REPO_ROOT/build-logs" ] && WIN_LOG_DIR_PRE=1
+WIN_BUILD_OUT="$TMP/win-build-plan.txt"
+"$SCRIPTS/build-windows.sh" --checkout "$TMP/no-such-checkout" --dry-run >"$WIN_BUILD_OUT" 2>&1
+WIN_BUILD_RC=$?
+if [ "$WIN_BUILD_RC" -eq 0 ] \
+   && grep -q -- '-j 6 chrome' "$WIN_BUILD_OUT" \
+   && grep -q 'DEPOT_TOOLS_WIN_TOOLCHAIN=0' "$WIN_BUILD_OUT" \
+   && grep -q 'does NOT sign, package or launch' "$WIN_BUILD_OUT" \
+   && grep -q 'nothing executed' "$WIN_BUILD_OUT"; then
+  ok "build-windows --dry-run prints -j 6 chrome and no signing/launch (rc=0)"
+else
+  bad "build-windows --dry-run plan (rc=$WIN_BUILD_RC)"
+fi
+WIN_LOG_DIR_POST=0
+[ -d "$REPO_ROOT/build-logs" ] && WIN_LOG_DIR_POST=1
+if [ -e "$TMP/no-such-checkout" ] || [ "$WIN_LOG_DIR_POST" != "$WIN_LOG_DIR_PRE" ]; then
+  bad "build-windows --dry-run wrote something"
+else
+  ok "build-windows --dry-run writes nothing"
+fi
+expect_fail_msg "build-windows --jobs 12 rejected without --allow-more-jobs" \
+  "allow-more-jobs" -- "$SCRIPTS/build-windows.sh" --checkout "$TMP/no-such-checkout" --jobs 12 --dry-run
+expect_rc 0 "build-windows --jobs 12 accepted with --allow-more-jobs (dry-run)" -- \
+  "$SCRIPTS/build-windows.sh" --checkout "$TMP/no-such-checkout" --jobs 12 --allow-more-jobs --dry-run
+expect_fail_msg "configure-windows rejects an unknown argument" "unknown argument" -- \
+  "$SCRIPTS/configure-windows.sh" --no-such-flag
+# --checkout defaults from BROWSER_CLI_CHROMIUM_SRC; --dry-run must stay rc=0
+# on a host with no checkout at all.
+WIN_ENV_FRESH="$TMP/win-fresh-host/src"
+for s in configure-windows build-windows verify-windows; do
+  BROWSER_CLI_CHROMIUM_SRC="$WIN_ENV_FRESH" "$SCRIPTS/$s.sh" --dry-run >"$TMP/out.txt" 2>&1
+  WIN_ENV_RC=$?
+  if [ "$WIN_ENV_RC" -eq 0 ] && grep -q 'nothing executed' "$TMP/out.txt"; then
+    ok "$s --dry-run defaults --checkout from BROWSER_CLI_CHROMIUM_SRC (rc=0)"
+  else
+    bad "$s --dry-run BROWSER_CLI_CHROMIUM_SRC default (rc=$WIN_ENV_RC)"
+    sed 's/^/      /' "$TMP/out.txt" | head -4
+  fi
+done
+if [ -e "$WIN_ENV_FRESH" ]; then
+  bad "Windows dry-run created the env-var checkout"
+else
+  ok "Windows dry-run leaves the env-var checkout absent"
+fi
+grep -v '^[[:space:]]*#' "$REPO_ROOT/chromium/args-windows.gn" >"$TMP/args-windows-active.gn" 2>/dev/null || true
+if grep -q 'WINDOWS ONLY' "$REPO_ROOT/chromium/args-windows.gn" \
+   && grep -q 'target_cpu = "x64"' "$TMP/args-windows-active.gn" \
+   && ! grep -qE 'arm64|mac_app_icon_dir' "$TMP/args-windows-active.gn"    && grep -q 'branding_file_path = "//chrome/app/theme/browser_cli/BRANDING"' "$TMP/args-windows-active.gn"; then
+  ok "chromium/args-windows.gn is Windows-only (x64, no macOS icon/CPU values, shared BRANDING)"
+else
+  bad "chromium/args-windows.gn carries macOS icon/CPU values, lacks the x64 marker, or does not point branding at the shared BRANDING file"
+fi
+if python3 -c 'import sys' >/dev/null 2>&1; then
+  if python3 -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" \
+       "$REPO_ROOT/tests/tools/test_windows_scripts.py" 2>"$TMP/out.txt"; then
+    ok "python syntax test_windows_scripts.py"
+  else
+    bad "python syntax test_windows_scripts.py"
+    sed 's/^/      /' "$TMP/out.txt"
+  fi
+else
+  printf 'SKIP  python syntax test_windows_scripts.py (python3 unavailable)\n'
+fi
+
+echo
+echo "== 99. chrome.browserCli allowlist contract =="
+ALLOWLIST_CHECK="$REPO_ROOT/tests/check-extension-allowlist.py"
+if [ -f "$ALLOWLIST_CHECK" ] && command -v python3 >/dev/null 2>&1; then
+  # Self-test only: the real manifest lives in another repository, so CI checks
+  # the derivations and the failure modes rather than a live extension id.
+  if python3 "$ALLOWLIST_CHECK" --self-test >"$TMP/out.txt" 2>&1; then
+    ok "allowlist checker self-test (id derivation + hash form + failure modes)"
+  else
+    bad "allowlist checker self-test"
+    sed 's/^/      /' "$TMP/out.txt" | tail -6
+  fi
+else
+  if [ ! -f "$ALLOWLIST_CHECK" ]; then
+    bad "allowlist checker script is missing"
+  else
+    printf 'SKIP  allowlist checker self-test (python3 unavailable)\n'
+  fi
 fi
 
 echo

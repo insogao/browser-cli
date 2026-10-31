@@ -646,6 +646,49 @@ tests/check-browser-launch-hygiene.sh --root DIR # 自测/合成目录
 任何新增测试入口都必须先通过该门禁。规则根因与生产约束见 [`../AGENTS.md`](../AGENTS.md)：
 **生产 Browser CLI 不得使用 mock keychain**，正式版依靠稳定签名 + 稳定安装路径。
 
+## 测试进程清理（强制：Job Object 或验证式 PID，禁止全局 kill）
+
+背景：2026-10-28 的诊断脚本执行过按镜像名的全局清理，在用户 Chrome 正在运行时可能误杀用户进程。
+从本切片起，测试进程的清理必须能**证明归属**，规则如下（违反即阻塞缺陷）：
+
+1. **禁止**任何无法证明归属的清理：按镜像名 / 进程名匹配的一律不允许，包括 `taskkill /IM`、
+   `Stop-Process -Name`、`Get-Process <name> | Stop-Process`、`pkill -f <browser>`、
+   `killall <browser>`、`wmic process ... delete`。
+2. **Windows Python harness 用 Job Object**：`tests/tools/win_job.py` 以
+   `CreateJobObjectW` + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 创建 job，子进程以
+   `CREATE_SUSPENDED` 启动、先 `AssignProcessToJobObject` 再 `ResumeThread`，因此不存在
+   “归属前已经创建孙进程”的窗口。`close()` 关闭 job 句柄即终止整棵进程树；任何 Win32
+   失败都抛 `JobError`，**没有**回退到全局 kill 的路径。
+3. **Node 测试用验证式 PID 清理**：`BrowserPilot/scripts/lib/test-process.mjs` 启动时记录
+   PID、创建时间、可执行路径、完整命令行与唯一 marker；`stopTestProcess()` 清理前重新查询
+   该 PID，**PID + 创建时间 + 命令行含 marker + 可执行路径全部匹配**才按 PID 清理，
+   任一不匹配即拒绝并记录。非 Windows 平台没有 WMI 身份查询，只通过本进程 spawn 的
+   `ChildProcess` 句柄清理（与原行为一致），不会按裸 PID 猜。
+4. **测试进程必须有唯一 marker**：优先使用独立临时 `--user-data-dir`
+   （`tempfile.mkdtemp` / `fs.mkdtempSync` / `mktemp -d`）。没有唯一 marker 的进程不允许
+   进入清理流程。
+5. 同一套规则适用于**用户 Chrome 正在运行**的场景：清理只作用于本次启动的 job / 已核验 PID，
+   不会扫描或结束其它浏览器实例。
+
+命令：
+
+```sh
+# Job Object 自测：只杀目标树，控制进程必须存活（Windows）
+python tests/tools/win_job.py --self-test
+
+# 后台渲染 harness 已改为 Job Object 启动/清理（launch()/finally）
+python tests/tools/background-render-cdp-check.py --chrome <chrome.exe> --scenario hidden
+
+# 静态门禁（在 BrowserPilot 仓库）：扫描源码中的全局清理写法
+node ../BrowserPilot/scripts/check-process-cleanup.mjs --root tests --root scripts
+
+# 真实进程安全测试（两个 headless Chrome：目标被杀、控制存活、伪造 record 被拒）
+node ../BrowserPilot/scripts/test-process-safety.mjs
+```
+
+`check-process-cleanup.mjs` 已接入 BrowserPilot 的 `npm run check:process-cleanup` 与 CI；
+BrowserPilot 侧 `npm run test:safety` 会依次执行静态门禁与真实进程安全测试。
+
 ## `check-identity-consistency.sh`（静态门禁，强制）
 
 校验唯一身份配置源 `config/product-identity.env` 与 `chromium/args.gn`（`branding_file_path`）以及
@@ -715,3 +758,53 @@ python3 tests/tools/omnibox-everywhere-origin-check.py --self-test   # 8 个 fix
   与隔离临时 `--user-data-dir`，并由 `check-browser-launch-hygiene.sh` 强制；出现一次弹窗即 FAIL。
 - 后续 Gate A/B/C 测试必须能判定「全程零可见」；禁止把 watchdog 事后隐藏当作成功（设计 §5.1、§14）。
 - smoke 允许短暂运行 Chromium 进程（无窗口）；如不希望出现 Dock 图标，请在用户明确授权后再运行。
+- `check-browser-launch-hygiene.sh` 做的是**平台适配**，不是放宽 macOS 规则：任何启动浏览器的入口
+  都必须使用隔离临时 profile；**只有** macOS app bundle 的启动额外要求 `--use-mock-keychain`
+  （它绕过 ad-hoc 签名下失效的钥匙串 ACL）。Windows 用 DPAPI、没有 login keychain，该开关在那里
+  没有意义且生产环境被禁止（`AGENTS.md` §1.5），所以仅启动 Windows 二进制的入口在源文件里写一行
+  注释 `# browser-launch-hygiene: windows-only (no keychain)` 显式声明。声明是可评审的，不做启发式
+  推断；fixture 保证「不声明仍会被拦」「声明了但缺 profile 仍会被拦」。
+
+## `chrome.browserCli` allowlist 漂移检查
+
+`tests/check-extension-allowlist.py` 用来回答一个很容易踩、且失败时毫无提示的问题：
+**插件的 manifest `key` 变了之后，内核里的 allowlist 还匹配吗？**
+
+Chromium 的 `allowlist` 比较的是扩展 ID 的 SHA-1/SHA-256 大写 hex，而不是 ID 字符串；
+ID 又由 manifest 的 `key` 派生。`key` 一变，接口就从插件视野里消失，表现和"功能没实现"完全一样。
+
+```sh
+# 拿插件仓库的 manifest 直接核对 patch 里的 allowlist
+python3 tests/check-extension-allowlist.py --manifest ../BrowserPilot/manifest.json
+
+# 或者核对 checkout 里已经应用好的 _api_features.json
+python3 tests/check-extension-allowlist.py --manifest ../BrowserPilot/manifest.json \
+  --features D:/c/src/chrome/common/extensions/api/_api_features.json
+
+# 自带 fixture 自检（由 run-script-tests.sh 第 99 组执行）
+python3 tests/check-extension-allowlist.py --self-test
+```
+
+它在三种情况下 fail closed：缺失 SHA-1、缺失 SHA-256、allowlist 里写了原始 ID（Chromium
+永远匹配不上）。manifest 没有 `key` 时也直接拒绝——未打包扩展的 ID 由路径派生，换台机器就变，
+任何 allowlist 都不可能命中。
+
+## Windows 宿主机上的已知差异
+
+`tests/run-script-tests.sh` 在 Windows 宿主机上无法全部通过，原因是它同时覆盖 macOS 专属流程
+（`setup-mac` 时代的 gclient sync / `--detach`、`preflight.sh` 的磁盘熔断、`generate-icons.sh`
+的 `.icns` + `Assets.car`、`prepare-app` 的 Developer ID 预检）。
+
+失败清单以 **CI（`windows-latest`）实测**为准，记录在 `tests/windows-host-failures.txt`。
+`windows-static` 会做精确比对：出现新的失败，或清单里留着一个已经不再失败的条目，都会让流水线变红，
+所以这份基线不会掩盖回归。
+
+注意：**本机 Git Bash 的失败集与 CI 不同**（典型差异是 `mktemp -d` 返回的 `/tmp/...` 路径在
+Windows 上被解析成另一种形态，导致 `checkout.sh --dry-run` 的计划输出缺失）。判断是否回归请以
+CI 结果为准，不要用本机运行数量去对齐基线。
+
+Windows 侧的对应门禁是 `tests/tools/test_windows_scripts.py`（24 项）与
+`scripts/verify-windows.sh`（6 步），两者都必须全绿，且不依赖上述基线。
+若 `python3` 在 PATH 中指向 Chromium 自带的 hermetic 解释器（无第三方包），
+请用系统 Python 运行 Python 测试；`scripts/configure-windows.sh` 会自行挑选能 `import PIL` 的
+解释器来生成图标。

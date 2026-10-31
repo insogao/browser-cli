@@ -1,0 +1,828 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 0c1cb194..74c47211 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1532,9 +1532,7 @@ source_set("core") {
+       ":shutdown_watchdog_mac",
+       "//chrome/app_shim",
+       "//chrome/browser/apps/app_shim",
+-      "//chrome/browser/browser_cli:foreground_assist",
+       "//chrome/browser/browser_cli:foreground_assist_presentation",
+-      "//chrome/browser/browser_cli:reopen_window_selection",
+       "//chrome/browser/browser_cli:user_explicit_presentation",
+       "//chrome/browser/enterprise/connectors/device_trust/key_management/core/mac",
+       "//chrome/browser/mac",
+@@ -1589,6 +1587,23 @@ source_set("core") {
+     ]
+   }
+ 
++  deps += [
++    "//chrome/browser/browser_cli:reopen_window_selection",
++    "//chrome/browser/browser_cli:user_explicit_show",
++  ]
++
++  # ArbitrateBrowserCliCommandLineIntent() and
++  # CommandLineForColdStartStartup() live in :foreground_assist, which already
++  # depends on //ui/views, so it stays restricted to platforms that build
++  # views; the Windows chrome_browser_main.cc call sites need it in the graph.
++  if (is_mac || is_win) {
++    deps += [ "//chrome/browser/browser_cli:foreground_assist" ]
++  }
++
++  if (is_win) {
++    deps += [ "//chrome/browser/browser_cli:user_explicit_presentation_win" ]
++  }
++
+   if (!is_win && !is_android) {
+     sources += [
+       "certificate_viewer_stub.cc",
+diff --git a/chrome/browser/browser_cli/BUILD.gn b/chrome/browser/browser_cli/BUILD.gn
+index d468d2d4..a156970e 100644
+--- a/chrome/browser/browser_cli/BUILD.gn
++++ b/chrome/browser/browser_cli/BUILD.gn
+@@ -134,3 +134,18 @@ if (is_mac) {
+     ]
+   }
+ }
++
++if (is_win) {
++  source_set("user_explicit_presentation_win") {
++    sources = [
++      "user_explicit_presentation.h",
++      "user_explicit_presentation_win.cc",
++    ]
++    deps = [
++      ":user_explicit_show",
++      "//base",
++      "//ui/gfx:native_ui_types",
++      "//ui/views",
++    ]
++  }
++}
+diff --git a/chrome/browser/browser_cli/foreground_assist.cc b/chrome/browser/browser_cli/foreground_assist.cc
+index 47b4ea68..c8a80a6b 100644
+--- a/chrome/browser/browser_cli/foreground_assist.cc
++++ b/chrome/browser/browser_cli/foreground_assist.cc
+@@ -127,7 +127,9 @@ base::CommandLine CommandLineForColdStartStartup(
+     if (value.empty()) {
+       sanitized.AppendSwitch(name);
+     } else {
+-      sanitized.AppendSwitchASCII(name, value);
++      // GetSwitches() yields native strings (wide on Windows), so forward the
++      // value natively instead of converting it through ASCII.
++      sanitized.AppendSwitchNative(name, value);
+     }
+   }
+   sanitized.AppendSwitch(switches::kNoStartupWindow);
+diff --git a/chrome/browser/browser_cli/user_explicit_presentation_win.cc b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+new file mode 100644
+index 00000000..8de71737
+--- /dev/null
++++ b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+@@ -0,0 +1,75 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/browser_cli/user_explicit_presentation.h"
++
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/logging.h"
++#include "base/notreached.h"
++#include "chrome/browser/browser_cli/user_explicit_show.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++
++namespace browser_cli {
++namespace {
++
++// Structured producer log, matching the macOS producer vocabulary. The
++// presentation policy adds its own BROWSER_CLI_PRESENTATION decision log for
++// every actual request, so an allow/deny pair can always be correlated.
++void LogProducerOutcome(const char* result,
++                        const char* reason,
++                        bool managed_mode) {
++  LOG(INFO) << "BROWSER_CLI_USER_EXPLICIT_SHOW stage=producer"
++            << " result=" << result << " reason=" << reason
++            << " managed=" << (managed_mode ? "yes" : "no")
++            << " native=win-hwnd";
++}
++
++}  // namespace
++
++bool HandleUserExplicitShowRequest(
++    const base::CommandLine& command_line,
++    const base::FilePath& /*current_directory*/) {
++  const UserExplicitShowRequestClass request_class =
++      ClassifyUserExplicitShowRequest(command_line);
++  if (request_class == UserExplicitShowRequestClass::kNotRequested) {
++    return false;
++  }
++
++  const bool managed_mode =
++      views::BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled();
++
++  // Patch 016 wires the shared policy and the native suppression, but not a
++  // native presentation path: every plan that would have to touch a window
++  // fails closed without creating, showing or activating one. The
++  // reusable-window lookup is therefore intentionally not performed; both
++  // presenting plans have the same not-implemented outcome.
++  switch (PlanUserExplicitShow(request_class, managed_mode,
++                               /*has_reusable_window=*/false)) {
++    case UserExplicitShowPlan::kNoAction:
++      if (request_class ==
++          UserExplicitShowRequestClass::kBlockedByLaunchArguments) {
++        // Never ride a URL / app / incognito launch into a USER_EXPLICIT
++        // presentation. The caller continues ordinary command-line processing,
++        // which creates only background-managed windows.
++        LogProducerOutcome("denied", "launch-arguments-not-user-explicit",
++                           managed_mode);
++      } else {
++        // Stock Chromium already presents its own windows; the producer must
++        // not add a duplicate visibility path or a duplicate window.
++        LogProducerOutcome("noop", "unmanaged-stock-behavior", managed_mode);
++      }
++      return false;
++
++    case UserExplicitShowPlan::kPresentExistingWindow:
++    case UserExplicitShowPlan::kCreateWindowThenPresent:
++      LogProducerOutcome("failed", "windows-gateway-not-implemented",
++                         managed_mode);
++      return true;
++  }
++
++  NOTREACHED();
++}
++
++}  // namespace browser_cli
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index cedff2ac..01951d04 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -218,12 +218,17 @@
+ #include "chrome/browser/first_run/upgrade_util.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++#include "base/logging.h"
++
++#include "chrome/browser/browser_cli/foreground_assist.h"
++#include "chrome/browser/browser_cli/user_explicit_presentation.h"
++#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++
+ #if BUILDFLAG(IS_MAC)
+ #include <Security/Security.h>
+ 
+-#include "chrome/browser/browser_cli/foreground_assist.h"
+ #include "chrome/browser/browser_cli/foreground_assist_presentation.h"
+-#include "chrome/browser/browser_cli/user_explicit_presentation.h"
+ #include "chrome/browser/infobars/browser_infobar_manager.h"
+ #include "chrome/browser/infobars/infobar_features.h"
+ #include "chrome/browser/mac/chrome_browser_main_extra_parts_mac.h"
+@@ -559,20 +564,30 @@ void ProcessSingletonNotificationCallbackImpl(
+   }
+ #endif
+ 
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   // Browser CLI: exactly one producer may consume a direct invocation. The
+   // shared arbitration gives any assist request/release intent priority over
+   // the explicit `show` switch, so a conflicting command line is denied and
+   // logged by the assist producer (conflicting-producer-switches) and never
+   // reaches the USER_EXPLICIT show producer or its presentation gateway. A
+   // pure show request keeps the existing presentation path, and a command line
+-  // without either intent falls through to stock handling.
++  // without either intent falls through to stock handling. Windows has no
++  // assist presentation yet (patch 017), so an assist intent is consumed
++  // there without presenting anything.
+   switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(command_line)) {
+     case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
++#if BUILDFLAG(IS_MAC)
+       // An assist intent is always consumed (fail closed): it must never act
+       // as an ordinary URL / app launch that could change a HUMAN-owned window
+       // or create a visible window.
+       browser_cli::HandleForegroundAssistRequest(command_line);
++#else
++      // Fail closed: consume the intent so it can never fall through to
++      // ordinary command-line processing as a URL / app launch.
++      LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=producer"
++                << " result=denied reason=windows-gateway-not-implemented"
++                << " native=win-hwnd";
++#endif
+       return;
+     case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
+       if (browser_cli::HandleUserExplicitShowRequest(command_line,
+@@ -583,7 +598,7 @@ void ProcessSingletonNotificationCallbackImpl(
+     case browser_cli::BrowserCliCommandLineIntent::kOrdinary:
+       break;
+   }
+-#endif
++#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ 
+   StartupProfilePathInfo startup_profile_path_info =
+       GetStartupProfilePath(current_directory, command_line,
+@@ -2148,7 +2163,7 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
+ #endif
+ 
+   // This step is costly.
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   // Browser CLI: a cold start carrying an agent foreground-assist intent must
+   // never be processed by the ordinary startup as a URL / app / incognito /
+   // automation / headless launch. The effective command line drops those launch
+@@ -2166,7 +2181,7 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
+ #endif
+   if (browser_creator_->Start(launch_command_line, base::FilePath(),
+                               profile_info, last_opened_profiles)) {
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+     // Browser CLI: the same single arbitration as the ProcessSingleton path.
+     // An assist intent (including a command line that also carries the
+     // explicit show switch) is denied/logged and consumed by the assist
+@@ -2177,11 +2192,19 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
+     // exactly one window: the startup path has already created its window
+     // (its native show was denied by the background policy), and with
+     // --no-startup-window the producer creates one for the resolved profile.
++    // On Windows no assist or native presentation path exists yet (patch 017),
++    // so an assist intent is consumed without presenting anything.
+     switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(
+         *base::CommandLine::ForCurrentProcess())) {
+       case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
++#if BUILDFLAG(IS_MAC)
+         browser_cli::HandleForegroundAssistRequest(
+             *base::CommandLine::ForCurrentProcess());
++#else
++        LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=producer"
++                  << " result=denied reason=windows-gateway-not-implemented"
++                  << " native=win-hwnd";
++#endif
+         break;
+       case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
+         browser_cli::HandleUserExplicitShowRequest(
+@@ -2190,7 +2213,7 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
+       case browser_cli::BrowserCliCommandLineIntent::kOrdinary:
+         break;
+     }
+-#endif
++#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
+     // Initialize autoupdate timer. Timer callback costs basically nothing
+diff --git a/chrome/browser/extensions/browser_extension_window_controller.cc b/chrome/browser/extensions/browser_extension_window_controller.cc
+index 892f0115..438f7cee 100644
+--- a/chrome/browser/extensions/browser_extension_window_controller.cc
++++ b/chrome/browser/extensions/browser_extension_window_controller.cc
+@@ -31,7 +31,7 @@
+ #include "ui/base/base_window.h"
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ #include "ui/views/widget/browser_cli_foreground_origin.h"
+ #endif
+ 
+@@ -150,7 +150,7 @@ void BrowserExtensionWindowController::SetFullscreenMode(
+   NOTIMPLEMENTED();
+ #else
+   if (window()->IsFullscreen() != is_fullscreen) {
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+     // Browser CLI: deny automation fullscreen of a HUMAN-owned window before
+     // the fullscreen controller starts its state machine. Leaving the
+     // controller "pending" (its flags are only rolled back on a real window
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index e12ef817..0f195065 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -1691,7 +1691,7 @@ bool BrowserView::IsVisible() const {
+ }
+ 
+ void BrowserView::SetBounds(const gfx::Rect& bounds) {
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   // Browser CLI: programmatic bounds changes (extension windows API) must be
+   // denied on a HUMAN-owned window before any side effect: this method exits
+   // tab fullscreen first. Internal Chrome UI (snap/restore/session) and the
+diff --git a/ui/views/BUILD.gn b/ui/views/BUILD.gn
+index 9795d55f..c4651207 100644
+--- a/ui/views/BUILD.gn
++++ b/ui/views/BUILD.gn
+@@ -797,6 +797,7 @@ component("views") {
+   if (is_win) {
+     public += [
+       "controls/menu/native_menu_win.h",
++      "widget/browser_cli_presentation_win.h",
+       "widget/widget_hwnd_utils.h",
+       "win/fullscreen_handler.h",
+       "win/hwnd_message_handler.h",
+@@ -813,6 +814,8 @@ component("views") {
+     sources += [
+       "controls/menu/menu_config_win.cc",
+       "controls/menu/native_menu_win.cc",
++      "widget/browser_cli_presentation_win.cc",
++      "widget/browser_cli_presentation_win.h",
+       "widget/widget_hwnd_utils.cc",
+       "win/fullscreen_handler.cc",
+       "win/hwnd_message_handler.cc",
+@@ -1324,6 +1327,29 @@ test("browser_cli_foreground_lease_unittests") {
+   ]
+ }
+ 
++if (is_win) {
++  test("browser_cli_presentation_win_unittests") {
++    sources = [
++      "run_all_unittests_main.cc",
++      "widget/browser_cli_presentation_win_unittest.cc",
++    ]
++    deps = [
++      ":test_support",
++      ":views",
++      "//base",
++      "//base/test:test_support",
++      "//mojo/core/embedder",
++      "//testing/gtest",
++      "//ui/aura",
++      "//ui/display:test_support",
++      "//ui/gfx",
++      "//ui/resources",
++      "//ui/resources:ui_test_pak",
++      "//ui/strings",
++    ]
++  }
++}
++
+ test("views_unittests") {
+   use_xvfb = use_xvfb_in_this_config
+ 
+diff --git a/ui/views/widget/browser_cli_presentation_win.cc b/ui/views/widget/browser_cli_presentation_win.cc
+new file mode 100644
+index 00000000..5373b09c
+--- /dev/null
++++ b/ui/views/widget/browser_cli_presentation_win.cc
+@@ -0,0 +1,92 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/views/widget/browser_cli_presentation_win.h"
++
++#include "base/logging.h"
++#include "base/win/windows_handle_util.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/views/widget/widget.h"
++
++namespace views {
++namespace {
++
++// Resolves the policy key of `widget`'s top-level native window. Returns 0
++// when the widget or its HWND cannot be resolved; the managed policy denies
++// window id 0 for every presenting action (fail closed).
++uint64_t WindowIdForWidget(Widget* widget) {
++  if (!widget || !widget->is_top_level()) {
++    return 0;
++  }
++  aura::Window* native_window = widget->GetNativeWindow();
++  if (!native_window) {
++    return 0;
++  }
++  aura::WindowTreeHost* host = native_window->GetHost();
++  return host ? BrowserCliWindowIdForHwnd(host->GetAcceleratedWidget()) : 0;
++}
++
++}  // namespace
++
++uint64_t BrowserCliWindowIdForHwnd(HWND hwnd) {
++  // HWNDs are 32-bit significant on 64-bit Windows; the policy key stays a
++  // plain 64-bit value so both platforms speak the same vocabulary.
++  return static_cast<uint64_t>(base::win::HandleToUint32(hwnd));
++}
++
++bool BrowserCliAllowsPresentation(Widget* widget,
++                                  BrowserCliPresentationAction action) {
++  const uint64_t window_id = WindowIdForWidget(widget);
++  const bool allow = BrowserCliPresentationPolicy::Get()->AllowPresentation(
++      CurrentForegroundOrigin(), action, window_id);
++  if (!allow) {
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host decision=deny"
++              << " action=" << static_cast<int>(action)
++              << " window_id=" << window_id
++              << " reason=policy-denied native=win-hwnd";
++  }
++  return allow;
++}
++
++bool BrowserCliShouldSuppressWindowPosChange(HWND hwnd) {
++  BrowserCliPresentationPolicy* policy = BrowserCliPresentationPolicy::Get();
++  if (!policy->IsManagedModeEnabled()) {
++    return false;
++  }
++  const uint64_t window_id = BrowserCliWindowIdForHwnd(hwnd);
++  // Mirror the macOS AppKit hard stop, which is only armed for windows the
++  // user does not own: a HUMAN-owned or assist-leased window must keep
++  // answering the user's native window controls (taskbar, system menu). The
++  // origin is deliberately unknown here; no producer attributed this request.
++  if (policy->IsUserExplicitOwned(window_id) ||
++      policy->IsForegroundAssistLeased(window_id)) {
++    return false;
++  }
++  return !policy->AllowPresentation(
++      ForegroundOrigin::kUnknown,
++      BrowserCliPresentationAction::kShowAndActivate, window_id);
++}
++
++void BrowserCliReleaseWindowState(HWND hwnd) {
++  const uint64_t window_id = BrowserCliWindowIdForHwnd(hwnd);
++  BrowserCliPresentationPolicy* policy = BrowserCliPresentationPolicy::Get();
++  policy->ReleaseUserExplicitOwnership(window_id, "window-destroyed");
++  policy->ReleaseForegroundAssist(
++      window_id, ForegroundAssistReleaseReason::kWindowDestroyed);
++}
++
++bool AllowProgrammaticWindowChangeFromCurrentOrigin(
++    gfx::NativeWindow native_window,
++    BrowserCliPresentationAction action) {
++  Widget* widget = Widget::GetWidgetForNativeWindow(native_window);
++  if (!widget) {
++    // No views host: stock behavior, exactly like the macOS definition.
++    return true;
++  }
++  return BrowserCliPresentationPolicy::Get()->AllowPresentation(
++      CurrentForegroundOrigin(), action, WindowIdForWidget(widget));
++}
++
++}  // namespace views
+diff --git a/ui/views/widget/browser_cli_presentation_win.h b/ui/views/widget/browser_cli_presentation_win.h
+new file mode 100644
+index 00000000..40de2ecb
+--- /dev/null
++++ b/ui/views/widget/browser_cli_presentation_win.h
+@@ -0,0 +1,57 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_VIEWS_WIDGET_BROWSER_CLI_PRESENTATION_WIN_H_
++#define UI_VIEWS_WIDGET_BROWSER_CLI_PRESENTATION_WIN_H_
++
++#include <stdint.h>
++
++#include "base/win/windows_types.h"
++#include "ui/gfx/native_ui_types.h"
++#include "ui/views/views_export.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++
++namespace views {
++
++class Widget;
++
++// Windows native presentation gateway (patch 016). This file maps native HWND
++// lifecycle and window operations onto the shared
++// BrowserCliPresentationPolicy; it never makes a presentation decision of its
++// own. All functions must be called on the browser UI thread.
++
++// Per-window stable key for policy bookkeeping, derived from the HWND.
++// HWND values are reused by the OS after destroy, so a key is only meaningful
++// for a live window; callers must release ownership on destruction.
++VIEWS_EXPORT uint64_t BrowserCliWindowIdForHwnd(HWND hwnd);
++
++// Evaluates `action` for `widget`'s window with the origin currently scoped on
++// this thread. A null or non-top-level widget resolves to window id 0, which
++// the managed policy denies; managed mode off keeps stock behavior.
++VIEWS_EXPORT bool BrowserCliAllowsPresentation(
++    Widget* widget,
++    BrowserCliPresentationAction action);
++
++// Whether a WINDOWPOS change that carries SWP_SHOWWINDOW must have that flag
++// stripped. Returns false while managed presentation is disabled (stock
++// behavior) and true when the HWND cannot be resolved in managed mode (fail
++// closed).
++VIEWS_EXPORT bool BrowserCliShouldSuppressWindowPosChange(HWND hwnd);
++
++// Releases the per-window USER_EXPLICIT/HUMAN ownership and any foreground
++// assist lease when the HWND is destroyed, so a recycled HWND can never
++// inherit the previous window's state. Mirrors the macOS host destructor at
++// ui/views/cocoa/native_widget_mac_ns_window_host.mm.
++VIEWS_EXPORT void BrowserCliReleaseWindowState(HWND hwnd);
++
++// Windows definition of the free function declared in
++// browser_cli_presentation_policy.h. Returns true when `native_window` has no
++// views host (stock behavior).
++VIEWS_EXPORT bool AllowProgrammaticWindowChangeFromCurrentOrigin(
++    gfx::NativeWindow native_window,
++    BrowserCliPresentationAction action);
++
++}  // namespace views
++
++#endif  // UI_VIEWS_WIDGET_BROWSER_CLI_PRESENTATION_WIN_H_
+diff --git a/ui/views/widget/browser_cli_presentation_win_unittest.cc b/ui/views/widget/browser_cli_presentation_win_unittest.cc
+new file mode 100644
+index 00000000..4702e560
+--- /dev/null
++++ b/ui/views/widget/browser_cli_presentation_win_unittest.cc
+@@ -0,0 +1,137 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/views/widget/browser_cli_presentation_win.h"
++
++#include <windows.h>
++
++#include <memory>
++
++#include "base/run_loop.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/views/test/widget_test.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++#include "ui/views/widget/widget.h"
++
++namespace views {
++namespace {
++
++// Windows tests for the Browser CLI native presentation gateway. The tests
++// create real HWNDs because the suppression path is a native window-procedure
++// behavior that no pure test can exercise. No test makes a window visible:
++// the gateway decisions and the native SWP_SHOWWINDOW strip are asserted while
++// the HWND stays hidden.
++class BrowserCliPresentationWinTest : public test::DesktopWidgetTest {
++ public:
++  void SetUp() override {
++    test::DesktopWidgetTest::SetUp();
++    BrowserCliPresentationPolicy::Get()->ResetForTesting();
++    BrowserCliPresentationPolicy::Get()->SetManagedModeEnabledForTesting(true);
++  }
++
++  void TearDown() override {
++    BrowserCliPresentationPolicy::Get()->ResetForTesting();
++    test::DesktopWidgetTest::TearDown();
++  }
++
++  std::unique_ptr<Widget> CreateWidget() {
++    auto widget = std::make_unique<Widget>();
++    Widget::InitParams params =
++        CreateParams(Widget::InitParams::CLIENT_OWNS_WIDGET,
++                     Widget::InitParams::TYPE_WINDOW);
++    widget->Init(std::move(params));
++    return widget;
++  }
++
++  static HWND HwndForWidget(Widget* widget) {
++    return widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget();
++  }
++
++  static uint64_t WindowIdForWidget(Widget* widget) {
++    return BrowserCliWindowIdForHwnd(HwndForWidget(widget));
++  }
++};
++
++TEST_F(BrowserCliPresentationWinTest,
++       UnownedManagedWindowDeniesPresentation) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++
++  EXPECT_FALSE(BrowserCliAllowsPresentation(
++      widget.get(), BrowserCliPresentationAction::kShowAndActivate));
++  EXPECT_FALSE(::IsWindowVisible(HwndForWidget(widget.get())));
++}
++
++TEST_F(BrowserCliPresentationWinTest,
++       UserExplicitOwnershipAllowsPresentation) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++  const uint64_t window_id = WindowIdForWidget(widget.get());
++  ASSERT_NE(window_id, 0u);
++
++  // The query is made from an explicitly scoped trusted path. The default
++  // kUnknown origin is denied on a HUMAN-owned window by the shared policy.
++  ScopedForegroundOrigin trusted_scope(ForegroundOrigin::kInternal);
++  EXPECT_FALSE(BrowserCliAllowsPresentation(
++      widget.get(), BrowserCliPresentationAction::kShowAndActivate));
++  EXPECT_FALSE(::IsWindowVisible(HwndForWidget(widget.get())));
++
++  ASSERT_TRUE(BrowserCliPresentationPolicy::Get()->AllowPresentation(
++      ForegroundOrigin::kUserExplicit,
++      BrowserCliPresentationAction::kShowAndActivate, window_id));
++  ASSERT_TRUE(
++      BrowserCliPresentationPolicy::Get()->IsUserExplicitOwned(window_id));
++  EXPECT_TRUE(BrowserCliAllowsPresentation(
++      widget.get(), BrowserCliPresentationAction::kShowAndActivate));
++  EXPECT_FALSE(::IsWindowVisible(HwndForWidget(widget.get())));
++}
++
++TEST_F(BrowserCliPresentationWinTest,
++       AgentAssistWithoutLeaseDeniesPresentation) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++
++  ScopedForegroundOrigin agent_scope(ForegroundOrigin::kAgentAssist);
++  EXPECT_FALSE(BrowserCliAllowsPresentation(
++      widget.get(), BrowserCliPresentationAction::kShowAndActivate));
++}
++
++TEST_F(BrowserCliPresentationWinTest,
++       UnresolvableWindowSuppressesNativeChange) {
++  EXPECT_TRUE(BrowserCliShouldSuppressWindowPosChange(nullptr));
++  EXPECT_FALSE(BrowserCliAllowsPresentation(
++      nullptr, BrowserCliPresentationAction::kShowAndActivate));
++}
++
++TEST_F(BrowserCliPresentationWinTest, ExternalWindowPosShowIsSuppressed) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++  HWND hwnd = HwndForWidget(widget.get());
++  ASSERT_TRUE(BrowserCliShouldSuppressWindowPosChange(hwnd));
++  ASSERT_FALSE(::IsWindowVisible(hwnd));
++
++  // An external process (or any caller below the views gateway) can call
++  // SetWindowPos directly. The native hard stop must strip SWP_SHOWWINDOW.
++  ::SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
++                 SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
++  base::RunLoop().RunUntilIdle();
++
++  EXPECT_FALSE(::IsWindowVisible(hwnd));
++}
++
++TEST_F(BrowserCliPresentationWinTest,
++       ActivateMessageDoesNotCreateUserExplicitOwnership) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++  const uint64_t window_id = WindowIdForWidget(widget.get());
++  ASSERT_FALSE(
++      BrowserCliPresentationPolicy::Get()->IsUserExplicitOwned(window_id));
++
++  ::PostMessageW(HwndForWidget(widget.get()), WM_ACTIVATE, WA_ACTIVE, 0);
++  base::RunLoop().RunUntilIdle();
++
++  EXPECT_FALSE(
++      BrowserCliPresentationPolicy::Get()->IsUserExplicitOwned(window_id));
++}
++
++}  // namespace
++}  // namespace views
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index e2bba0c4..9ca3bc75 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -61,6 +61,7 @@
+ #include "ui/views/corewm/tooltip_aura.h"
+ #include "ui/views/views_features.h"
+ #include "ui/views/views_switches.h"
++#include "ui/views/widget/browser_cli_presentation_win.h"
+ #include "ui/views/widget/desktop_aura/desktop_drag_drop_client_win.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_cursor_manager.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_cursor_manager_win.h"
+@@ -193,6 +194,9 @@ DesktopWindowTreeHostWin::DesktopWindowTreeHostWin(
+       is_modal_(native_widget_delegate_->IsModal()) {}
+ 
+ DesktopWindowTreeHostWin::~DesktopWindowTreeHostWin() {
++  if (message_handler_) {
++    BrowserCliReleaseWindowState(message_handler_->hwnd());
++  }
+   ClearBackgroundPaintBrush();
+   desktop_native_widget_aura_->OnDesktopWindowTreeHostDestroyed(this);
+   // Normally HandleDestroying() destroys the compositor (which is called
+@@ -397,6 +401,15 @@ DesktopWindowTreeHostWin::GetOwnedWindowTreeHosts() {
+ 
+ void DesktopWindowTreeHostWin::Show(ui::mojom::WindowShowState show_state,
+                                     const gfx::Rect& restore_bounds) {
++  BrowserCliPresentationAction action =
++      BrowserCliPresentationAction::kShowAndActivate;
++  if (show_state == ui::mojom::WindowShowState::kInactive ||
++      show_state == ui::mojom::WindowShowState::kMinimized) {
++    action = BrowserCliPresentationAction::kShowInactive;
++  }
++  if (!BrowserCliAllowsPresentation(GetWidget(), action)) {
++    return;
++  }
+   OnAcceleratedWidgetMadeVisible(true);
+ 
+   gfx::Rect pixel_restore_bounds;
+@@ -527,6 +540,10 @@ void DesktopWindowTreeHostWin::SetParent(gfx::AcceleratedWidget parent) {
+ }
+ 
+ void DesktopWindowTreeHostWin::Activate() {
++  if (!BrowserCliAllowsPresentation(
++          GetWidget(), BrowserCliPresentationAction::kShowAndActivate)) {
++    return;
++  }
+   if (WidgetActivationDelegate::Get()) {
+     WidgetActivationDelegate::Get()->MaybeActivate(GetWidget(),
+                                                    /*activate=*/true);
+@@ -535,6 +552,10 @@ void DesktopWindowTreeHostWin::Activate() {
+ }
+ 
+ void DesktopWindowTreeHostWin::Deactivate() {
++  if (!BrowserCliAllowsPresentation(GetWidget(),
++                                    BrowserCliPresentationAction::kDeactivate)) {
++    return;
++  }
+   if (WidgetActivationDelegate::Get()) {
+     WidgetActivationDelegate::Get()->Deactivate(GetWidget());
+   } else {
+@@ -554,14 +575,26 @@ void DesktopWindowTreeHostWin::PaintAsActiveChanged() {
+ }
+ 
+ void DesktopWindowTreeHostWin::Maximize() {
++  if (!BrowserCliAllowsPresentation(GetWidget(),
++                                    BrowserCliPresentationAction::kMaximize)) {
++    return;
++  }
+   message_handler_->Maximize();
+ }
+ 
+ void DesktopWindowTreeHostWin::Minimize() {
++  if (!BrowserCliAllowsPresentation(GetWidget(),
++                                    BrowserCliPresentationAction::kMinimize)) {
++    return;
++  }
+   message_handler_->Minimize();
+ }
+ 
+ void DesktopWindowTreeHostWin::Restore() {
++  if (!BrowserCliAllowsPresentation(GetWidget(),
++                                    BrowserCliPresentationAction::kRestore)) {
++    return;
++  }
+   message_handler_->Restore();
+ }
+ 
+@@ -578,6 +611,10 @@ bool DesktopWindowTreeHostWin::HasCapture() const {
+ }
+ 
+ void DesktopWindowTreeHostWin::SetZOrderLevel(ui::ZOrderLevel order) {
++  if (!BrowserCliAllowsPresentation(GetWidget(),
++                                    BrowserCliPresentationAction::kSetZOrder)) {
++    return;
++  }
+   z_order_ = order;
+   // Emulate the multiple window levels provided by other platforms by
+   // collapsing the z-order enum into kNormal = normal, everything else = always
+@@ -701,6 +738,10 @@ void DesktopWindowTreeHostWin::FrameTypeChanged() {
+ 
+ void DesktopWindowTreeHostWin::SetFullscreen(bool fullscreen,
+                                              int64_t target_display_id) {
++  if (!BrowserCliAllowsPresentation(GetWidget(),
++                                    BrowserCliPresentationAction::kFullscreen)) {
++    return;
++  }
+   auto weak_ptr = GetWeakPtr();
+   message_handler_->SetFullscreen(fullscreen, target_display_id);
+   if (!weak_ptr) {
+@@ -1205,6 +1246,8 @@ void DesktopWindowTreeHostWin::HandleDestroying() {
+ }
+ 
+ void DesktopWindowTreeHostWin::HandleDestroyed() {
++  BrowserCliReleaseWindowState(message_handler_ ? message_handler_->hwnd()
++                                                : nullptr);
+   if (!called_handle_destroying_ &&
+       base::FeatureList::IsEnabled(features::kHandleMissingWmDestroy)) {
+     // In anomalous destruction cases (such as external subclassing or
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 42fd0087..6ca669f0 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -77,6 +77,8 @@
+ #include "ui/latency/latency_info.h"
+ #include "ui/native_theme/native_theme_win.h"
+ #include "ui/views/views_delegate.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++#include "ui/views/widget/browser_cli_presentation_win.h"
+ #include "ui/views/widget/widget_hwnd_utils.h"
+ #include "ui/views/win/fullscreen_handler.h"
+ #include "ui/views/win/hwnd_message_handler_delegate.h"
+@@ -3260,6 +3262,20 @@ void HWNDMessageHandler::OnWindowPosChanging(WINDOWPOS* window_pos) {
+     window_pos->flags &= static_cast<unsigned int>(~SWP_SHOWWINDOW);
+   }
+ 
++  // Browser CLI: the only point that can stop an external SetWindowPos() (or
++  // an ungated ShowWindow()) from presenting a managed window. The shared
++  // policy decides; this code only strips the flag. Checked only when the
++  // flag is actually present so ordinary moves and resizes never consult the
++  // policy.
++  if ((window_pos->flags & SWP_SHOWWINDOW) &&
++      BrowserCliShouldSuppressWindowPosChange(hwnd())) {
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=showwindow-stripped"
++              << " window_id=" << BrowserCliWindowIdForHwnd(hwnd())
++              << " native=win-hwnd";
++    window_pos->flags &= static_cast<unsigned int>(~SWP_SHOWWINDOW);
++  }
++
+   if (window_pos->flags & SWP_HIDEWINDOW) {
+     SetDwmFrameExtension(DwmFrameState::kOff);
+   }
+@@ -3286,6 +3302,15 @@ void HWNDMessageHandler::OnWindowPosChanged(WINDOWPOS* window_pos) {
+     delegate_->HandleVisibilityChanged(false);
+   }
+   UpdateDwmFrame();
++  if (BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled()) {
++    // Observation only: record the final native visibility, never decide here.
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=window-pos-changed"
++              << " window_id=" << BrowserCliWindowIdForHwnd(hwnd())
++              << " flags=" << window_pos->flags
++              << " visible=" << (IsVisible() ? "yes" : "no")
++              << " native=win-hwnd";
++  }
+   SetMsgHandled(FALSE);
+ }
+ 
