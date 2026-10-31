@@ -1,0 +1,88 @@
+diff --git a/chrome/browser/browser_cli/user_explicit_presentation_win.cc b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+--- a/chrome/browser/browser_cli/user_explicit_presentation_win.cc
++++ b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+@@ -35,6 +35,7 @@
+ // widget, id 0) when no eligible window exists; the producer then fails closed
+ // instead of creating one.
+ struct ReusableWindow {
++  raw_ptr<BrowserWindowInterface> browser = nullptr;
+   raw_ptr<views::Widget> widget = nullptr;
+   uint64_t window_id = 0;
+   bool user_owned = false;
+@@ -91,6 +92,7 @@
+         const bool user_owned = policy->IsUserExplicitOwned(window_id);
+         if (!candidate.widget) {
+           // First eligible window in activation order: the fallback candidate.
++          candidate.browser = browser;
+           candidate.widget = widget;
+           candidate.window_id = window_id;
+           candidate.user_owned = user_owned;
+@@ -98,6 +100,7 @@
+         if (user_owned) {
+           // Never present some other background window when the user already
+           // owns one; take it and stop iterating.
++          candidate.browser = browser;
+           candidate.widget = widget;
+           candidate.window_id = window_id;
+           candidate.user_owned = true;
+@@ -126,6 +129,40 @@
+     return nullptr;
+   }
+   return profile_manager->GetProfileByPath(path_info.path);
++}
++
++// Presents a browser window through BrowserWindow::Show(), not only the views
++// Widget. Widget::Show() makes the HWND visible, but BrowserView::Show() is
++// what initializes/synchronizes the browser contents and their compositor
++// visibility; skipping it leaves a visible HWND with a black surface while the
++// page is fully alive (AX tree and CDP screenshots still work).
++bool PresentBrowserWindowForUserExplicitAction(BrowserWindowInterface* browser,
++                                               views::Widget* widget) {
++  ui::BaseWindow* window = browser ? browser->GetWindow() : nullptr;
++  if (!window) {
++    return views::BrowserCliPresentForUserExplicitAction(widget);
++  }
++  views::ScopedForegroundOrigin origin_scope(
++      views::ForegroundOrigin::kUserExplicit);
++  window->Show();
++  if (widget) {
++    widget->Show();
++  }
++  window->Activate();
++  if (window->IsVisible()) {
++    return true;
++  }
++  // STARTUPINFO's first ShowWindow can be swallowed (patch 030); the second
++  // BrowserView::Show()/Widget::Show() is a regular ShowWindow.
++  LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=producer"
++            << " transition=presentation-retry"
++            << " reason=browser-view-show-not-visible native=win-hwnd";
++  window->Show();
++  if (widget) {
++    widget->Show();
++  }
++  window->Activate();
++  return window->IsVisible();
+ }
+ 
+ }  // namespace
+@@ -174,8 +211,8 @@
+       // kUserExplicit around Show/Activate (and its one documented retry), so
+       // the shared policy grants per-window HUMAN ownership and the Windows
+       // host gate lets these native calls through.
+-      const bool presented = views::BrowserCliPresentForUserExplicitAction(
+-          reusable.widget);
++      const bool presented = PresentBrowserWindowForUserExplicitAction(
++          reusable.browser, reusable.widget);
+       if (presented) {
+         // The user now owns this window: cancel the pending assist timeout so
+         // its original deadline can never hide the window later.
+@@ -223,7 +260,7 @@
+       }
+       const uint64_t window_id = views::BrowserCliWindowIdForHwnd(
+           widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget());
+-      if (views::BrowserCliPresentForUserExplicitAction(widget)) {
++      if (PresentBrowserWindowForUserExplicitAction(created, widget)) {
+         GetForegroundAssistController()->OnLeaseReleasedByUserTakeover(
+             window_id);
+         LogProducerOutcome("handled", "window-created-and-presented",

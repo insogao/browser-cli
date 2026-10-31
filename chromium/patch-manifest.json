@@ -148,6 +148,16 @@
       "order": 29,
       "file": "029-input-ownership-api.patch",
       "sha256": "585f6de3e8fd9814ec36e7cdc70ad96a306bd7ece620624c3562939f2cc7d1d5"
+    },
+    {
+      "order": 30,
+      "file": "030-windows-explicit-show-first-show-retry.patch",
+      "sha256": "a5f97b9447334781fe3e088efe6a42cf3ea5c19fb80f954540d39636cf1e0ba0"
+    },
+    {
+      "order": 33,
+      "file": "033-windows-user-explicit-browserview-show.patch",
+      "sha256": "91321ed22d2358400b1080338b8bc84ee3491a3e256c5fb98cde38b93e28b4f8"
     }
   ]
 }
