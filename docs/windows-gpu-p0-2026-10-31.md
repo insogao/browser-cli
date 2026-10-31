@@ -1,7 +1,7 @@
 # GPU P0 跟踪：ExitProcess(3) 与 DComp 黑屏（2026-10-31）
 
-状态：**GPU-A 已定位实际退出调用方；GPU-B 进行中，尚未修复。**
-构建：`out/WinDev`，Chromium 156.0.8067.0，patch 001–033 applied。
+状态：**GPU-A 根因已修复并构建验证；GPU-B 的普通 GPU 进程路径已彩色，in-process 黑屏由 patch 034 修复并验证。**
+构建：`out/WinDev`，Chromium 156.0.8067.0；普通模式验证为 001–033 + `disable_fieldtrial_testing_config=true`；in-process 验证另加 patch 034。
 安全边界：独立临时 `--user-data-dir`；未使用 `--no-sandbox`；未禁用/修改系统输入法；未修改注册表/安全配置。
 
 ---
@@ -95,16 +95,25 @@ chrome_exe!wWinMain+0xc01
    - TSF 时刻存在稳定差异：`--in-process-gpu` 多 1 条线程 / 7 个句柄（5 Thread + 2 Event），
      尚未定位是谁改变了搜狗的时序/内部判断。
 
-### 1.5 GPU-A 结论
+### 1.5 GPU-A 结论与修复
 
-**GPU-A 的问题不是“GPU 进程崩溃”，而是 SogouPY 在 TSF TIP 激活期间主动调用
-`ExitProcess(3)`；`--in-process-gpu` 只是改变了进入 TSF 前的进程内部时序并规避了它。**
-下一步仍是 H5：定位那 +1 线程/7 句柄对应的对象，以及 TSF 激活期间线程调度差异；
-不能用禁用输入法、改安全配置或伪造进程身份来“修复”。
+**GPU-A 的直接调用方是 SogouPY；更上层根因是浏览器进程被 Chromium 的测试 field-trial
+配置启用了 ACG。** 非 Google 品牌构建默认应用
+`testing/variations/fieldtrial_testing_config.json`，其中 Windows 的
+`BrowserDynamicCodeDisabled` 在 TSF 初始化前设置 `ProcessDynamicCodePolicy`。搜狗 TIP
+的 `ImeInquire` 走 Xbyak JIT，`VirtualProtect(PAGE_EXECUTE_READWRITE)` 返回
+`ERROR_DYNAMIC_CODE_BLOCKED`，Xbyak 抛出 `Xbyak::Error(ERR_CANT_PROTECT=14)`，搜狗自己的
+handler 调用 `ExitProcess(3)`。`--in-process-gpu` 会让
+`MaybeBlockDynamicCodeForBrowserProcess` 提前返回，因此只是绕开 ACG，不是 GPU 根因。
+
+修复：`chromium/args-windows.gn` 加 `disable_fieldtrial_testing_config = true`（commit
+`fc5e294`），与 branded Chrome 行为一致。构建后 headless 基线 exit 0（修复前 exit 3）；
+普通 GPU 进程窗口用 WGC 抓到完整 9 色块/文字/动画。没有禁用 TSF、拦截 ExitProcess、
+修改搜狗 DLL 或降低安全机制。
 
 ---
 
-## 2. GPU-B：DComp 黑屏（进行中，已拿到第一组对照）
+## 2. GPU-B：DComp 黑屏（根因已定位，patch 034 已验证）
 
 ### 2.1 测试页与采集方法
 
@@ -141,19 +150,33 @@ DComp 路径（`--in-process-gpu`，不加 `--disable-direct-composition`）：
 | 窗口表面采样 | 同一 HWND（12587316）`PrintWindow`/屏幕均返回白色，**不是彩色页面**；仍不能作为通过判据 |
 | 判定 | 尚未取得非遮挡的彩色屏幕帧；不能把白色/空白当 PASS |
 
-### 2.3 当前结论与下一步
+### 2.3 当前结论
 
-- 已确认 DComp 路径的**窗口表面**是黑的，而 renderer/CDP 内容是彩色的；问题在
-  DComp/SwapChain/Present/Commit 或窗口 surface 绑定，不在 HTML 内容。
-- `--disable-direct-composition` 的屏幕比较仍受测试环境窗口遮挡影响；下一轮改用
-  DWM thumbnail / Windows Graphics Capture（或专用可见桌面）取得非遮挡帧。
-- 本轮 trace：stock Chrome 的 `gpu,viz,cc` trace 可采到事件；Browser CLI 的
-  CDP `Tracing.start` 当前返回 0 事件，需改用命令行 `--trace-startup` 或检查
-  in-process GPU 的 tracing 初始化。
-- 还没有拿到 Surface ID / `DCLayerTree::CommitAndClearPendingOverlays` / `DCompPresenter::Present`
-  的 Browser CLI 事件；这是下一轮 GPU-B 的第一优先级。
-- 修复必须同时回归后台遮挡截图（patch 027 的 copy/activation 路径），不能在修 DComp
-  时让隐藏页截图重新变旧。
+- 默认 DComp 路径的窗口表面黑是可信复现的；renderer/CDP 内容彩色，问题在输出/呈现链。
+- `--disable-direct-composition` 只是把黑变成空白白屏，不是页面内容，已从正常启动器移除。
+- 根因是 in-process GPU 缺少 `gl::InitializeDirectComposition()`；普通 GPU 进程路径不受影响。
+- patch 034 已对 in-process 路径做构建级修复；普通模式改用默认 GPU 进程。
+- 仍需回归 `--single-process` 等复用 in-process 初始化的路径，以及 overlay_info 的顺序问题。
 
-实验产物：`D:\c\logs\gpu-b-dcomp-2026-10-31T04-23-49-009Z`（HWND 4526636，黑）、`D:\c\logs\gpu-b-nodcomp-2026-10-31T04-24-22-096Z`（HWND 12587316，白）；
+### 2.4 可信 WGC 与 patch 034
+
+Agent B 用 Windows Graphics Capture（DWM 合成，遮挡不影响）重做了 A/B：
+
+- 官方 Chrome 156 `--in-process-gpu` 与 Browser CLI `--in-process-gpu` 的窗口表面
+  **hash 完全相同**（`14864142134207728000`，9 点近黑），CDP renderer 均彩色；
+- `--disable-direct-composition` 把黑变成纯白（hash `14905162914385234000`），
+  不是页面内容；该 flag 已从正常启动器移除；
+- 普通 GPU 进程路径（无 `--in-process-gpu`）WGC 彩色，窗口有
+  `Intermediate D3D Window`，证明正常模式可以直接用标准 GPU 进程 + DComp；
+- 根因：`GpuInit::InitializeInProcess()` 未调用 `gl::InitializeDirectComposition()`，
+  只有独立 GPU 进程的 `GpuInit::Initialize()` 调用；`DCompPresenter` 无法创建，
+  fallback 不向窗口呈现。
+- patch 034 在 `InitializeInProcess()` 补上同一初始化；构建后 `bcli-dcomp` WGC
+  出现 `Intermediate D3D Window`（pid==浏览器 pid），3 帧 294/296/292 unique colors，
+  页面彩色；CDP hidden/bottom 截图仍彩色。
+- 仍未验证/需注意：`InitializePlatformOverlaySettings()` 在补丁前执行，
+  overlay_info.direct_composition 可能为 false；`--single-process` 等复用路径需单独回归。
+
+实验产物：`D:/c/logs/gpu-b2/bcli-dcomp-postpatch`（patch 034，彩色）、
+`D:/c/logs/gpu-b2/bcli-gpuproc-postargs`（普通 GPU 进程，彩色）；
 本文件只记录结论和证据路径。
