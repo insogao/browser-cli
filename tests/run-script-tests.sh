@@ -16,6 +16,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 PASS=0
 FAIL=0
+HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
+macos_only() { [ "$HOST_OS" = "Darwin" ]; }
+skip_macos() { printf 'SKIP  %s (macOS release/preflight only; see docs/windows-build-gates-2026-10-31.md)\n' "$*"; }
 ok()  { PASS=$((PASS + 1)); printf 'PASS  %s\n' "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL  %s\n' "$*"; }
 
@@ -75,6 +78,7 @@ for s in preflight checkout configure build verify-phase1; do
   expect_rc 0 "$s --dry-run (fresh host)" -- env CHROMIUM_ROOT="$FRESH" "$SCRIPTS/$s.sh" --dry-run
 done
 
+if macos_only; then
 echo "== 4. checkout dry-run shows pinned revision + revision-aware sync =="
 OUT="$(env CHROMIUM_ROOT="$FRESH" "$SCRIPTS/checkout.sh" --dry-run 2>&1)"
 if printf '%s' "$OUT" | grep -q 'revision src@7d0f28c30d1c'; then ok "dry-run shows gclient sync --revision src@<VERSION rev>"; else bad "dry-run missing revision-aware gclient sync"; fi
@@ -85,6 +89,11 @@ echo "== 5. verify-phase1 dry-run documents strict HEAD rule =="
 OUT="$(env CHROMIUM_ROOT="$FRESH" "$SCRIPTS/verify-phase1.sh" --dry-run 2>&1)"
 if printf '%s' "$OUT" | grep -q 'HEAD mismatch is FAIL by default'; then ok "dry-run documents HEAD mismatch FAIL"; else bad "dry-run does not document HEAD mismatch FAIL"; fi
 
+else
+  skip_macos "macOS checkout/verify-phase1 dry-run checks"
+fi
+
+if macos_only; then
 echo "== 6. runtime disk breaker hard floor (25 GiB) =="
 expect_fail_msg "DISK_MIN_GIB=24 rejected" "hard floor" -- env DISK_MIN_GIB=24 "$SCRIPTS/preflight.sh" --dry-run
 expect_fail_msg "DISK_MIN_GIB=0 DISK_MIN_FRESH_GIB=0 rejected" "hard floor" -- env DISK_MIN_GIB=0 DISK_MIN_FRESH_GIB=0 "$SCRIPTS/preflight.sh" --dry-run
@@ -95,10 +104,15 @@ expect_rc 0 "DISK_MIN_GIB=25 DISK_MIN_FRESH_GIB=65 accepted" -- env DISK_MIN_GIB
 expect_rc 0 "DISK_MIN_GIB=30 (raised) accepted" -- env DISK_MIN_GIB=30 DISK_MIN_FRESH_GIB=65 "$SCRIPTS/checkout.sh" --dry-run
 expect_rc 0 "DISK_MIN_GIB=80 DISK_MIN_FRESH_GIB=120 accepted" -- env DISK_MIN_GIB=80 DISK_MIN_FRESH_GIB=120 "$SCRIPTS/build.sh" --dry-run
 
+else
+  skip_macos "macOS disk hard-floor checks"
+fi
+
 echo "== 7. build.sh has no watchdog bypass =="
 expect_rc nonzero "build.sh --no-watchdog rejected" -- "$SCRIPTS/build.sh" --no-watchdog
 if "$SCRIPTS/build.sh" --help | grep -qi "no-watchdog"; then bad "help advertises --no-watchdog"; else ok "help does not advertise --no-watchdog"; fi
 
+if macos_only; then
 echo "== 8. checkout --resume rejects HEAD != VERSION before network =="
 FAKE="$TMP/fake/chromium"
 make_fake_checkout "$FAKE"
@@ -114,6 +128,10 @@ mkdir -p "$FAKE2/src/out/Dev"
 cp "$REPO_ROOT/chromium/args.gn" "$FAKE2/src/out/Dev/args.gn"
 expect_fail_msg "check-only fails on HEAD != VERSION" "reproducibility FAIL" -- env CHROMIUM_ROOT="$FAKE2" "$SCRIPTS/verify-phase1.sh" --check-only
 expect_rc 0 "check-only --allow-tip passes as explicit opt-out" -- env CHROMIUM_ROOT="$FAKE2" "$SCRIPTS/verify-phase1.sh" --check-only --allow-tip
+
+else
+  skip_macos "macOS checkout/verify HEAD checks"
+fi
 
 echo "== 10. real checkout read-only revision check (skipped if absent) =="
 if [ -d "$HOME/dev/chromium/src/.git" ]; then
@@ -268,6 +286,7 @@ else
   printf 'SKIP  sign-browser-cli component-dylib plan (no out dir)\n'
 fi
 
+if macos_only; then
 echo "== 15. product icon generation (static) =="
 ICONS="$SCRIPTS/generate-icons.sh"
 expect_rc 0 "generate-icons --help" -- "$ICONS" --help
@@ -289,6 +308,10 @@ if [ -f "$REPO_ROOT/assets/branding/browser-cli-logo-source.png" ]; then
   ok "approved logo source present"
 else
   bad "approved logo source missing"
+fi
+
+else
+  skip_macos "macOS .icns/Assets.car icon checks"
 fi
 
 echo "== 16. Phase 2 HTTPS background-network check (static) =="
@@ -778,6 +801,7 @@ if grep -q 'shell_quote "\$BIN"' "$HUMAN_CHECK" \
 else
   bad "runbook launch command still embeds raw paths"
 fi
+if macos_only; then
 SPACY_BIN="/tmp/bc dir/Browser CLI.app/Contents/MacOS/Browser CLI"
 SPACY_PROFILE="/tmp/bc dir/pro 'file'/profile"
 SPACY_LOG="/tmp/bc dir/log file.log"
@@ -812,6 +836,10 @@ then
   ok "quoted paths round-trip to the exact argv (spaces + embedded single quote)"
 else
   bad "quoted paths do not round-trip to the exact argv"
+fi
+
+else
+  skip_macos "macOS .app/--use-mock-keychain argv check"
 fi
 
 echo "== 24. CLI explicit show producer classification (deterministic fixtures; no browser) =="
@@ -995,6 +1023,7 @@ if grep -q 'assist-lease-granted' "$DRYRUN_OUT" \
 else
   bad "runbook misses per-case evidence or the ABORT step"
 fi
+if macos_only; then
 CHROMIUM_ROOT="$TMP/assist-fake-chromium" expect_rc nonzero \
   "prepare refuses a missing/ad-hoc app (Developer ID preflight)" -- \
   env CHROMIUM_ROOT="$TMP/assist-fake-chromium" "$ASSIST_CHECK" prepare --evidence "$TMP/assist-neg"
@@ -1002,6 +1031,10 @@ if grep -q 'signed app binary not found' "$TMP/out.txt"; then
   ok "missing app fails closed with a clear message"
 else
   bad "missing app did not fail closed"
+fi
+
+else
+  skip_macos "macOS Developer ID preflight checks"
 fi
 
 ASSIST_FIX="$TMP/assist-fixtures"

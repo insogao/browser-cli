@@ -29,4 +29,15 @@
   2. 把上述 15 项移到 macOS `release-preflight`，在 macOS CI 上保持强制执行；
   3. Windows CI 对 macOS-only 项输出明确 `SKIP (requires macOS)`，不得输出 PASS。
 
+## 已落地（2026-10-31）
+
+`tests/run-script-tests.sh` 已加入宿主平台分流：
+
+- `HOST_OS="$(uname -s)"`；仅 Darwin 执行 macOS checkout/verify、磁盘阈值、`.icns`、
+  macOS `.app` argv、Developer ID preflight 检查；
+- 其他宿主输出 `SKIP  ... (macOS release/preflight only)`，**不输出 PASS**；
+- 断言本身未修改，macOS CI 仍会执行原始检查；
+- Windows 结果：`223 passed, 0 failed`，另有明确 SKIP；
+- 仍需补一个 macOS release-preflight 入口，把这些检查在 macOS CI 上强制跑起来。
+
 本轮没有把 15 项改成 PASS，也没有删除 macOS 检查。
