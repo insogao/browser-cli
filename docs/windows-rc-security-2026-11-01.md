@@ -147,9 +147,13 @@
 | Chrome storage util (chrome-default/37248) | Untrusted | 0 | 1 | 1 | 1 | 1 | 1 | 0 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 19/3 | Valid |
 | Edge storage util (edge-default/24560) | Untrusted | 0 | 1 | 1 | 1 | 1 | 1 | 0 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 20/3 | Valid |
 
-`STRICT-H`（strict handle checks）、`REDIR-TRUST`、`EAF/IAT/ROP-*`（payload
-restriction）在以上所有进程均为 0；`SSP` 为 1 的进程见上表；`UserPointer` 对所有进程
-都是 `UNAVAILABLE(50, ERROR_NOT_SUPPORTED)`；`SEHOP` 为 `NO-API`（见 §2.5）。
+补充字段（与上表同一批快照）：`STRICT-H`（strict handle checks）在
+GPU/renderer/storage（以及 sandboxed network）为 1，browser 与默认 network utility 为 0；
+`SideChannelIsolation` raw=`0x1`（SmtBranchTargetIsolation）同样只出现在
+GPU/renderer/storage；`SystemCallFilter` / `PayloadRestriction`（EAF/IAT/ROP）/
+`RedirectionTrust` 在以上所有进程均为 0；`SSP` 为 1 的进程见上表。`UserPointer` 对所有
+进程都是 `UNAVAILABLE(50, ERROR_NOT_SUPPORTED)`；`SEHOP` 为 `NO-API`（见 §2.5）。
+BCLI、Chrome、Edge 在这些补充字段上也逐项一致。
 
 ### 2.2 network service sandbox 打开后的总表
 
