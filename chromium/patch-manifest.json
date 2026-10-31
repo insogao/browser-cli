@@ -160,6 +160,11 @@
       "sha256": "ea19872405d88055967d5a44024978e10eaef39fb97ef09270b9bb01ad41159a"
     },
     {
+      "order": 32,
+      "file": "032-human-input-latch-30s.patch",
+      "sha256": "9ba00d82ff9047fe56dbd05ea6f6062e3d804afbc1ce194a16f03ee60c5cadeb"
+    },
+    {
       "order": 33,
       "file": "033-windows-user-explicit-browserview-show.patch",
       "sha256": "91321ed22d2358400b1080338b8bc84ee3491a3e256c5fb98cde38b93e28b4f8"
