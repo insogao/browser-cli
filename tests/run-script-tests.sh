@@ -1670,6 +1670,80 @@ else
 fi
 
 echo
+echo "== 31. long-run managed/hidden presentation stability harness (static; no browser) =="
+HS_TOOL="$REPO_ROOT/tests/tools/hidden-stability-cdp-check.py"
+HS_FIXTURES="$REPO_ROOT/tests/fixtures/hidden-stability"
+HS_EXT="$REPO_ROOT/tests/tools/extensions/browser-cli-hidden-stability"
+HS_PY=python3
+"$HS_PY" -c 'import sys' >/dev/null 2>&1 || HS_PY=python
+if "$HS_PY" -c 'import sys' >/dev/null 2>&1; then
+  if "$HS_PY" -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" \
+       "$HS_TOOL" 2>"$TMP/out.txt"; then
+    ok "hidden-stability harness python syntax"
+  else
+    bad "hidden-stability harness python syntax"
+    sed 's/^/      /' "$TMP/out.txt"
+  fi
+  if "$HS_PY" -c "import json,sys; m=json.load(open(sys.argv[1],encoding='utf-8')); assert m.get('manifest_version')==3; assert m.get('background',{}).get('service_worker')" \
+       "$HS_EXT/manifest.json" 2>"$TMP/out.txt"; then
+    ok "hidden-stability extension fixture is MV3 with a service worker"
+  else
+    bad "hidden-stability extension fixture manifest is invalid"
+    sed 's/^/      /' "$TMP/out.txt"
+  fi
+  expect_rc 0 "hidden-stability --help" -- "$HS_PY" "$HS_TOOL" --help
+else
+  printf 'SKIP  hidden-stability python syntax/help (python unavailable)\n'
+fi
+for f in dynamic.html child.html; do
+  if [ -s "$HS_FIXTURES/$f" ]; then ok "hidden-stability fixture $f exists"; else bad "hidden-stability fixture $f missing/empty"; fi
+done
+for f in page.html page.js sw.js manifest.json; do
+  if [ -s "$HS_EXT/$f" ]; then ok "hidden-stability extension file $f exists"; else bad "hidden-stability extension file $f missing/empty"; fi
+done
+if grep -q -- '--browser-cli-background-presentation' "$HS_TOOL" \
+   && grep -q -- '--user-data-dir=' "$HS_TOOL" \
+   && grep -q 'tempfile.mkdtemp' "$HS_TOOL" \
+   && grep -q 'win_job.launch' "$HS_TOOL" \
+   && grep -q 'Page.captureScreenshot' "$HS_TOOL" \
+   && grep -q 'fromSurface' "$HS_TOOL" \
+   && grep -q 'matches_paint_count' "$HS_TOOL" \
+   && grep -q 'distinct_colours' "$HS_TOOL" \
+   && grep -q 'layer_tree_view.cc:554' "$HS_TOOL" \
+   && grep -q 'Target.targetCrashed' "$HS_TOOL" \
+   && grep -q 'Inspector.targetCrashed' "$HS_TOOL" \
+   && grep -q 'managed-default' "$HS_TOOL" \
+   && grep -q 'normal-hidden' "$HS_TOOL" \
+   && grep -q 'no-paint' "$HS_TOOL" \
+   && grep -q 'release-like' "$HS_TOOL" \
+   && grep -q 'windows-only' "$HS_TOOL"; then
+  ok "hidden-stability harness covers managed/normal states, crash detection, marker freshness, and isolated launch"
+else
+  bad "hidden-stability harness lost a required scenario/crash/freshness/isolation marker"
+fi
+if grep -qE 'taskkill|pkill|killall|Stop-Process|--no-sandbox|Page\.reload' "$HS_TOOL"; then
+  bad "hidden-stability harness contains a forbidden global-kill/restart/flag pattern"
+else
+  ok "hidden-stability harness has no global kill, page reload, or --no-sandbox"
+fi
+if grep -q '__hsProbe' "$HS_FIXTURES/dynamic.html" \
+   && grep -q '__hsBump' "$HS_FIXTURES/dynamic.html" \
+   && grep -q 'postMessage' "$HS_FIXTURES/child.html" \
+   && grep -q 'requestAnimationFrame' "$HS_FIXTURES/dynamic.html" \
+   && grep -q "getContext('webgl" "$HS_FIXTURES/dynamic.html"; then
+  ok "hidden-stability fixtures cover marker/bump, rAF, WebGL, and cross-frame postMessage"
+else
+  bad "hidden-stability fixtures lost marker/bump/rAF/WebGL/postMessage coverage"
+fi
+if grep -q 'chrome.runtime.sendMessage' "$HS_EXT/page.js" \
+   && grep -q 'setInterval' "$HS_EXT/page.js" \
+   && grep -q '__hsProbe' "$HS_EXT/page.js"; then
+  ok "hidden-stability extension page exercises 1 Hz messaging + repaint + probe"
+else
+  bad "hidden-stability extension page lost its 1 Hz messaging/repaint/probe path"
+fi
+
+echo
 echo "== 99. chrome.browserCli allowlist contract =="
 ALLOWLIST_CHECK="$REPO_ROOT/tests/check-extension-allowlist.py"
 if [ -f "$ALLOWLIST_CHECK" ] && command -v python3 >/dev/null 2>&1; then

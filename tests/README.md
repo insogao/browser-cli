@@ -632,6 +632,50 @@ fixture/静态证据；**没有运行时证据，也没有可执行入口**。**
 7. 逐窗口截图：待 Gate C 解除 BLOCKED 后单独验收（本契约不覆盖）；
 8. CPU/GPU/内存与长期运行数据：PROJECT-PROGRESS F 区独立条目，不在本契约内。
 
+## `hidden-stability-cdp-check.py`（Windows 长驻后台/隐藏页面稳定性 harness；2026-11-01）
+
+复现并量化长期驻留窗口的 **presentation-callback 累积**：managed 窗口在原生
+`ShowWindow` 被策略剥离后仍是**逻辑可见**（`document.visibilityState=visible`、rAF/定时器运行），
+渲染进程持续提交 frame，但 viz 永不 present；`LayerTreeView::presentation_callbacks_` 到 60 条
+（第 61 条）触发 `layer_tree_view.cc:554` DCHECK，**只杀死 renderer，浏览器进程仍存活**。
+真实 BrowserPilot popup（`dist/popup/index.html`）在 59.8 s 复现；`--freshness` 用页面 marker
+色块与 DOM 计数比对，**绝不把白图/单像素当作成功**；`--screenshot-every` 只作为“截图驱动”
+对照，不当作修复。
+
+```sh
+# 复现：managed 默认窗口（模型可见、原生隐藏）+ 1 Hz 文本更新
+python tests/tools/hidden-stability-cdp-check.py \
+  --chrome D:/c/src/out/WinDev/chrome.exe \
+  --scenario managed-default --content text --windows 1 \
+  --duration 80 --mode diagnostic --expect crash \
+  --evidence-dir D:/c/logs/hs-managed-text
+
+# 对照：模型与原生都隐藏（先 show 再 SW_HIDE），180 s + 前后截图
+python tests/tools/hidden-stability-cdp-check.py ... \
+  --scenario normal-hidden --content text,canvas --windows 2 \
+  --duration 180 --freshness both --expect stable
+
+# 真实 popup（另一 worktree 的 dist，只读，不成为本仓库依赖）
+python tests/tools/hidden-stability-cdp-check.py ... --content extension \
+  --extension-dir D:/work/wt/bp-a-r1r2/dist --extension-page popup/index.html
+```
+
+内容：`text` / `raf` / `canvas` / `webgl` / `extension` / `iframe`（跨站 OOPIF）/ `static` /
+`no-paint`。场景：`managed-default`、`managed-hidden`、`managed-minimized`、`normal-visible`、
+`normal-hidden`、`normal-minimized`、`normal-occluded`。注意：当前构建中
+`managed-hidden`/`managed-minimized` 只是在**从未 show 的** managed 窗口上调用
+`SW_HIDE`/`SW_MINIMIZE`，不会改变模型可见性，因此**仍会复现**；真正的模型隐藏对照是
+`normal-hidden`（先 show 再 hide）。
+
+证据目录：`result.json`（配置/目标/崩溃/内存/截图/trace）、`samples.jsonl`（每轮 probe +
+native + 进程内存）、`events.jsonl`（CDP 事件/日志）、`chrome.log`（diagnostic）、
+`screenshots/*.png`、`summary.txt`。崩溃判定同时接受 `Target/Inspector.targetCrashed` 和
+`chrome.log` 中的精确 DCHECK 行；`--expect crash|stable` 控制退出码。
+
+约束：独立 `tempfile.mkdtemp` profile；不使用 `--no-sandbox`；进程只通过 `win_job` 的
+Job Object 回收；不做周期重启/刷新；不做 show/activate 前台补救。静态门禁为
+`tests/run-script-tests.sh` 第 31 组。
+
 ## `check-browser-launch-hygiene.sh`（静态门禁，强制）
 
 扫描 `tests/ scripts/ cli/ launcher/ browserpilot-integration/` 下所有会启动
