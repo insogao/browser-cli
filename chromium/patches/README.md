@@ -72,6 +72,8 @@ python3 scripts/apply-patches.py --apply --dry-run --checkout /path/to/chromium/
 
 | `035-gpu-inprocess-overlay-info-after-dcomp.patch` | Windows GPU-B（**in-process DComp 后收集 overlay 信息**） | `InitializeInProcess()` 中把 `InitializePlatformOverlaySettings()` 从 DComp 初始化之前移到之后，与独立 GPU 进程顺序一致；否则 in-process 已出现 DComp 子窗口，但 `GPUInfo.overlay_info.direct_composition/supports_overlays` 仍为 false/false。 | **Windows 构建/实测（2026-11-01，out/WinDev）**：patch 035 应用后 `ninja -C out/WinDev -j 6 chrome` exit 0；WGC in-process 3 帧 293/290/295 colors；CDP `SystemInfo.getInfo` 的 `directComposition=true`、`supportsOverlays=true`。sha256 `2108bcb2261ddc9926dfe08f5d41c0badc3ebed73507ba0ec6cebae582c95cb2`，1 文件、41+/2-。**未回归**：video overlay/HDR、D3D12/Graphite、`--single-process`（后者在 extensions_client 处失败，早于 GPU 初始化）。 |
 
+| `036-presentation-callback-lifecycle.patch` | Windows hidden renderer（**Blink failed-presentation callback 生命周期**） | 不删除 DCHECK、不扩大 buffer；队列达到压力阈值时，仅用 failed FrameTimingDetails 完成与失败 frame token **相同**的 callback，frame sink 丢失时完成 pending callbacks，并用有界 remembered-failure FIFO 处理反馈先于注册的竞态。Viz 对 superseded/replaced/rejected frame 已有失败反馈，不伪造 undrawn 最新帧失败。 | **WinRelease 实测（2026-11-01）**：release-like 矩阵 210/210 PASS（含 RC-A2/A3/A7 AI 原始输入、RC-A8 真实 Sogou IME）；21 分钟 8 窗口 managed-hidden soak：8/8 alive、model-visible、0 crash、0 FATAL、VERDICT STABLE。sha256 `da5563da0a28dd5a21001832bae1e4c9bd3398db95c284e0cfa78d679ca054fc`，3 Blink 文件（含 unittest）。 |
+
 
 `012` 校验（24E History 原生菜单来源传播）：sha256
 `d68f34f764aaeed74df7c6a3192e6b3a895b4c346a2fb4f1987d1f01a2475d79`；仅修改

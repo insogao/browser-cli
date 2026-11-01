@@ -178,6 +178,11 @@
       "order": 35,
       "file": "035-gpu-inprocess-overlay-info-after-dcomp.patch",
       "sha256": "2108bcb2261ddc9926dfe08f5d41c0badc3ebed73507ba0ec6cebae582c95cb2"
+    },
+    {
+      "order": 36,
+      "file": "036-presentation-callback-lifecycle.patch",
+      "sha256": "da5563da0a28dd5a21001832bae1e4c9bd3398db95c284e0cfa78d679ca054fc"
     }
   ]
 }
