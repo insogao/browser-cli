@@ -158,12 +158,12 @@ headless 仅用于免窗口测量；不使用 `--no-sandbox`/`--in-process-gpu`/
 
 | 场景 | 进程数 | browser | GPU | renderer | network | storage | 模块 b/g/r/n | DevTools ms | page ready ms |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| WinRelease 默认 | 8 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Medium AC0 CIG0 ACG0 | Untrusted CIG0x5 ACG1 | 141/3, 70/7, 23/5, 48/5 | 384 | 780 |
-| WinRelease + NetworkServiceSandbox | 9 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | **Low AC1 CIG0x5 ACG1** | Untrusted CIG0x5 ACG1 | 142/3, 70/7, 23/5, 42/5 | 402 | 785 |
-| WinDev 默认（component） | 9 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Medium AC0 CIG0 ACG0 | Untrusted CIG0x5 ACG1 | 631/493, 559/497, 513/495, 538/495 | 629 | 1254 |
-| WinDev + NetworkServiceSandbox | 9 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Low AC1 CIG0x5 ACG1 | Untrusted CIG0x5 ACG1 | 631/493, 559/497, 513/495, 532/495 | 612 | 1264 |
-| 官方 Chrome 默认 | 13 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Medium AC0 CIG0 ACG0 | Untrusted CIG0x5 ACG1 | 141/5, 69/6, 20/3, 44/3 | 338 | 579 |
-| 官方 Chrome + NetworkServiceSandbox | 12 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Low AC1 CIG0x5 ACG1 | Untrusted CIG0x5 ACG1 | 142/5, 69/6, 20/3, 39/3 | 323 | 646 |
+| WinRelease 默认 | 8–9 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Medium AC0 CIG0 ACG0 | Untrusted CIG0x5 ACG1 | 141/3, 70/7, 23/5, 48/5 | 384 | 780 |
+| WinRelease + NetworkServiceSandbox | 8–9 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | **Low AC1 CIG0x5 ACG1** | Untrusted CIG0x5 ACG1 | 142/3, 70/7, 23/5, 42/5 | 402 | 785 |
+| WinDev 默认（component） | 9–10 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Medium AC0 CIG0 ACG0 | Untrusted CIG0x5 ACG1 | 631/493, 559/497, 513/495, 538/495 | 629 | 1254 |
+| WinDev + NetworkServiceSandbox | 8–11 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Low AC1 CIG0x5 ACG1 | Untrusted CIG0x5 ACG1 | 631/493, 559/497, 513/495, 532/495 | 612 | 1264 |
+| 官方 Chrome 默认 | 10–13 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Medium AC0 CIG0 ACG0 | Untrusted CIG0x5 ACG1 | 141/5, 69/6, 20/3, 44/3 | 338 | 579 |
+| 官方 Chrome + NetworkServiceSandbox | 12–13 | Medium AC0 CIG0 ACG0 | Low CIG0x5 ACG0 | Untrusted CIG0x5 ACG0 | Low AC1 CIG0x5 ACG1 | Untrusted CIG0x5 ACG1 | 142/5, 69/6, 20/3, 39/3 | 323 | 646 |
 
 “模块 b/g/r/n” = 进程加载模块总数/来自安装目录的模块数（browser/GPU/renderer/network）。
 CIG/ACG 为 `GetProcessMitigationPolicy` 的 raw 值（`0x5` = MicrosoftSignedOnly +
