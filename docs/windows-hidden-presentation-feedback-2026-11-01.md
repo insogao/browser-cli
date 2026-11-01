@@ -3,7 +3,7 @@
 日期：2026-11-01
 范围：managed 窗口“模型可见、原生不呈现”时，renderer 的 presentation callback
 累积到 61/60 并触发 DCHECK 的生命周期分析、最小安全补丁、不变量与测试矩阵。
-配套补丁：`chromium/patches/034-presentation-callback-lifecycle.patch`
+配套补丁：`chromium/patches/038-presentation-callback-lifecycle.patch`
 （3 文件；仅 Blink，无 Viz 改动）。
 
 状态：**提案已落盘；本 worktree 未编译、未运行**。共享源码 `D:/c/src` 只读，
@@ -151,7 +151,7 @@ Task trace: blink::ReportTimeSwapPromise::DidSwap
 
 ---
 
-## 3. 补丁：`034-presentation-callback-lifecycle.patch`
+## 3. 补丁：`038-presentation-callback-lifecycle.patch`
 
 只改 Blink 三个文件：
 
