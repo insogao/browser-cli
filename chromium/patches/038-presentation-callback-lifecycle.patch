@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc
-index 260a705..349c444 100644
+index 260a705e..47047a9b 100644
 --- a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc
 +++ b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc
 @@ -55,6 +55,14 @@ class Layer;
@@ -95,7 +95,7 @@ index 260a705..349c444 100644
  
  void LayerTreeView::ScheduleAnimationForWebTests() {
    if (!delegate_)
-@@ -518,6 +571,17 @@ void LayerTreeView::ScheduleAnimationForWebTests() {
+@@ -518,6 +571,15 @@ void LayerTreeView::ScheduleAnimationForWebTests() {
  void LayerTreeView::AddPresentationCallback(
      uint32_t frame_token,
      base::OnceCallback<void(const viz::FrameTimingDetails&)> callback) {
@@ -105,15 +105,13 @@ index 260a705..349c444 100644
 +  // forever.
 +  if (std::optional<viz::FrameTimingDetails> failed_details =
 +          TakeRememberedFailedPresentationCallbacks(frame_token)) {
-+    TRACE_EVENT_INSTANT1("viz", "PresentationCallbackCompletedLateFailure",
-+                         "frame_token", frame_token);
 +    std::move(callback).Run(*failed_details);
 +    return;
 +  }
    AddCallback(frame_token, std::move(callback), presentation_callbacks_);
  }
  
-@@ -554,4 +618,88 @@ void LayerTreeView::AddCallback(
+@@ -554,4 +616,83 @@ void LayerTreeView::AddCallback(
              cc::PresentationTimeCallbackBuffer::kMaxBufferSize);
  }
  
@@ -134,8 +132,6 @@ index 260a705..349c444 100644
 +    std::vector<base::OnceCallback<void(const viz::FrameTimingDetails&)>>
 +        callbacks = std::move(it->second);
 +    presentation_callbacks_.erase(it);
-+    TRACE_EVENT_INSTANT1("viz", "PresentationCallbacksCompletedOnFailure",
-+                         "frame_token", frame_token);
 +    for (auto& callback : callbacks) {
 +      std::move(callback).Run(failed_details);
 +    }
@@ -188,12 +184,9 @@ index 260a705..349c444 100644
 +  // presentation callback.
 +  base::circular_deque<std::pair<
 +      uint32_t,
-+      std::vector<base::OnceCallback<void(const viz::FrameTimingDetails&)>>>
++      std::vector<base::OnceCallback<void(const viz::FrameTimingDetails&)>>>>
 +      callbacks = std::move(presentation_callbacks_);
 +  presentation_callbacks_.clear();
-+  TRACE_EVENT_INSTANT1("viz", "PresentationCallbacksCompletedOnFrameSinkLoss",
-+                       "frame_token_count",
-+                       static_cast<int>(callbacks.size()));
 +  for (auto& entry : callbacks) {
 +    for (auto& callback : entry.second) {
 +      std::move(callback).Run(failed_details);
@@ -203,7 +196,7 @@ index 260a705..349c444 100644
 +
  }  // namespace blink
 diff --git a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h
-index 4c5723d..b85a90b 100644
+index 4c5723d1..b85a90b2 100644
 --- a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h
 +++ b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h
 @@ -7,6 +7,9 @@
@@ -294,7 +287,7 @@ index 4c5723d..b85a90b 100644
    base::circular_deque<std::pair<
        uint32_t,
 diff --git a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc
-index 61104c0..167bb38 100644
+index 61104c05..167bb38d 100644
 --- a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc
 +++ b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc
 @@ -416,6 +416,277 @@ TEST(LayerTreeViewTest, RunPresentationCallbackOnSuccess) {
