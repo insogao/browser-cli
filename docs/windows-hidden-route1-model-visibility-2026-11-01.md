@@ -21,7 +21,7 @@ route 0 根因与 harness：
 
 ## 1. 结论摘要
 
-- **补丁**：`chromium/patches/proposed/034-managed-window-contents-visibility.patch`
+- **补丁**：`chromium/patches/proposed/037-managed-window-contents-visibility.patch`
   （2 文件，+124/−0；`chrome/browser/ui/views/frame/browser_view.{h,cc}`）。
 - **机制**：在 `BrowserView::Show()`（以及 `ShowInactive()`、`OnActiveTabChanged()`）
   之后，如果“该窗口是 managed 后台窗口 + widget 仍不可见 + 同一条 policy 判定
@@ -132,7 +132,7 @@ chrome 产品层能看到“Show 请求已经发生、但 widget 仍不可见”
 
 ## 3. 提案 patch 034 的实现
 
-文件：`chromium/patches/proposed/034-managed-window-contents-visibility.patch`
+文件：`chromium/patches/proposed/037-managed-window-contents-visibility.patch`
 （**未应用**到 `D:/c/src`；`git apply --check` 通过）。
 
 ### 3.1 代码点
@@ -557,7 +557,7 @@ tests/run-script-tests.sh
 
 | 文件 | 说明 |
 | --- | --- |
-| `chromium/patches/proposed/034-managed-window-contents-visibility.patch` | 提案补丁（+124/−0，2 文件；未应用） |
+| `chromium/patches/proposed/037-managed-window-contents-visibility.patch` | 提案补丁（+124/−0，2 文件；未应用） |
 | `chromium/patches/proposed/README.md` | 提案状态与应用/转正流程 |
 | `docs/windows-hidden-route1-model-visibility-2026-11-01.md` | 本文档 |
 | `tests/tools/hidden-stability-cdp-check.py` | route 0 harness + route 1 选项（`--assert-model`、`--assert-transitions`、`--navigate-every`、`--dom-every`、`--human-takeover-at/--human-hide-at/--human-retakeover-at`） |
