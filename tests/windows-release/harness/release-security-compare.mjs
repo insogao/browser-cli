@@ -338,6 +338,8 @@ function markdownSummary(runs) {
 }
 
 async function runOne(scenario, exe, featureArgs, repeat) {
+  // Normalize to backslashes for Win32_Process.ExecutablePath comparisons.
+  const exeWin = path.win32.normalize(exe);
   const runDir = path.join(ROOT, scenario, `run-${repeat}`);
   fs.mkdirSync(runDir, { recursive: true });
   const profileRoot = path.join(ROOT, "profiles");
@@ -347,6 +349,7 @@ async function runOne(scenario, exe, featureArgs, repeat) {
     scenario,
     repeat,
     exe,
+    exeWin,
     profile,
     startedAt: nowIso(),
     args: [],
@@ -384,7 +387,7 @@ async function runOne(scenario, exe, featureArgs, repeat) {
           "-RootPidFile",
           rootPidFile,
           "-ExePath",
-          exe,
+          exeWin,
           "-DurationMs",
           "10000",
           "-IntervalMs",
@@ -557,7 +560,7 @@ async function runOne(scenario, exe, featureArgs, repeat) {
           "-RootPid",
           String(child.pid),
           "-ExpectedExe",
-          exe,
+          exeWin,
           "-NotBeforeUtc",
           launchIso,
         ],
@@ -584,7 +587,7 @@ async function runOne(scenario, exe, featureArgs, repeat) {
             "-RootPid",
             String(child.pid),
             "-ExpectedExe",
-            exe,
+            exeWin,
             "-NotBeforeUtc",
             launchIso,
           ],

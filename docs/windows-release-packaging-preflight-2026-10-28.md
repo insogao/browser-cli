@@ -121,7 +121,34 @@ bash scripts/preflight-windows-release.sh \
 
 ---
 
-## 4. 当前明确不能做的事
+## 4. 本轮实测（out/WinRelease，2026-11-01）
+
+`scripts/preflight-windows-release.sh --checkout D:/c/src --artifact D:/c/src/out/WinRelease
+--mode internal --out-json D:/c/logs/winrelease/preflight-winch.json`：
+
+| 项 | 结果 |
+| --- | --- |
+| artifactClass | `internal-unsigned-test-build` |
+| releasable | **false** |
+| 构建形态 | `is_component_build=false` PASS；`is_official_build=false` WARN |
+| 版本资源 | ProductName `Browser CLI`，FileVersion/ProductVersion `156.0.8067.0` PASS |
+| Authenticode | `chrome.exe` NotSigned、`chrome.dll` NotSigned（internal 模式接受，blocker 记录） |
+| 私钥材料 | 无 |
+| SHA-256 清单 | 52 个 exe/dll 文件 |
+| PE 加固 | `DllCharacteristics=0xC160`：DYNAMICBASE/HIGH_ENTROPY_VA/NX_COMPAT/GUARD_CF=true；FORCE_INTEGRITY=false |
+| 更新契约 | 无 `update-metadata.json`，无 updater artifact |
+
+运行时模块面补充（见构建/安全文档 §5.2）：GPU 进程从安装目录加载
+**`dxcompiler.dll`（NotSigned）**；`chrome.dll`/`chrome_elf.dll`/`chrome.exe` 也均
+NotSigned。internal 构建靠 pre-start CIG 的 `AllowExtraDll` 放行 chrome.dll/elf，但这
+**不是** public 产物的可接受方案。
+
+`--mode public` 本轮**未运行**：没有 Windows 发布者身份（`--expected-publisher` 为空）
+与 `update-metadata.json`，按设计必然 exit 1。没有尝试签名、没有生成任何证书。
+
+---
+
+## 5. 当前明确不能做的事
 
 - 不生成、不导入、不导出、不删除任何证书或私钥；不运行 `signtool sign`；
 - 不把 `out/WinRelease` 描述为“已签名”“可发布”“release ready”；

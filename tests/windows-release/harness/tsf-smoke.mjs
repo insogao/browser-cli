@@ -47,6 +47,8 @@ const argValue = (name, def) => {
   return hit ? hit.slice(name.length + 3) : def;
 };
 const EXE = path.resolve(argValue("exe", process.env.WINDOWS_RELEASE_EXE || path.join(CHECKOUT, "out", "WinRelease", "chrome.exe")));
+// Win32_Process.ExecutablePath uses backslashes; normalize for comparisons.
+const EXE_WIN = path.win32.normalize(EXE);
 const FIXTURE = path.join(REPO, "tests", "windows-release", "fixtures", "tsf-smoke.html");
 const ROOT = path.resolve(process.env.WINDOWS_RELEASE_TSF_ROOT || "D:/c/logs/winrelease/tsf");
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-");
@@ -178,6 +180,7 @@ async function main() {
   };
 
   let child = null;
+  let browserPid = 0;
   let pageCdp = null;
   let browserCdp = null;
   let wsUrl = null;
@@ -213,7 +216,7 @@ async function main() {
     launchIso = new Date().toISOString();
     const t0 = Date.now();
     child = spawn(EXE, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: false });
-    let browserPid = child.pid;
+    browserPid = child.pid;
     const exitPromise = new Promise((resolve) => {
       child.on("exit", (code, signal) => resolve({ code, signal, afterMs: Date.now() - t0 }));
     });
@@ -269,6 +272,18 @@ async function main() {
     report.window = fg;
     check("browser window is the OS foreground window", fg.ok === true, JSON.stringify(fg));
 
+    const assertForeground = () => {
+      const state = parseJson(
+        runPowerShellFile(path.join(HERE, "tsf-input.ps1"), ["-BrowserPid", String(browserPid), "-Action", "check"]),
+        "tsf-input check",
+      );
+      if (!state.ok) {
+        throw new Error(
+          `refusing to type: browser window is not the OS foreground (target=${state.target}, foreground=${state.foreground} "${state.foregroundTitle}")`,
+        );
+      }
+      return state;
+    };
     const focusField = async (id) => {
       await pageCdp.send("Runtime.evaluate", {
         expression: `(() => { const el = document.getElementById(${JSON.stringify(id)}); el.focus(); return {active:(document.activeElement||{}).id||null, focus:document.hasFocus(), visibility:document.visibilityState}; })()`,
@@ -282,10 +297,12 @@ async function main() {
       return v.result?.value || null;
     };
     const sendKeys = async (text, waitMs = 350) => {
+      assertForeground();
       const out = parseJson(
         runPowerShellFile(path.join(HERE, "tsf-input.ps1"), ["-BrowserPid", String(browserPid), "-Action", "sendkeys", "-Text", text]),
         `tsf-input sendkeys ${JSON.stringify(text)}`,
       );
+      if (out.ok !== true) throw new Error(`sendkeys refused: ${JSON.stringify(out)}`);
       await sleep(waitMs);
       return out;
     };
@@ -295,6 +312,10 @@ async function main() {
     };
 
     // --- field 1: input -----------------------------------------------------
+    // Never type unless the OS foreground is our window; assert before focus
+    // and again inside every sendKeys call.
+    const foregroundNow = assertForeground();
+    report.foregroundCheck = foregroundNow;
     const f1 = await focusField("single");
     report.focus = f1;
     check("input field focused with OS foreground", f1?.active === "single" && f1?.focus === true, JSON.stringify(f1));
@@ -419,10 +440,15 @@ async function main() {
       }
     }
     if (child) {
-      const exit = await Promise.race([
-        new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal }))),
-        sleep(12000).then(() => null),
-      ]);
+      let exit = null;
+      if (child.exitCode !== null) {
+        exit = { code: child.exitCode, signal: child.signalCode };
+      } else {
+        exit = await Promise.race([
+          new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal }))),
+          sleep(12000).then(() => null),
+        ]);
+      }
       if (exit) report.exit = exit;
       else {
         report.errors.push("browser did not exit after Browser.close");
@@ -437,7 +463,7 @@ async function main() {
         report.cleanup = parseJson(
           runPowerShellFile(
             path.join(HERE, "stop-verified.ps1"),
-            ["-ProcessId", snapshotPids.join(","), "-RootPid", String(browserPid), "-ExpectedExe", EXE, "-NotBeforeUtc", launchIso],
+            ["-ProcessId", snapshotPids.join(","), "-RootPid", String(browserPid), "-ExpectedExe", EXE_WIN, "-NotBeforeUtc", launchIso],
             60000,
           ),
           "stop-verified",
