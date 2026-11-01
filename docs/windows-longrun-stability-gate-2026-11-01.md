@@ -261,3 +261,27 @@ python tests/tools/longrun-stability-gate.py \
 # 校验已有证据的一致性
 python tests/tools/longrun-stability-gate.py --check D:/c/logs/longrun-2026-11-01
 ```
+
+## 8. WinRelease + hidden route 2（最终 20 分钟 gate）
+
+构建：`D:/c/src/out/WinRelease/chrome.exe`（非 component），patch 034/035 + hidden patch 036（A2）。
+命令：
+
+```bash
+python tests/tools/longrun-stability-gate.py \
+  --chrome D:/c/src/out/WinRelease/chrome.exe \
+  --duration 1200 --sample-interval 15
+```
+
+结果（`D:/c/logs/longrun-2026-11-01T22-36-11`）：
+
+- 1217.7s，8 windows（normal + agent）。
+- **0** presentation-buffer DCHECK、0 renderer/GPU/network crash、0 FARAL、0 target crash。
+- dynamic/canvas/WebGL/OOPIF/extension、normal/agent concurrent、hidden/minimized/occluded、
+  ownership、截图 freshness、SW restart：全部 PASS。
+- 资源：private 1.178→1.194 GB（peak 1.203 GB），handles 11.7k→12.6k（peak 12.6k），
+  CPU 平均 1.4%；无持续增长。
+- 唯一 BLOCKED：Native Messaging Host restart 未执行（gate 没有 host 进程）；
+  extension SW restart 已 PASS。整体 gate 因此报 BLOCKED，不是 crash failure。
+- 未加 NetworkServiceSandbox；B 的安全矩阵另行验证了显式 flag 下 network utility
+  Low IL/AppContainer。
