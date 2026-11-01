@@ -6,7 +6,7 @@
 配套补丁：`chromium/patches/038-presentation-callback-lifecycle.patch`
 （3 文件；仅 Blink，无 Viz 改动）。
 
-状态：**提案已落盘；本 worktree 未编译、未运行**。共享源码 `D:/c/src` 只读，
+状态：**提案已落盘；本 worktree 已在 WinRelease 构建并验证**。共享源码 `D:/c/src` 只读，
 未修改、未应用补丁。分支 `agent/rc-hidden-a2`，基线 `833b880`（browser-cli PR #1）。
 
 ---
