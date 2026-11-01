@@ -1,18 +1,55 @@
 diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
-index 9d7b1f0..000f32c 100644
+index 8f6060d2..000f32cb 100644
 --- a/chrome/browser/BUILD.gn
 +++ b/chrome/browser/BUILD.gn
-@@ -1602,6 +1602,7 @@ source_set("core") {
- 
-   if (is_win) {
-     deps += [
-+      "//chrome/browser/browser_cli/cookie_import",
-       "//chrome/browser/browser_cli:foreground_assist_presentation_win",
-       "//chrome/browser/browser_cli:user_explicit_presentation_win",
+@@ -1532,6 +1532,8 @@ source_set("core") {
+       ":shutdown_watchdog_mac",
+       "//chrome/app_shim",
+       "//chrome/browser/apps/app_shim",
++      "//chrome/browser/browser_cli:foreground_assist_presentation",
++      "//chrome/browser/browser_cli:user_explicit_presentation",
+       "//chrome/browser/enterprise/connectors/device_trust/key_management/core/mac",
+       "//chrome/browser/mac",
+       "//chrome/browser/mac:impl",
+@@ -1585,6 +1587,27 @@ source_set("core") {
      ]
+   }
+ 
++  deps += [
++    "//chrome/browser/browser_cli:reopen_window_selection",
++    "//chrome/browser/browser_cli:user_explicit_show",
++  ]
++
++  # ArbitrateBrowserCliCommandLineIntent() and
++  # CommandLineForColdStartStartup() live in :foreground_assist, which already
++  # depends on //ui/views, so it stays restricted to platforms that build
++  # views; the Windows chrome_browser_main.cc call sites need it in the graph.
++  if (is_mac || is_win) {
++    deps += [ "//chrome/browser/browser_cli:foreground_assist" ]
++  }
++
++  if (is_win) {
++    deps += [
++      "//chrome/browser/browser_cli/cookie_import",
++      "//chrome/browser/browser_cli:foreground_assist_presentation_win",
++      "//chrome/browser/browser_cli:user_explicit_presentation_win",
++    ]
++  }
++
+   if (!is_win && !is_android) {
+     sources += [
+       "certificate_viewer_stub.cc",
+@@ -4214,6 +4237,7 @@ source_set("core_unit_tests") {
+       "//chrome/browser/profiles:profile",
+       "//chrome/common:channel_info",
+       "//components/version_info:channel",
++      "//ui/views",
+     ]
+     if (is_chrome_branded) {
+       deps += [ "//chrome/test/base:scoped_channel_override" ]
 diff --git a/chrome/browser/browser_cli/cookie_import/BUILD.gn b/chrome/browser/browser_cli/cookie_import/BUILD.gn
 new file mode 100644
-index 0000000..30e943f
+index 00000000..30e943f0
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/BUILD.gn
 @@ -0,0 +1,69 @@
@@ -87,7 +124,7 @@ index 0000000..30e943f
 +}
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc
 new file mode 100644
-index 0000000..bcd43f6
+index 00000000..bcd43f6f
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc
 @@ -0,0 +1,189 @@
@@ -282,7 +319,7 @@ index 0000000..bcd43f6
 +#endif  // BUILDFLAG(IS_WIN)
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h
 new file mode 100644
-index 0000000..f61fab1
+index 00000000..f61fab13
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h
 @@ -0,0 +1,32 @@
@@ -320,7 +357,7 @@ index 0000000..f61fab1
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_DIALOG_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
 new file mode 100644
-index 0000000..29816de
+index 00000000..29816de5
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
 @@ -0,0 +1,304 @@
@@ -630,7 +667,7 @@ index 0000000..29816de
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h
 new file mode 100644
-index 0000000..a3de376
+index 00000000..a3de3761
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h
 @@ -0,0 +1,64 @@
@@ -700,10 +737,10 @@ index 0000000..a3de376
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_PIPE_SERVER_WIN_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc
 new file mode 100644
-index 0000000..6f732a8
+index 00000000..4f344b92
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc
-@@ -0,0 +1,701 @@
+@@ -0,0 +1,703 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -716,6 +753,8 @@ index 0000000..6f732a8
 +#include <utility>
 +
 +#include "base/base64.h"
++#include "base/compiler_specific.h"
++#include "base/containers/span.h"
 +#include "base/json/json_reader.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_split.h"
@@ -761,8 +800,8 @@ index 0000000..6f732a8
 +  int bits = 0;
 +  std::string out;
 +  out.reserve((length * 8 + 4) / 5);
-+  for (size_t i = 0; i < length; ++i) {
-+    buffer = (buffer << 8) | bytes[i];
++  for (uint8_t byte : UNSAFE_BUFFERS(base::span<const uint8_t>(bytes, length))) {
++    buffer = (buffer << 8) | byte;
 +    bits += 8;
 +    while (bits >= 5) {
 +      out.push_back(kTicketAlphabet[(buffer >> (bits - 5)) & 31]);
@@ -1407,7 +1446,7 @@ index 0000000..6f732a8
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h
 new file mode 100644
-index 0000000..318a926
+index 00000000..318a9266
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h
 @@ -0,0 +1,141 @@
@@ -1554,7 +1593,7 @@ index 0000000..318a926
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_POLICY_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc
 new file mode 100644
-index 0000000..d6847a6
+index 00000000..d6847a63
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc
 @@ -0,0 +1,298 @@
@@ -1858,7 +1897,7 @@ index 0000000..d6847a6
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc
 new file mode 100644
-index 0000000..33e8ad1
+index 00000000..33e8ad1c
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc
 @@ -0,0 +1,918 @@
@@ -2782,7 +2821,7 @@ index 0000000..33e8ad1
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_service.h b/chrome/browser/browser_cli/cookie_import/cookie_import_service.h
 new file mode 100644
-index 0000000..33d1d72
+index 00000000..33d1d72b
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_service.h
 @@ -0,0 +1,154 @@
@@ -2941,20 +2980,69 @@ index 0000000..33d1d72
 +
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_SERVICE_H_
 diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
-index 197f96c..bc4a420 100644
+index b2619baa..bc4a420b 100644
 --- a/chrome/browser/chrome_browser_main.cc
 +++ b/chrome/browser/chrome_browser_main.cc
-@@ -224,6 +224,9 @@
- #include "chrome/browser/browser_cli/foreground_assist.h"
- #include "chrome/browser/browser_cli/foreground_assist_presentation.h"
- #include "chrome/browser/browser_cli/user_explicit_presentation.h"
+@@ -218,6 +218,17 @@
+ #include "chrome/browser/first_run/upgrade_util.h"
+ #endif
+ 
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++#include "base/logging.h"
++
++#include "chrome/browser/browser_cli/foreground_assist.h"
++#include "chrome/browser/browser_cli/foreground_assist_presentation.h"
++#include "chrome/browser/browser_cli/user_explicit_presentation.h"
 +#if BUILDFLAG(IS_WIN)
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_service.h"
 +#endif  // BUILDFLAG(IS_WIN)
- #endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
- 
++#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++
  #if BUILDFLAG(IS_MAC)
-@@ -1643,6 +1646,14 @@ void ChromeBrowserMainParts::PostProfileInit(Profile* profile,
+ #include <Security/Security.h>
+ 
+@@ -556,6 +567,31 @@ void ProcessSingletonNotificationCallbackImpl(
+   }
+ #endif
+ 
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++  // Browser CLI: exactly one producer may consume a direct invocation. The
++  // shared arbitration gives any assist request/release intent priority over
++  // the explicit `show` switch, so a conflicting command line is denied and
++  // logged by the assist producer (conflicting-producer-switches) and never
++  // reaches the USER_EXPLICIT show producer or its presentation gateway. A
++  // pure show request keeps the existing presentation path, and a command line
++  // without either intent falls through to stock handling. The assist intent is
++  // always consumed (fail closed): it must never act as an ordinary URL / app
++  // launch that could change a HUMAN-owned window or create a visible window.
++  switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(command_line)) {
++    case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
++      browser_cli::HandleForegroundAssistRequest(command_line);
++      return;
++    case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
++      if (browser_cli::HandleUserExplicitShowRequest(command_line,
++                                                     current_directory)) {
++        return;
++      }
++      break;
++    case browser_cli::BrowserCliCommandLineIntent::kOrdinary:
++      break;
++  }
++#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++
+   StartupProfilePathInfo startup_profile_path_info =
+       GetStartupProfilePath(current_directory, command_line,
+                             /*ignore_profile_picker=*/false);
+@@ -998,8 +1034,6 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
+ // -----------------------------------------------------------------------------
+ // TODO(viettrungluu): move more/rest of BrowserMain() into BrowserMainParts.
+ 
+-
+-
+ // content::BrowserMainParts implementation ------------------------------------
+ 
+ int ChromeBrowserMainParts::PreEarlyInitialization() {
+@@ -1612,6 +1646,14 @@ void ChromeBrowserMainParts::PostProfileInit(Profile* profile,
    }
  
  #if BUILDFLAG(IS_WIN)
@@ -2969,7 +3057,61 @@ index 197f96c..bc4a420 100644
    // Verify that the profile is not on a network share and if so prepare to show
    // notification to the user.
    if (NetworkProfileBubble::ShouldCheckNetworkProfile(profile)) {
-@@ -2304,6 +2315,12 @@ void ChromeBrowserMainParts::PostMainMessageLoopRun() {
+@@ -2121,9 +2163,50 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
+ #endif
+ 
+   // This step is costly.
+-  if (browser_creator_->Start(*base::CommandLine::ForCurrentProcess(),
+-                              base::FilePath(), profile_info,
+-                              last_opened_profiles)) {
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++  // Browser CLI: a cold start carrying an agent foreground-assist intent must
++  // never be processed by the ordinary startup as a URL / app / incognito /
++  // automation / headless launch. The effective command line drops those launch
++  // arguments (and every positional URL) and adds --no-startup-window, so
++  // StartupBrowserCreator only brings up the process (silent_launch: no URL,
++  // no window, no profile picker); the assist handler below then denies and
++  // logs the original request. Command lines without an assist intent are
++  // passed through unchanged.
++  const base::CommandLine launch_command_line =
++      browser_cli::CommandLineForColdStartStartup(
++          *base::CommandLine::ForCurrentProcess());
++#else
++  const base::CommandLine& launch_command_line =
++      *base::CommandLine::ForCurrentProcess();
++#endif
++  if (browser_creator_->Start(launch_command_line, base::FilePath(),
++                              profile_info, last_opened_profiles)) {
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++    // Browser CLI: the same single arbitration as the ProcessSingleton path.
++    // An assist intent (including a command line that also carries the
++    // explicit show switch) is denied/logged and consumed by the assist
++    // producer, so it can never present a window through the USER_EXPLICIT
++    // path; the startup above ran with the sanitized command line (no URL /
++    // app side effects, no startup window), so the denied request cannot fall
++    // back to an ordinary launch either. A pure show request still presents
++    // exactly one window: the startup path has already created its window
++    // (its native show was denied by the background policy), and with
++    // --no-startup-window the producer creates one for the resolved profile.
++    switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(
++        *base::CommandLine::ForCurrentProcess())) {
++      case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
++        browser_cli::HandleForegroundAssistRequest(
++            *base::CommandLine::ForCurrentProcess());
++        break;
++      case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
++        browser_cli::HandleUserExplicitShowRequest(
++            *base::CommandLine::ForCurrentProcess(), base::FilePath());
++        break;
++      case browser_cli::BrowserCliCommandLineIntent::kOrdinary:
++        break;
++    }
++#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
++
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
+     // Initialize autoupdate timer. Timer callback costs basically nothing
+     // when browser is not in persistent mode, so it's OK to let it ride on
+@@ -2232,6 +2315,12 @@ void ChromeBrowserMainParts::PostMainMessageLoopRun() {
    // Android specific MessageLoop
    NOTREACHED();
  #else
