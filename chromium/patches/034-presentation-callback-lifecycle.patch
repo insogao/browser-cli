@@ -1,0 +1,577 @@
+diff --git a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc
+index 260a705..349c444 100644
+--- a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc
++++ b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.cc
+@@ -55,6 +55,14 @@ class Layer;
+ namespace blink {
+ 
+ namespace {
++
++static_assert(
++    LayerTreeView::kPresentationCallbackPressureLimit <
++        cc::PresentationTimeCallbackBuffer::kMaxBufferSize,
++    "The presentation callback pressure limit must stay below the hard "
++    "kMaxBufferSize bound so completing callbacks on failed presentations "
++    "leaves headroom for frames that are still in flight.");
++
+ }  // namespace
+ 
+ LayerTreeView::LayerTreeView(
+@@ -318,6 +326,14 @@ void LayerTreeView::RequestNewLayerTreeFrameSink() {
+   if (!delegate_)
+     return;
+ 
++  // cc only requests a frame sink when there is none or after the previous one
++  // was lost. No presentation feedback can arrive for frame tokens of a lost
++  // frame sink, so complete their callbacks with a failed presentation instead
++  // of leaving them queued forever. This is the threaded renderer equivalent
++  // of DidLoseLayerTreeFrameSink(), which is only invoked in single-threaded
++  // mode.
++  CompleteAllPresentationCallbacksOnFailure();
++
+   CHECK(frame_sink_state_ == FrameSinkState::kNoFrameSink ||
+         frame_sink_state_ == FrameSinkState::kInitialized);
+ 
+@@ -418,8 +434,30 @@ void LayerTreeView::DidPresentCompositorFrame(
+   DCHECK(layer_tree_host_->GetTaskRunnerProvider()
+              ->MainThreadTaskRunner()
+              ->RunsTasksInCurrentSequence());
+-  // Only run callbacks on successful presentations.
++  // Callbacks are run for successful presentations, and for a failed frame
++  // token that can no longer be presented while the queue is under pressure.
++  // Every other failed feedback leaves the queue untouched.
+   if (frame_timing_details.presentation_feedback.failed()) {
++    // A failed presentation does not invalidate callbacks registered for other
++    // frames. Failed feedbacks can arrive out of order with respect to
++    // successes: a frame that was already drawn can be reported as presented
++    // after a newer frame was superseded and reported as failed. Callbacks are
++    // also documented to run on the first successful presentation for their
++    // frame token or a following frame, so completing or removing them here
++    // would turn a later successful presentation into a false failure.
++    //
++    // Once the queue is over the pressure limit, no successful presentation
++    // has happened for a long time. In that state, complete the callbacks
++    // registered for exactly `frame_token`: the one-shot feedback proves that
++    // this frame can never be presented, so these are the only callbacks that
++    // are definitely impossible to complete. Leaving them queued would grow
++    // the queue until the kMaxBufferSize DCHECK kills the renderer (for
++    // example a managed window that keeps committing frames while its native
++    // presentation is suppressed).
++    if (presentation_callbacks_.size() >=
++        kPresentationCallbackPressureLimit) {
++      CompleteFailedPresentationCallbacks(frame_token, frame_timing_details);
++    }
+     return;
+   }
+   while (!presentation_callbacks_.empty()) {
+@@ -432,6 +470,13 @@ void LayerTreeView::DidPresentCompositorFrame(
+     presentation_callbacks_.erase(front);
+   }
+ 
++  // A successful presentation supersedes any remembered failed presentation
++  // for frame tokens up to `frame_token`.
++  while (!failed_presentation_callbacks_.empty() &&
++         failed_presentation_callbacks_.front().first <= frame_token) {
++    failed_presentation_callbacks_.pop_front();
++  }
++
+ #if BUILDFLAG(IS_APPLE)
+   while (!core_animation_error_code_callbacks_.empty()) {
+     const auto& front = core_animation_error_code_callbacks_.begin();
+@@ -506,7 +551,15 @@ void LayerTreeView::DidRunBeginMainFrame() {
+ 
+ void LayerTreeView::DidSubmitCompositorFrame() {}
+ 
+-void LayerTreeView::DidLoseLayerTreeFrameSink() {}
++void LayerTreeView::DidLoseLayerTreeFrameSink() {
++  // No presentation feedback can arrive for the lost frame sink, so its
++  // pending callbacks can never be completed by it. Complete them with a
++  // failed presentation instead of leaving them queued forever or dropping
++  // them silently. This also makes sure frame tokens from a replacement frame
++  // sink (which may restart its token sequence) cannot collide with stale
++  // entries.
++  CompleteAllPresentationCallbacksOnFailure();
++}
+ 
+ void LayerTreeView::ScheduleAnimationForWebTests() {
+   if (!delegate_)
+@@ -518,6 +571,17 @@ void LayerTreeView::ScheduleAnimationForWebTests() {
+ void LayerTreeView::AddPresentationCallback(
+     uint32_t frame_token,
+     base::OnceCallback<void(const viz::FrameTimingDetails&)> callback) {
++  // The failure feedback for this frame can be processed before the swap task
++  // that registers this callback runs. The frame token is then known to be
++  // unpresentable, so complete the callback immediately instead of queuing it
++  // forever.
++  if (std::optional<viz::FrameTimingDetails> failed_details =
++          TakeRememberedFailedPresentationCallbacks(frame_token)) {
++    TRACE_EVENT_INSTANT1("viz", "PresentationCallbackCompletedLateFailure",
++                         "frame_token", frame_token);
++    std::move(callback).Run(*failed_details);
++    return;
++  }
+   AddCallback(frame_token, std::move(callback), presentation_callbacks_);
+ }
+ 
+@@ -554,4 +618,88 @@ void LayerTreeView::AddCallback(
+             cc::PresentationTimeCallbackBuffer::kMaxBufferSize);
+ }
+ 
++void LayerTreeView::CompleteFailedPresentationCallbacks(
++    uint32_t frame_token,
++    const viz::FrameTimingDetails& failed_details) {
++  for (auto it = presentation_callbacks_.begin();
++       it != presentation_callbacks_.end(); ++it) {
++    if (it->first > frame_token) {
++      // `presentation_callbacks_` is ordered by increasing frame token.
++      break;
++    }
++    if (it->first != frame_token) {
++      continue;
++    }
++    // Move the callbacks out before erasing the entry: running a callback may
++    // add a new presentation callback and invalidate `it`.
++    std::vector<base::OnceCallback<void(const viz::FrameTimingDetails&)>>
++        callbacks = std::move(it->second);
++    presentation_callbacks_.erase(it);
++    TRACE_EVENT_INSTANT1("viz", "PresentationCallbacksCompletedOnFailure",
++                         "frame_token", frame_token);
++    for (auto& callback : callbacks) {
++      std::move(callback).Run(failed_details);
++    }
++    return;
++  }
++
++  // The callback for this frame was not registered yet. Its failure feedback
++  // can only have overtaken the swap task while the queue is already under
++  // pressure, so remember it (bounded) and complete a late registration with
++  // the same failed details.
++  RememberFailedPresentationCallbacks(frame_token, failed_details);
++}
++
++void LayerTreeView::RememberFailedPresentationCallbacks(
++    uint32_t frame_token,
++    const viz::FrameTimingDetails& failed_details) {
++  if (failed_presentation_callbacks_.size() >=
++      kMaxRememberedFailedPresentationCallbacks) {
++    failed_presentation_callbacks_.pop_front();
++  }
++  failed_presentation_callbacks_.emplace_back(frame_token, failed_details);
++}
++
++std::optional<viz::FrameTimingDetails>
++LayerTreeView::TakeRememberedFailedPresentationCallbacks(
++    uint32_t frame_token) {
++  for (auto it = failed_presentation_callbacks_.begin();
++       it != failed_presentation_callbacks_.end(); ++it) {
++    if (it->first != frame_token) {
++      continue;
++    }
++    std::optional<viz::FrameTimingDetails> failed_details =
++        std::move(it->second);
++    failed_presentation_callbacks_.erase(it);
++    return failed_details;
++  }
++  return std::nullopt;
++}
++
++void LayerTreeView::CompleteAllPresentationCallbacksOnFailure() {
++  // Remembered failures belong to the lost frame sink as well; drop them so a
++  // replacement frame sink cannot complete a callback with stale details.
++  failed_presentation_callbacks_.clear();
++  if (presentation_callbacks_.empty()) {
++    return;
++  }
++  viz::FrameTimingDetails failed_details;
++  failed_details.presentation_feedback = gfx::PresentationFeedback::Failure();
++  // Move the queue out before running callbacks: a callback may add a new
++  // presentation callback.
++  base::circular_deque<std::pair<
++      uint32_t,
++      std::vector<base::OnceCallback<void(const viz::FrameTimingDetails&)>>>
++      callbacks = std::move(presentation_callbacks_);
++  presentation_callbacks_.clear();
++  TRACE_EVENT_INSTANT1("viz", "PresentationCallbacksCompletedOnFrameSinkLoss",
++                       "frame_token_count",
++                       static_cast<int>(callbacks.size()));
++  for (auto& entry : callbacks) {
++    for (auto& callback : entry.second) {
++      std::move(callback).Run(failed_details);
++    }
++  }
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h
+index 4c5723d..b85a90b 100644
+--- a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h
++++ b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h
+@@ -7,6 +7,9 @@
+ 
+ #include <stdint.h>
+ 
++#include <optional>
++#include <utility>
++
+ #include "base/containers/circular_deque.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+@@ -17,6 +20,7 @@
+ #include "cc/trees/layer_tree_host_delegate.h"
+ #include "cc/trees/layer_tree_host_single_thread_delegate.h"
+ #include "cc/trees/paint_holding_reason.h"
++#include "components/viz/common/frame_timing_details.h"
+ #include "third_party/blink/renderer/platform/platform_export.h"
+ #include "third_party/blink/renderer/platform/widget/compositing/layer_tree_view_delegate.h"
+ #include "ui/gfx/ca_layer_result.h"
+@@ -146,6 +150,21 @@ class PLATFORM_EXPORT LayerTreeView
+       base::OnceCallback<void(gfx::CALayerResult)> callback);
+ #endif
+ 
++  // Soft limit for presentation callbacks waiting for a successful
++  // presentation. A widget that keeps committing frames without ever being
++  // presented (for example a managed window whose native presentation is
++  // suppressed) would otherwise grow `presentation_callbacks_` without bound
++  // until the kMaxBufferSize DCHECK kills the renderer.
++  //
++  // Once this many callbacks are pending, a failed presentation feedback
++  // completes the callbacks registered for exactly the failed frame token:
++  // that token can never be presented (feedback is one-shot per frame token),
++  // so those callbacks are the only ones that are definitely impossible to
++  // complete. Callbacks registered for other frame tokens are left alone
++  // because they may still be completed by a following successful
++  // presentation. The hard kMaxBufferSize bound and its DCHECK are unchanged.
++  static constexpr size_t kPresentationCallbackPressureLimit = 30;
++
+   cc::LayerTreeHost* layer_tree_host() { return layer_tree_host_.get(); }
+   const cc::LayerTreeHost* layer_tree_host() const {
+     return layer_tree_host_.get();
+@@ -167,6 +186,30 @@ class PLATFORM_EXPORT LayerTreeView
+       base::circular_deque<std::pair<uint32_t, std::vector<Callback>>>&
+           callbacks);
+ 
++  // Runs the callbacks registered for exactly `frame_token` with
++  // `failed_details` and removes them from `presentation_callbacks_`. If no
++  // callback is registered yet, remembers the failure so a late registration
++  // can be completed immediately (see AddPresentationCallback()).
++  void CompleteFailedPresentationCallbacks(
++      uint32_t frame_token,
++      const viz::FrameTimingDetails& failed_details);
++
++  // Remembers `failed_details` for `frame_token`. The number of remembered
++  // entries is bounded because a widget may fail presentations for a long
++  // time without any callback being registered for them.
++  void RememberFailedPresentationCallbacks(
++      uint32_t frame_token,
++      const viz::FrameTimingDetails& failed_details);
++
++  // Returns and forgets the failed details remembered for `frame_token`.
++  std::optional<viz::FrameTimingDetails>
++  TakeRememberedFailedPresentationCallbacks(uint32_t frame_token);
++
++  // Runs every pending presentation callback with a failed presentation. Used
++  // when the frame sink is lost: no feedback can arrive for its frame tokens
++  // any more, so they can never be presented.
++  void CompleteAllPresentationCallbacksOnFailure();
++
+   scoped_refptr<scheduler::WidgetScheduler> widget_scheduler_;
+   const std::unique_ptr<cc::AnimationHost> animation_host_;
+ 
+@@ -191,6 +234,15 @@ class PLATFORM_EXPORT LayerTreeView
+       std::vector<base::OnceCallback<void(const viz::FrameTimingDetails&)>>>>
+       presentation_callbacks_;
+ 
++  // Bounded FIFO of failed presentation details for frame tokens whose
++  // presentation callback was not registered yet when the failure feedback
++  // arrived. Only populated while `presentation_callbacks_` is over the
++  // pressure limit, so a widget that never presents cannot grow it without
++  // limit.
++  static constexpr size_t kMaxRememberedFailedPresentationCallbacks = 32;
++  base::circular_deque<std::pair<uint32_t, viz::FrameTimingDetails>>
++      failed_presentation_callbacks_;
++
+ #if BUILDFLAG(IS_APPLE)
+   base::circular_deque<std::pair<
+       uint32_t,
+diff --git a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc
+index 61104c0..167bb38 100644
+--- a/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc
++++ b/third_party/blink/renderer/platform/widget/compositing/layer_tree_view_unittest.cc
+@@ -416,6 +416,277 @@ TEST(LayerTreeViewTest, RunPresentationCallbackOnSuccess) {
+   EXPECT_EQ(callback_timestamp, success_timestamp);
+ }
+ 
++namespace {
++
++constexpr uint32_t kPressureLimit = static_cast<uint32_t>(
++    LayerTreeView::kPresentationCallbackPressureLimit);
++
++viz::FrameTimingDetails MakeFailedTimingDetails(base::TimeTicks timestamp) {
++  viz::FrameTimingDetails timing_details;
++  timing_details.presentation_feedback = gfx::PresentationFeedback(
++      timestamp, base::TimeDelta(), gfx::PresentationFeedback::kFailure);
++  return timing_details;
++}
++
++viz::FrameTimingDetails MakeSuccessfulTimingDetails(base::TimeTicks timestamp) {
++  viz::FrameTimingDetails timing_details;
++  timing_details.presentation_feedback =
++      gfx::PresentationFeedback(timestamp, base::TimeDelta(), 0);
++  return timing_details;
++}
++
++struct RecordedCompletion {
++  uint32_t frame_token;
++  base::TimeTicks timestamp;
++  bool failed;
++};
++
++// Registers a callback for each token in [first, last] that records how it was
++// completed.
++void AddRecordingCallbacks(LayerTreeView& layer_tree_view,
++                           uint32_t first,
++                           uint32_t last,
++                           std::vector<RecordedCompletion>& completions) {
++  for (uint32_t token = first; token <= last; ++token) {
++    layer_tree_view.AddPresentationCallback(
++        token,
++        base::BindLambdaForTesting(
++            [&completions, token](
++                const viz::FrameTimingDetails& frame_timing_details) {
++              completions.push_back(
++                  {token, frame_timing_details.presentation_feedback.timestamp,
++                   frame_timing_details.presentation_feedback.failed()});
++            }));
++  }
++}
++
++}  // namespace
++
++// Verifies that a failed presentation below the pressure limit does not
++// complete callbacks registered for other frames: they may still be completed
++// by a following successful presentation.
++TEST(LayerTreeViewTest, FailedPresentationBelowPressureKeepsCallbacks) {
++  base::test::TaskEnvironment task_environment;
++
++  cc::TestTaskGraphRunner test_task_graph_runner;
++  std::unique_ptr<PageScheduler> dummy_page_scheduler =
++      scheduler::CreateDummyPageScheduler();
++  StubLayerTreeViewDelegate layer_tree_view_delegate;
++  LayerTreeView layer_tree_view(
++      &layer_tree_view_delegate,
++      dummy_page_scheduler->CreateWidgetScheduler(/*delegate=*/nullptr));
++
++  layer_tree_view.Initialize(
++      cc::LayerTreeSettings(),
++      blink::scheduler::GetSingleThreadTaskRunnerForTesting(),
++      /*compositor_thread=*/nullptr, &test_task_graph_runner);
++
++  std::vector<RecordedCompletion> completions;
++  AddRecordingCallbacks(layer_tree_view, 1, 3, completions);
++
++  const base::TimeTicks failure_timestamp = base::TimeTicks::Now();
++  layer_tree_view.DidPresentCompositorFrame(
++      2, MakeFailedTimingDetails(failure_timestamp));
++  EXPECT_TRUE(completions.empty());
++
++  const base::TimeTicks success_timestamp =
++      failure_timestamp + base::Microseconds(5);
++  layer_tree_view.DidPresentCompositorFrame(
++      4, MakeSuccessfulTimingDetails(success_timestamp));
++  ASSERT_EQ(completions.size(), 3u);
++  for (const RecordedCompletion& completion : completions) {
++    EXPECT_FALSE(completion.failed);
++    EXPECT_EQ(completion.timestamp, success_timestamp);
++  }
++}
++
++// Verifies that once the queue is under pressure, a failed presentation
++// completes only the callbacks registered for the frame token that failed.
++TEST(LayerTreeViewTest, FailedPresentationAtPressureCompletesOnlyFailedFrame) {
++  base::test::TaskEnvironment task_environment;
++
++  cc::TestTaskGraphRunner test_task_graph_runner;
++  std::unique_ptr<PageScheduler> dummy_page_scheduler =
++      scheduler::CreateDummyPageScheduler();
++  StubLayerTreeViewDelegate layer_tree_view_delegate;
++  LayerTreeView layer_tree_view(
++      &layer_tree_view_delegate,
++      dummy_page_scheduler->CreateWidgetScheduler(/*delegate=*/nullptr));
++
++  layer_tree_view.Initialize(
++      cc::LayerTreeSettings(),
++      blink::scheduler::GetSingleThreadTaskRunnerForTesting(),
++      /*compositor_thread=*/nullptr, &test_task_graph_runner);
++
++  std::vector<RecordedCompletion> completions;
++  AddRecordingCallbacks(layer_tree_view, 1, kPressureLimit, completions);
++  ASSERT_EQ(completions.size(), 0u);
++
++  const base::TimeTicks failure_timestamp = base::TimeTicks::Now();
++  const uint32_t failed_token = kPressureLimit / 2;
++  layer_tree_view.DidPresentCompositorFrame(
++      failed_token, MakeFailedTimingDetails(failure_timestamp));
++
++  // Only the exact failed frame token is completed, with the failed details.
++  ASSERT_EQ(completions.size(), 1u);
++  EXPECT_EQ(completions[0].frame_token, failed_token);
++  EXPECT_TRUE(completions[0].failed);
++  EXPECT_EQ(completions[0].timestamp, failure_timestamp);
++
++  // The remaining callbacks are still pending and are completed by a later
++  // successful presentation.
++  completions.clear();
++  const base::TimeTicks success_timestamp =
++      failure_timestamp + base::Microseconds(5);
++  layer_tree_view.DidPresentCompositorFrame(
++      kPressureLimit, MakeSuccessfulTimingDetails(success_timestamp));
++  ASSERT_EQ(completions.size(), kPressureLimit - 1);
++  for (const RecordedCompletion& completion : completions) {
++    EXPECT_NE(completion.frame_token, failed_token);
++    EXPECT_FALSE(completion.failed);
++    EXPECT_EQ(completion.timestamp, success_timestamp);
++  }
++}
++
++// Verifies that a callback registered after the failure feedback for its own
++// frame token is completed immediately with the failed details instead of
++// being queued forever.
++TEST(LayerTreeViewTest,
++     LatePresentationCallbackAfterFailureCompletesWithFailure) {
++  base::test::TaskEnvironment task_environment;
++
++  cc::TestTaskGraphRunner test_task_graph_runner;
++  std::unique_ptr<PageScheduler> dummy_page_scheduler =
++      scheduler::CreateDummyPageScheduler();
++  StubLayerTreeViewDelegate layer_tree_view_delegate;
++  LayerTreeView layer_tree_view(
++      &layer_tree_view_delegate,
++      dummy_page_scheduler->CreateWidgetScheduler(/*delegate=*/nullptr));
++
++  layer_tree_view.Initialize(
++      cc::LayerTreeSettings(),
++      blink::scheduler::GetSingleThreadTaskRunnerForTesting(),
++      /*compositor_thread=*/nullptr, &test_task_graph_runner);
++
++  std::vector<RecordedCompletion> completions;
++  AddRecordingCallbacks(layer_tree_view, 1, kPressureLimit, completions);
++
++  // The failure feedback for the next frame token arrives before the task that
++  // would register its presentation callback.
++  const uint32_t late_token = kPressureLimit + 1;
++  const base::TimeTicks failure_timestamp = base::TimeTicks::Now();
++  layer_tree_view.DidPresentCompositorFrame(
++      late_token, MakeFailedTimingDetails(failure_timestamp));
++  ASSERT_TRUE(completions.empty());
++
++  AddRecordingCallbacks(layer_tree_view, late_token, late_token, completions);
++  ASSERT_EQ(completions.size(), 1u);
++  EXPECT_EQ(completions[0].frame_token, late_token);
++  EXPECT_TRUE(completions[0].failed);
++  EXPECT_EQ(completions[0].timestamp, failure_timestamp);
++
++  // The late callback was not also queued: a later success only completes the
++  // callbacks that were already pending.
++  completions.clear();
++  const base::TimeTicks success_timestamp =
++      failure_timestamp + base::Microseconds(5);
++  layer_tree_view.DidPresentCompositorFrame(
++      late_token + 1, MakeSuccessfulTimingDetails(success_timestamp));
++  ASSERT_EQ(completions.size(), kPressureLimit);
++  for (const RecordedCompletion& completion : completions) {
++    EXPECT_NE(completion.frame_token, late_token);
++  }
++}
++
++// Regression test for windows that keep committing frames that are never
++// presented (a managed window whose native presentation is suppressed): the
++// callback queue must stay bounded instead of growing until the
++// kMaxBufferSize DCHECK kills the renderer.
++TEST(LayerTreeViewTest, PresentationCallbackQueueBoundedWhenNeverPresented) {
++  base::test::TaskEnvironment task_environment;
++
++  cc::TestTaskGraphRunner test_task_graph_runner;
++  std::unique_ptr<PageScheduler> dummy_page_scheduler =
++      scheduler::CreateDummyPageScheduler();
++  StubLayerTreeViewDelegate layer_tree_view_delegate;
++  LayerTreeView layer_tree_view(
++      &layer_tree_view_delegate,
++      dummy_page_scheduler->CreateWidgetScheduler(/*delegate=*/nullptr));
++
++  layer_tree_view.Initialize(
++      cc::LayerTreeSettings(),
++      blink::scheduler::GetSingleThreadTaskRunnerForTesting(),
++      /*compositor_thread=*/nullptr, &test_task_graph_runner);
++
++  std::vector<RecordedCompletion> completions;
++  AddRecordingCallbacks(layer_tree_view, 1, kPressureLimit, completions);
++
++  // Simulate 500 frames at the throttled ~1 Hz rate of a window that is never
++  // presented. Every frame is added a moment before the failure feedback for
++  // the previous frame arrives. Without the pressure limit this would trip the
++  // kMaxBufferSize DCHECK after 60 frames.
++  constexpr uint32_t kExtraFrames = 500;
++  for (uint32_t token = kPressureLimit + 1;
++       token <= kPressureLimit + kExtraFrames; ++token) {
++    AddRecordingCallbacks(layer_tree_view, token, token, completions);
++    layer_tree_view.DidPresentCompositorFrame(
++        token - 1, MakeFailedTimingDetails(base::TimeTicks::Now()));
++  }
++
++  // Every frame from kPressureLimit to kPressureLimit + kExtraFrames - 1
++  // received a failed presentation, which completed its callbacks with the
++  // failed details. The callbacks for the first kPressureLimit - 1 tokens and
++  // for the last token are still pending, so the queue stayed at the pressure
++  // limit instead of growing towards kMaxBufferSize.
++  ASSERT_EQ(completions.size(), static_cast<size_t>(kExtraFrames));
++  for (const RecordedCompletion& completion : completions) {
++    EXPECT_TRUE(completion.failed);
++  }
++  EXPECT_EQ(completions.front().frame_token, kPressureLimit);
++  EXPECT_EQ(completions.back().frame_token,
++            kPressureLimit + kExtraFrames - 1);
++}
++
++// Verifies that losing the frame sink completes the pending callbacks with a
++// failed presentation: no feedback can arrive for those frame tokens any more.
++TEST(LayerTreeViewTest, FrameSinkLossCompletesPresentationCallbacks) {
++  base::test::TaskEnvironment task_environment;
++
++  cc::TestTaskGraphRunner test_task_graph_runner;
++  std::unique_ptr<PageScheduler> dummy_page_scheduler =
++      scheduler::CreateDummyPageScheduler();
++  StubLayerTreeViewDelegate layer_tree_view_delegate;
++  LayerTreeView layer_tree_view(
++      &layer_tree_view_delegate,
++      dummy_page_scheduler->CreateWidgetScheduler(/*delegate=*/nullptr));
++
++  layer_tree_view.Initialize(
++      cc::LayerTreeSettings(),
++      blink::scheduler::GetSingleThreadTaskRunnerForTesting(),
++      /*compositor_thread=*/nullptr, &test_task_graph_runner);
++
++  std::vector<RecordedCompletion> completions;
++  AddRecordingCallbacks(layer_tree_view, 1, 3, completions);
++
++  layer_tree_view.DidLoseLayerTreeFrameSink();
++  ASSERT_EQ(completions.size(), 3u);
++  for (const RecordedCompletion& completion : completions) {
++    EXPECT_TRUE(completion.failed);
++    EXPECT_FALSE(completion.timestamp.is_null());
++  }
++
++  // The queue is empty, so a frame token from a replacement frame sink cannot
++  // collide with a stale entry.
++  completions.clear();
++  AddRecordingCallbacks(layer_tree_view, 1, 1, completions);
++  const base::TimeTicks success_timestamp = base::TimeTicks::Now();
++  layer_tree_view.DidPresentCompositorFrame(
++      1, MakeSuccessfulTimingDetails(success_timestamp));
++  ASSERT_EQ(completions.size(), 1u);
++  EXPECT_FALSE(completions[0].failed);
++  EXPECT_EQ(completions[0].timestamp, success_timestamp);
++}
++
+ class LayerTreeViewDelegateChangeTest : public testing::Test {
+  public:
+   LayerTreeViewDelegateChangeTest()
