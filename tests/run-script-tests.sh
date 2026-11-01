@@ -1670,6 +1670,53 @@ else
 fi
 
 echo
+echo "== 31. Windows release-shape entry points (static; no build, no browser) =="
+# The release-shape scripts must be inspectable without a checkout and must
+# never write anything in --dry-run. They are separate from the WinDev entry
+# points on purpose: out/WinDev and chromium/args-windows.gn stay untouched.
+WIN_REL_CONFIGURE_OUT="$TMP/win-release-configure.txt"
+BROWSER_CLI_CHROMIUM_SRC="$TMP/no-such-checkout" "$SCRIPTS/configure-windows-release.sh" --dry-run >"$WIN_REL_CONFIGURE_OUT" 2>&1
+WIN_REL_CONFIGURE_RC=$?
+if [ "$WIN_REL_CONFIGURE_RC" -eq 0 ]    && grep -q 'gen out/WinRelease' "$WIN_REL_CONFIGURE_OUT"    && grep -q 'args-windows-release.gn' "$WIN_REL_CONFIGURE_OUT"    && grep -q 'nothing executed' "$WIN_REL_CONFIGURE_OUT"; then
+  ok "configure-windows-release --dry-run targets out/WinRelease with release args (rc=0)"
+else
+  bad "configure-windows-release --dry-run plan (rc=$WIN_REL_CONFIGURE_RC)"
+  sed 's/^/      /' "$WIN_REL_CONFIGURE_OUT" | head -6
+fi
+WIN_REL_BUILD_OUT="$TMP/win-release-build.txt"
+BROWSER_CLI_CHROMIUM_SRC="$TMP/no-such-checkout" "$SCRIPTS/build-windows-release.sh" --dry-run >"$WIN_REL_BUILD_OUT" 2>&1
+WIN_REL_BUILD_RC=$?
+if [ "$WIN_REL_BUILD_RC" -eq 0 ]    && grep -q -- '-C out/WinRelease -j 6 chrome' "$WIN_REL_BUILD_OUT"    && grep -q 'NOT a signed release' "$WIN_REL_BUILD_OUT"    && grep -q 'nothing executed' "$WIN_REL_BUILD_OUT"; then
+  ok "build-windows-release --dry-run targets out/WinRelease and never signs (rc=0)"
+else
+  bad "build-windows-release --dry-run plan (rc=$WIN_REL_BUILD_RC)"
+  sed 's/^/      /' "$WIN_REL_BUILD_OUT" | head -6
+fi
+WIN_REL_PREFLIGHT_OUT="$TMP/win-release-preflight.txt"
+BROWSER_CLI_CHROMIUM_SRC="$TMP/no-such-checkout" "$SCRIPTS/preflight-windows-release.sh" --dry-run >"$WIN_REL_PREFLIGHT_OUT" 2>&1
+WIN_REL_PREFLIGHT_RC=$?
+if [ "$WIN_REL_PREFLIGHT_RC" -eq 0 ]    && grep -q 'never sign' "$WIN_REL_PREFLIGHT_OUT"    && grep -q 'internal-unsigned-test-build' "$WIN_REL_PREFLIGHT_OUT"    && grep -q 'nothing executed' "$WIN_REL_PREFLIGHT_OUT"; then
+  ok "preflight-windows-release --dry-run is read-only and distinguishes artifact classes"
+else
+  bad "preflight-windows-release --dry-run plan (rc=$WIN_REL_PREFLIGHT_RC)"
+  sed 's/^/      /' "$WIN_REL_PREFLIGHT_OUT" | head -6
+fi
+expect_fail_msg "configure-windows-release rejects an unknown argument" "unknown argument" --   "$SCRIPTS/configure-windows-release.sh" --args-windows.gn
+expect_fail_msg "build-windows-release rejects --out (out/WinRelease is fixed)" "is fixed to out/WinRelease" --   "$SCRIPTS/build-windows-release.sh" --out out/WinDev
+expect_fail_msg "preflight-windows-release rejects an unknown mode" "internal or public" --   "$SCRIPTS/preflight-windows-release.sh" --mode signed
+if [ -e "$TMP/no-such-checkout" ] || [ -d "$REPO_ROOT/build-logs/windows-release-preflight" ]; then
+  bad "release-shape dry-run wrote something"
+else
+  ok "release-shape dry-run writes nothing"
+fi
+grep -v '^[[:space:]]*#' "$REPO_ROOT/chromium/args-windows-release.gn" >"$TMP/args-windows-release-active.gn" 2>/dev/null || true
+if grep -qE '^is_component_build = false[[:space:]]*$' "$TMP/args-windows-release-active.gn"    && grep -qE '^is_official_build = false[[:space:]]*$' "$TMP/args-windows-release-active.gn"    && grep -qE '^disable_fieldtrial_testing_config = true[[:space:]]*$' "$TMP/args-windows-release-active.gn"    && ! grep -qE '^[^#]*BrowserDynamicCodeDisabled' "$TMP/args-windows-release-active.gn"; then
+  ok "chromium/args-windows-release.gn is non-component, non-official, field-trial-off, no BrowserDynamicCodeDisabled"
+else
+  bad "chromium/args-windows-release.gn drifted from the release shape"
+fi
+
+echo
 echo "== 99. chrome.browserCli allowlist contract =="
 ALLOWLIST_CHECK="$REPO_ROOT/tests/check-extension-allowlist.py"
 if [ -f "$ALLOWLIST_CHECK" ] && command -v python3 >/dev/null 2>&1; then
