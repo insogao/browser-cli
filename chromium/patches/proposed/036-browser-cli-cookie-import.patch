@@ -12,10 +12,10 @@ index 9d7b1f0..000f32c 100644
      ]
 diff --git a/chrome/browser/browser_cli/cookie_import/BUILD.gn b/chrome/browser/browser_cli/cookie_import/BUILD.gn
 new file mode 100644
-index 0000000..1f3a2bd
+index 0000000..30e943f
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/BUILD.gn
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,69 @@
 +# Copyright 2026 The Chromium Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
@@ -25,19 +25,35 @@ index 0000000..1f3a2bd
 +assert(is_win,
 +       "The v2 Browser CLI cookie-import target is Windows-only (named pipe).")
 +
++# Pure policy helpers (ticket/job validation, PSL/prefix/partition rules and
++# CanonicalCookie construction). Kept separate so the unit test does not need
++# to link the browser-process service, dialogs or the Win32 pipe server.
++source_set("cookie_import_policy") {
++  sources = [
++    "cookie_import_policy.cc",
++    "cookie_import_policy.h",
++  ]
++
++  deps = [
++    "//base",
++    "//crypto",
++    "//net",
++    "//url",
++  ]
++}
++
 +source_set("cookie_import") {
 +  sources = [
 +    "cookie_import_dialog.cc",
 +    "cookie_import_dialog.h",
 +    "cookie_import_pipe_server_win.cc",
 +    "cookie_import_pipe_server_win.h",
-+    "cookie_import_policy.cc",
-+    "cookie_import_policy.h",
 +    "cookie_import_service.cc",
 +    "cookie_import_service.h",
 +  ]
 +
 +  deps = [
++    ":cookie_import_policy",
 +    "//base",
 +    "//chrome/browser/profiles:profile",
 +    "//components/version_info",
@@ -46,7 +62,9 @@ index 0000000..1f3a2bd
 +    "//net",
 +    "//services/network/public/mojom",
 +    "//ui/base",
++    "//ui/base/mojom:ui_base_types",
 +    "//ui/gfx",
++    "//ui/gfx/geometry",
 +    "//ui/views",
 +    "//url",
 +  ]
@@ -58,8 +76,9 @@ index 0000000..1f3a2bd
 +  sources = [ "cookie_import_policy_unittest.cc" ]
 +
 +  deps = [
-+    ":cookie_import",
++    ":cookie_import_policy",
 +    "//base",
++    "//base:i18n",
 +    "//base/test:run_all_unittests",
 +    "//base/test:test_support",
 +    "//net",
@@ -68,10 +87,10 @@ index 0000000..1f3a2bd
 +}
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc
 new file mode 100644
-index 0000000..7177403
+index 0000000..bcd43f6
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,189 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -98,40 +117,42 @@ index 0000000..7177403
 +namespace browser_cli {
 +namespace {
 +
-+void ConfigureDialog(views::DialogDelegateView* dialog) {
-+  auto* layout = dialog->SetLayoutManager(std::make_unique<views::BoxLayout>(
++void ConfigureDialog(views::View* view) {
++  auto* layout = view->SetLayoutManager(std::make_unique<views::BoxLayout>(
 +      views::BoxLayout::Orientation::kVertical));
 +  layout->set_inside_border_insets(gfx::Insets(16));
 +  layout->set_between_child_spacing(10);
 +}
 +
-+class SessionDialog : public views::DialogDelegateView {
++class SessionDialog : public views::DialogDelegate {
 + public:
 +  SessionDialog(const std::u16string& ticket, base::OnceClosure on_close)
 +      : on_close_(std::move(on_close)) {
 +    SetTitle(u"Browser CLI cookie import");
 +    SetButtons(static_cast<int>(ui::mojom::DialogButton::kOk));
 +    SetButtonLabel(ui::mojom::DialogButton::kOk, u"Close");
-+    SetAcceptCallback(base::BindOnce(&SessionDialog::Resolve,
-+                                     base::Unretained(this)));
++    SetAcceptCallback(
++        base::BindOnce(&SessionDialog::Resolve, base::Unretained(this)));
 +    SetCloseCallback(
 +        base::BindOnce(&SessionDialog::Resolve, base::Unretained(this)));
-+    ConfigureDialog(this);
++    auto* contents = SetContentsView(std::make_unique<views::View>());
++    ConfigureDialog(contents);
 +
-+    auto* intro = AddChildView(std::make_unique<views::Label>(u"Paste this "
-+                                                              u"one-time ticket "
-+                                                              u"into the "
-+                                                              u"Browser CLI "
-+                                                              u"Import source "
-+                                                              u"extension:"));
++    auto* intro = contents->AddChildView(
++        std::make_unique<views::Label>(u"Paste this "
++                                       u"one-time ticket "
++                                       u"into the "
++                                       u"Browser CLI "
++                                       u"Import source "
++                                       u"extension:"));
 +    intro->SetMultiLine(true);
 +    intro->SetHorizontalAlignment(gfx::ALIGN_LEFT);
 +    auto field = std::make_unique<views::Textfield>();
 +    field->SetReadOnly(true);
 +    field->SetText(ticket);
 +    field->SetAccessibleName(u"Browser CLI cookie import ticket");
-+    AddChildView(std::move(field));
-+    auto* warning = AddChildView(std::make_unique<views::Label>(
++    contents->AddChildView(std::move(field));
++    auto* warning = contents->AddChildView(std::make_unique<views::Label>(
 +        u"The ticket expires in 5 minutes and can be used once. The source "
 +        u"extension can read cookies only for the domains you select; this "
 +        u"browser will ask you to approve that exact scope again. Closing "
@@ -155,7 +176,7 @@ index 0000000..7177403
 +  base::OnceClosure on_close_;
 +};
 +
-+class ApprovalDialog : public views::DialogDelegateView {
++class ApprovalDialog : public views::DialogDelegate {
 + public:
 +  ApprovalDialog(const ApprovalRequest& request,
 +                 base::OnceCallback<void(bool)> on_result)
@@ -171,13 +192,14 @@ index 0000000..7177403
 +                                     base::Unretained(this), false));
 +    SetCloseCallback(base::BindOnce(&ApprovalDialog::Resolve,
 +                                    base::Unretained(this), false));
-+    ConfigureDialog(this);
++    auto* contents = SetContentsView(std::make_unique<views::View>());
++    ConfigureDialog(contents);
 +
 +    std::u16string source = base::UTF8ToUTF16(
 +        request.source_browser + (request.profile_label.empty()
 +                                      ? std::string()
 +                                      : " / " + request.profile_label));
-+    auto* summary = AddChildView(std::make_unique<views::Label>(
++    auto* summary = contents->AddChildView(std::make_unique<views::Label>(
 +        u"Source: " + source + u"\nCookies: " +
 +        base::NumberToString16(request.cookie_count) + u" (" +
 +        base::NumberToString16(request.session_cookie_count) +
@@ -189,8 +211,8 @@ index 0000000..7177403
 +
 +    std::u16string domains;
 +    constexpr size_t kMaxShownDomains = 40;
-+    for (size_t i = 0;
-+         i < request.domains.size() && i < kMaxShownDomains; ++i) {
++    for (size_t i = 0; i < request.domains.size() && i < kMaxShownDomains;
++         ++i) {
 +      if (!domains.empty()) {
 +        domains.append(u"\n");
 +      }
@@ -199,16 +221,16 @@ index 0000000..7177403
 +    }
 +    if (request.domains.size() > kMaxShownDomains) {
 +      domains.append(u"\n… and ");
-+      domains.append(base::NumberToString16(request.domains.size() -
-+                                            kMaxShownDomains));
++      domains.append(
++          base::NumberToString16(request.domains.size() - kMaxShownDomains));
 +      domains.append(u" more");
 +    }
-+    auto* list = AddChildView(
++    auto* list = contents->AddChildView(
 +        std::make_unique<views::Label>(u"Domains in this import:\n" + domains));
 +    list->SetMultiLine(true);
 +    list->SetHorizontalAlignment(gfx::ALIGN_LEFT);
 +
-+    auto* warning = AddChildView(std::make_unique<views::Label>(
++    auto* warning = contents->AddChildView(std::make_unique<views::Label>(
 +        u"Only allow this if you started the import in Browser CLI and "
 +        u"recognize the source and domains. Cookie import is not login "
 +        u"verification; you must check the websites yourself afterwards."));
@@ -231,11 +253,15 @@ index 0000000..7177403
 +  base::OnceCallback<void(bool)> on_result_;
 +};
 +
-+void ShowDialog(std::unique_ptr<views::DialogDelegateView> dialog) {
++void ShowDialog(std::unique_ptr<views::DialogDelegate> dialog) {
 +  views::Widget* widget = views::DialogDelegate::CreateDialogWidget(
 +      std::move(dialog), /*context=*/nullptr, /*parent=*/nullptr);
 +  if (widget) {
 +    widget->Show();
++    // The browser may be running without a visible window (managed hidden
++    // mode). The import flow is user-triggered, so bring the consent UI to the
++    // front instead of relying on an existing browser window.
++    widget->Activate();
 +  }
 +}
 +
@@ -246,11 +272,9 @@ index 0000000..7177403
 +  ShowDialog(std::make_unique<SessionDialog>(ticket, std::move(on_close)));
 +}
 +
-+void ShowCookieImportApprovalDialog(
-+    const ApprovalRequest& request,
-+    base::OnceCallback<void(bool)> on_result) {
-+  ShowDialog(
-+      std::make_unique<ApprovalDialog>(request, std::move(on_result)));
++void ShowCookieImportApprovalDialog(const ApprovalRequest& request,
++                                    base::OnceCallback<void(bool)> on_result) {
++  ShowDialog(std::make_unique<ApprovalDialog>(request, std::move(on_result)));
 +}
 +
 +}  // namespace browser_cli
@@ -258,10 +282,10 @@ index 0000000..7177403
 +#endif  // BUILDFLAG(IS_WIN)
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h
 new file mode 100644
-index 0000000..44df20b
+index 0000000..f61fab1
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,32 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -286,9 +310,8 @@ index 0000000..44df20b
 +// Shows the target-side authorization prompt. This is the only place where a
 +// product target may set authorization.targetUserConfirmed = true; closing or
 +// denying the dialog writes nothing.
-+void ShowCookieImportApprovalDialog(
-+    const ApprovalRequest& request,
-+    base::OnceCallback<void(bool)> on_result);
++void ShowCookieImportApprovalDialog(const ApprovalRequest& request,
++                                    base::OnceCallback<void(bool)> on_result);
 +
 +}  // namespace browser_cli
 +
@@ -297,10 +320,10 @@ index 0000000..44df20b
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_DIALOG_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
 new file mode 100644
-index 0000000..9e2ad7d
+index 0000000..29816de
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,304 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -308,6 +331,7 @@ index 0000000..9e2ad7d
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h"
 +
 +#include <windows.h>
++
 +#include <sddl.h>
 +
 +#include <algorithm>
@@ -321,6 +345,7 @@ index 0000000..9e2ad7d
 +#include "base/logging.h"
 +#include "base/memory/ref_counted.h"
 +#include "base/synchronization/lock.h"
++#include "base/synchronization/waitable_event.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/threading/platform_thread.h"
 +#include "base/time/time.h"
@@ -331,10 +356,9 @@ index 0000000..9e2ad7d
 +namespace browser_cli {
 +namespace {
 +
-+constexpr wchar_t kPipeSecurityDescriptor[] =
-+    L"D:(A;;GA;;;OW)(A;;GA;;;SY)";
++constexpr wchar_t kPipeSecurityDescriptor[] = L"D:(A;;GA;;;OW)(A;;GA;;;SY)";
 +
-+std::string EncodeFrame(const base::Value::Dict& message) {
++std::string EncodeFrame(const base::DictValue& message) {
 +  std::string json;
 +  if (!base::JSONWriter::Write(message, &json) ||
 +      json.size() > static_cast<size_t>(kMaxFrameBytes)) {
@@ -359,7 +383,7 @@ index 0000000..9e2ad7d
 +  Core(std::wstring pipe_name, Delegate* delegate)
 +      : pipe_name_(std::move(pipe_name)), delegate_(delegate) {}
 +
-+  void Enqueue(base::Value::Dict message) {
++  void Enqueue(base::DictValue message) {
 +    std::string frame = EncodeFrame(message);
 +    if (frame.empty()) {
 +      return;
@@ -373,6 +397,12 @@ index 0000000..9e2ad7d
 +
 +  void RequestStop() { stop_.store(true); }
 +
++  // Blocks until the pipe has been created (or creation failed).
++  bool WaitForStart() {
++    started_.Wait();
++    return start_ok_.load();
++  }
++
 +  void Run();
 +
 + private:
@@ -381,16 +411,19 @@ index 0000000..9e2ad7d
 +
 +  bool ProcessBuffer(std::string* buffer);
 +  void DrainWrites(HANDLE pipe);
-+  void PostMessage(base::Value::Dict message);
++  void PostMessage(base::DictValue message);
 +
 +  const std::wstring pipe_name_;
 +  const raw_ptr<Delegate> delegate_;
 +  std::atomic<bool> stop_{false};
++  std::atomic<bool> start_ok_{false};
++  base::WaitableEvent started_{base::WaitableEvent::ResetPolicy::MANUAL,
++                               base::WaitableEvent::InitialState::NOT_SIGNALED};
 +  base::Lock lock_;
 +  std::deque<std::string> write_queue_;
 +};
 +
-+void CookieImportPipeServer::Core::PostMessage(base::Value::Dict message) {
++void CookieImportPipeServer::Core::PostMessage(base::DictValue message) {
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE,
 +      base::BindOnce(&Delegate::OnImportPipeMessage,
@@ -412,7 +445,7 @@ index 0000000..9e2ad7d
 +    }
 +    std::string json = buffer->substr(4, length);
 +    buffer->erase(0, 4 + length);
-+    std::optional<base::Value::Dict> message =
++    std::optional<base::DictValue> message =
 +        base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC,
 +                                   /*max_depth=*/64);
 +    if (!message) {
@@ -436,12 +469,19 @@ index 0000000..9e2ad7d
 +    DWORD written = 0;
 +    if (!::WriteFile(pipe, frame.data(), static_cast<DWORD>(frame.size()),
 +                     &written, nullptr) ||
-+        written != frame.size()) {
++        written == 0) {
 +      return;
 +    }
 +    base::AutoLock lock(lock_);
 +    if (!write_queue_.empty()) {
-+      write_queue_.pop_front();
++      if (written >= write_queue_.front().size()) {
++        write_queue_.pop_front();
++      } else {
++        // A byte-mode pipe may accept a prefix; keep the remainder rather than
++        // re-sending bytes that the peer already received.
++        write_queue_.front().erase(0, written);
++        return;
++      }
 +    }
 +  }
 +}
@@ -458,15 +498,17 @@ index 0000000..9e2ad7d
 +  }
 +
 +  HANDLE pipe = ::CreateNamedPipeW(
-+      pipe_name_.c_str(),
-+      PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE |
-+          PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS | PIPE_NOWAIT,
++      pipe_name_.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
++      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS |
++          PIPE_NOWAIT,
 +      /*nMaxInstances=*/1, /*nOutBufferSize=*/64 * 1024,
 +      /*nInBufferSize=*/64 * 1024, /*nDefaultTimeOut=*/0,
 +      security_descriptor ? &security_attributes : nullptr);
 +  if (security_descriptor) {
 +    ::LocalFree(security_descriptor);
 +  }
++  start_ok_.store(pipe != INVALID_HANDLE_VALUE);
++  started_.Signal();
 +  if (pipe == INVALID_HANDLE_VALUE) {
 +    return;
 +  }
@@ -482,9 +524,8 @@ index 0000000..9e2ad7d
 +          client_pid = 0;
 +        }
 +        content::GetUIThreadTaskRunner({})->PostTask(
-+            FROM_HERE,
-+            base::BindOnce(&Delegate::OnImportPipeConnected,
-+                           base::Unretained(delegate_), client_pid));
++            FROM_HERE, base::BindOnce(&Delegate::OnImportPipeConnected,
++                                      base::Unretained(delegate_), client_pid));
 +      } else {
 +        const DWORD error = ::GetLastError();
 +        if (error == ERROR_PIPE_CONNECTED) {
@@ -532,9 +573,8 @@ index 0000000..9e2ad7d
 +  }
 +
 +  content::GetUIThreadTaskRunner({})->PostTask(
-+      FROM_HERE,
-+      base::BindOnce(&Delegate::OnImportPipeDisconnected,
-+                     base::Unretained(delegate_)));
++      FROM_HERE, base::BindOnce(&Delegate::OnImportPipeDisconnected,
++                                base::Unretained(delegate_)));
 +  if (connected) {
 +    ::DisconnectNamedPipe(pipe);
 +  }
@@ -572,10 +612,10 @@ index 0000000..9e2ad7d
 +  }
 +  thread_ = std::make_unique<CookieImportPipeThread>(core_);
 +  thread_->Start();
-+  return true;
++  return core_->WaitForStart();
 +}
 +
-+void CookieImportPipeServer::Send(base::Value::Dict message) {
++void CookieImportPipeServer::Send(base::DictValue message) {
 +  core_->Enqueue(std::move(message));
 +}
 +
@@ -590,7 +630,7 @@ index 0000000..9e2ad7d
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h
 new file mode 100644
-index 0000000..36f2891
+index 0000000..a3de376
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h
 @@ -0,0 +1,64 @@
@@ -632,7 +672,7 @@ index 0000000..36f2891
 +   public:
 +    virtual ~Delegate() = default;
 +    virtual void OnImportPipeConnected(uint32_t client_pid) = 0;
-+    virtual void OnImportPipeMessage(base::Value::Dict message) = 0;
++    virtual void OnImportPipeMessage(base::DictValue message) = 0;
 +    virtual void OnImportPipeDisconnected() = 0;
 +  };
 +
@@ -642,7 +682,7 @@ index 0000000..36f2891
 +  ~CookieImportPipeServer();
 +
 +  bool Start();
-+  void Send(base::Value::Dict message);
++  void Send(base::DictValue message);
 +  void Stop();
 +
 +  // Public only so the pipe thread implementation in the .cc can subclass
@@ -660,10 +700,10 @@ index 0000000..36f2891
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_PIPE_SERVER_WIN_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc
 new file mode 100644
-index 0000000..9ae5fea
+index 0000000..6f732a8
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc
-@@ -0,0 +1,706 @@
+@@ -0,0 +1,701 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -676,7 +716,6 @@ index 0000000..9ae5fea
 +#include <utility>
 +
 +#include "base/base64.h"
-+#include "base/containers/contains.h"
 +#include "base/json/json_reader.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_split.h"
@@ -809,8 +848,7 @@ index 0000000..9ae5fea
 +    return "invalid-cookie";
 +  }
 +  if (!base::StartsWith(cookie.path, "/") ||
-+      cookie.path.size() > kMaxPathBytes ||
-+      HasControlCharacters(cookie.path)) {
++      cookie.path.size() > kMaxPathBytes || HasControlCharacters(cookie.path)) {
 +    return "invalid-cookie";
 +  }
 +  if (cookie.same_site.empty()) {
@@ -838,7 +876,7 @@ index 0000000..9ae5fea
 +  return PrefixFailure(cookie);
 +}
 +
-+bool GetRequiredString(const base::Value::Dict& dict,
++bool GetRequiredString(const base::DictValue& dict,
 +                       std::string_view key,
 +                       std::string* out) {
 +  const std::string* value = dict.FindString(key);
@@ -849,7 +887,7 @@ index 0000000..9ae5fea
 +  return true;
 +}
 +
-+bool ParseCookieRecord(const base::Value::Dict& dict,
++bool ParseCookieRecord(const base::DictValue& dict,
 +                       base::Time now,
 +                       CookieRecord* cookie,
 +                       std::string* error) {
@@ -889,7 +927,7 @@ index 0000000..9ae5fea
 +    *error = "expiry-rejected";
 +    return false;
 +  }
-+  const base::Value::Dict* partition = dict.FindDict("partitionKey");
++  const base::DictValue* partition = dict.FindDict("partitionKey");
 +  if (dict.contains("partitionKey") && !partition) {
 +    *error = "partitioned-cookie-rejected";
 +    return false;
@@ -924,8 +962,8 @@ index 0000000..9ae5fea
 +}
 +
 +std::string NormalizeTicket(std::string_view raw) {
-+  std::string value = base::ToUpperASCII(base::TrimWhitespaceASCII(
-+      std::string(raw), base::TRIM_ALL));
++  std::string value = base::ToUpperASCII(
++      base::TrimWhitespaceASCII(std::string(raw), base::TRIM_ALL));
 +  if (base::StartsWith(value, base::StrCat({kTicketPrefix, "-"}))) {
 +    value.erase(0, std::string_view(kTicketPrefix).size() + 1);
 +  }
@@ -1030,11 +1068,10 @@ index 0000000..9ae5fea
 +      bare.find("..") != std::string_view::npos) {
 +    return false;
 +  }
-+  for (std::string_view label :
-+       base::SplitStringPiece(bare, ".", base::TRIM_WHITESPACE,
-+                              base::SPLIT_WANT_ALL)) {
-+    if (label.empty() || label.size() > 63 ||
-+        label.front() == '-' || label.back() == '-') {
++  for (std::string_view label : base::SplitStringPiece(
++           bare, ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL)) {
++    if (label.empty() || label.size() > 63 || label.front() == '-' ||
++        label.back() == '-') {
 +      return false;
 +    }
 +    for (char c : label) {
@@ -1076,9 +1113,8 @@ index 0000000..9ae5fea
 +}
 +
 +std::string NormalizeTopLevelSite(std::string_view raw) {
-+  GURL url(std::string(raw));
-+  if (!url.is_valid() ||
-+      (url.scheme() != "https" && url.scheme() != "http") ||
++  GURL url{std::string(raw)};
++  if (!url.is_valid() || (url.scheme() != "https" && url.scheme() != "http") ||
 +      url.host().empty() || url.has_username() || url.has_password() ||
 +      !url.port().empty() || (!url.path().empty() && url.path() != "/") ||
 +      !url.query().empty() || !url.ref().empty()) {
@@ -1087,7 +1123,7 @@ index 0000000..9ae5fea
 +  return base::StrCat({url.scheme(), "://", url.host()});
 +}
 +
-+std::optional<ImportJob> ParseImportJob(const base::Value::Dict& payload,
++std::optional<ImportJob> ParseImportJob(const base::DictValue& payload,
 +                                        base::Time now,
 +                                        std::string* error) {
 +  *error = std::string();
@@ -1103,7 +1139,7 @@ index 0000000..9ae5fea
 +    return std::nullopt;
 +  }
 +
-+  const base::Value::Dict* source = payload.FindDict("source");
++  const base::DictValue* source = payload.FindDict("source");
 +  if (!source || !GetRequiredString(*source, "browser", &job.source_browser)) {
 +    *error = "protocol-mismatch";
 +    return std::nullopt;
@@ -1125,7 +1161,7 @@ index 0000000..9ae5fea
 +    job.extension_version = *version;
 +  }
 +
-+  const base::Value::Dict* consent = payload.FindDict("consent");
++  const base::DictValue* consent = payload.FindDict("consent");
 +  if (!consent) {
 +    *error = "consent.missing";
 +    return std::nullopt;
@@ -1134,13 +1170,12 @@ index 0000000..9ae5fea
 +  const std::string* consent_at = consent->FindString("at");
 +  const std::string* consent_version = consent->FindString("extensionVersion");
 +  const std::string* consent_scope = consent->FindString("scope");
-+  if (!consent_kind || *consent_kind != "explicit-user-action" ||
-+      !consent_at || !consent_version || consent_version->empty() ||
++  if (!consent_kind || *consent_kind != "explicit-user-action" || !consent_at ||
++      !consent_version || consent_version->empty() ||
 +      consent_version->size() > 64 || !consent_scope ||
 +      *consent_scope != "selected-domains" ||
 +      !GetRequiredString(*consent, "domainsDigest", &job.domains_digest) ||
-+      job.domains_digest.size() != 64 ||
-+      !IsLowerHex(job.domains_digest)) {
++      job.domains_digest.size() != 64 || !IsLowerHex(job.domains_digest)) {
 +    *error = "consent.invalid";
 +    return std::nullopt;
 +  }
@@ -1154,7 +1189,7 @@ index 0000000..9ae5fea
 +    return std::nullopt;
 +  }
 +
-+  const base::Value::List* domains = payload.FindList("domains");
++  const base::ListValue* domains = payload.FindList("domains");
 +  if (!domains || domains->empty() || domains->size() > kMaxSelectedDomains) {
 +    *error = "domains-invalid";
 +    return std::nullopt;
@@ -1173,13 +1208,13 @@ index 0000000..9ae5fea
 +    job.domains.push_back(std::move(domain));
 +  }
 +
-+  const base::Value::List* cookies = payload.FindList("cookies");
++  const base::ListValue* cookies = payload.FindList("cookies");
 +  if (!cookies || cookies->empty() || cookies->size() > kMaxCookiesPerJob) {
 +    *error = "cookies-invalid";
 +    return std::nullopt;
 +  }
 +  for (const base::Value& value : *cookies) {
-+    const base::Value::Dict* dict = value.GetIfDict();
++    const base::DictValue* dict = value.GetIfDict();
 +    if (!dict) {
 +      *error = "invalid-cookie";
 +      return std::nullopt;
@@ -1240,8 +1275,7 @@ index 0000000..9ae5fea
 +    std::string* failure) {
 +  *failure = std::string();
 +  std::string bare = cookie.host_only ? cookie.domain : cookie.domain.substr(1);
-+  GURL url(base::StrCat(
-+      {cookie.secure ? "https" : "http", "://", bare, "/"}));
++  GURL url(base::StrCat({cookie.secure ? "https" : "http", "://", bare, "/"}));
 +  if (!url.is_valid() || url.host().empty() ||
 +      !base::EqualsCaseInsensitiveASCII(url.host(), bare)) {
 +    *failure = "invalid-url";
@@ -1284,8 +1318,7 @@ index 0000000..9ae5fea
 +  if (status.HasExclusionReason(ExclusionReason::EXCLUDE_INVALID_PREFIX)) {
 +    return "cookie-prefix-rejected";
 +  }
-+  if (status.HasExclusionReason(
-+          ExclusionReason::EXCLUDE_INVALID_PARTITIONED)) {
++  if (status.HasExclusionReason(ExclusionReason::EXCLUDE_INVALID_PARTITIONED)) {
 +    return "partitioned-cookie-rejected";
 +  }
 +  if (status.HasExclusionReason(
@@ -1299,7 +1332,8 @@ index 0000000..9ae5fea
 +  }
 +  if (status.HasExclusionReason(
 +          ExclusionReason::EXCLUDE_NAME_VALUE_PAIR_EXCEEDS_MAX_SIZE) ||
-+      status.HasExclusionReason(ExclusionReason::EXCLUDE_DISALLOWED_CHARACTER) ||
++      status.HasExclusionReason(
++          ExclusionReason::EXCLUDE_DISALLOWED_CHARACTER) ||
 +      status.HasExclusionReason(ExclusionReason::EXCLUDE_NO_COOKIE_CONTENT) ||
 +      status.HasExclusionReason(ExclusionReason::EXCLUDE_INVALID_PATH) ||
 +      status.HasExclusionReason(
@@ -1309,7 +1343,8 @@ index 0000000..9ae5fea
 +    return "invalid-cookie";
 +  }
 +  if (status.HasExclusionReason(ExclusionReason::EXCLUDE_SECURE_ONLY) ||
-+      status.HasExclusionReason(ExclusionReason::EXCLUDE_NONCOOKIEABLE_SCHEME) ||
++      status.HasExclusionReason(
++          ExclusionReason::EXCLUDE_NONCOOKIEABLE_SCHEME) ||
 +      status.HasExclusionReason(ExclusionReason::EXCLUDE_SCHEME_MISMATCH)) {
 +    return "invalid-url";
 +  }
@@ -1320,10 +1355,10 @@ index 0000000..9ae5fea
 +}
 +
 +bool IsCookieFailureCode(std::string_view code) {
-+  return base::Contains(
++  const std::vector<std::string_view> codes =
 +      base::SplitStringPiece(kCookieFailureCodes, " ", base::TRIM_WHITESPACE,
-+                             base::SPLIT_WANT_NONEMPTY),
-+      code);
++                             base::SPLIT_WANT_NONEMPTY);
++  return std::find(codes.begin(), codes.end(), code) != codes.end();
 +}
 +
 +std::string FailureText(std::string_view code) {
@@ -1372,10 +1407,10 @@ index 0000000..9ae5fea
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h
 new file mode 100644
-index 0000000..4d395d4
+index 0000000..318a926
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,141 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1391,6 +1426,7 @@ index 0000000..4d395d4
 +#include <vector>
 +
 +#include "base/time/time.h"
++#include "base/values.h"
 +#include "net/cookies/canonical_cookie.h"
 +#include "net/cookies/cookie_inclusion_status.h"
 +
@@ -1400,8 +1436,7 @@ index 0000000..4d395d4
 +// messaging host relay. Keep these values byte-identical to
 +// D:/work/wt/bp-rc-p1/scripts/import/contract.mjs (contract v2).
 +inline constexpr char kContractId[] = "browser-cli.cookie-import/v2";
-+inline constexpr char kSessionSchema[] =
-+    "browser-cli.cookie-import.session/v2";
++inline constexpr char kSessionSchema[] = "browser-cli.cookie-import.session/v2";
 +inline constexpr int kProtocolVersion = 2;
 +inline constexpr int kMaxCookiesPerJob = 20000;
 +inline constexpr int kMaxSelectedDomains = 1000;
@@ -1491,16 +1526,17 @@ index 0000000..4d395d4
 +// stable code (never a cookie value/name/domain). The parser does not apply the
 +// Public Suffix List; that is enforced per cookie at write time so a single
 +// bad record becomes a counted failure instead of a whole-job rejection.
-+std::optional<ImportJob> ParseImportJob(const base::Value::Dict& payload,
++std::optional<ImportJob> ParseImportJob(const base::DictValue& payload,
 +                                        base::Time now,
 +                                        std::string* error);
 +
 +// Per-cookie policy check used at write time. Returns an empty string on
 +// success, otherwise one of the cookie failure codes.
-+std::string CookiePolicyFailure(const CookieRecord& cookie,
-+                                const std::vector<std::string>& selected_domains,
-+                                base::Time now,
-+                                bool include_public_suffix_check = true);
++std::string CookiePolicyFailure(
++    const CookieRecord& cookie,
++    const std::vector<std::string>& selected_domains,
++    base::Time now,
++    bool include_public_suffix_check = true);
 +
 +// Builds the net::CanonicalCookie that the browser's CookieManager will write.
 +// The caller must not write the Cookies SQLite file directly.
@@ -1518,10 +1554,10 @@ index 0000000..4d395d4
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_POLICY_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc
 new file mode 100644
-index 0000000..c7a626c
+index 0000000..d6847a6
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,298 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1542,8 +1578,8 @@ index 0000000..c7a626c
 +namespace browser_cli {
 +namespace {
 +
-+base::Value::Dict MakeCookie() {
-+  base::Value::Dict cookie;
++base::DictValue MakeCookie() {
++  base::DictValue cookie;
 +  cookie.Set("domain", ".example.com");
 +  cookie.Set("hostOnly", false);
 +  cookie.Set("path", "/");
@@ -1557,25 +1593,25 @@ index 0000000..c7a626c
 +  return cookie;
 +}
 +
-+base::Value::Dict MakeJob() {
-+  base::Value::List domains;
++base::DictValue MakeJob() {
++  base::ListValue domains;
 +  domains.Append("example.com");
-+  base::Value::List cookies;
++  base::ListValue cookies;
 +  cookies.Append(MakeCookie());
 +
-+  base::Value::Dict source;
++  base::DictValue source;
 +  source.Set("browser", "chrome");
 +  source.Set("profileLabel", "Synthetic");
 +  source.Set("extensionVersion", "0.3.0");
 +
-+  base::Value::Dict consent;
++  base::DictValue consent;
 +  consent.Set("kind", "explicit-user-action");
 +  consent.Set("at", base::TimeFormatAsIso8601(base::Time::Now()));
 +  consent.Set("extensionVersion", "0.3.0");
 +  consent.Set("scope", "selected-domains");
 +  consent.Set("domainsDigest", DomainsDigest({"example.com"}));
 +
-+  base::Value::Dict job;
++  base::DictValue job;
 +  job.Set("contract", kContractId);
 +  job.Set("protocolVersion", kProtocolVersion);
 +  job.Set("jobNonce", std::string(32, 'a'));
@@ -1586,7 +1622,7 @@ index 0000000..c7a626c
 +  return job;
 +}
 +
-+std::optional<ImportJob> Parse(const base::Value::Dict& job) {
++std::optional<ImportJob> Parse(const base::DictValue& job) {
 +  std::string error;
 +  std::optional<ImportJob> result =
 +      ParseImportJob(job, base::Time::Now(), &error);
@@ -1607,13 +1643,13 @@ index 0000000..c7a626c
 +  EXPECT_EQ(64u, hash.size());
 +  EXPECT_EQ(hash, TicketHash(formatted));
 +  EXPECT_EQ(std::string::npos, hash.find(ticket));
-+  EXPECT_EQ(32u, NormalizeTicket("BCLI-0000-0000-0000-0000-0000-0000-0000-0000")
-+                     .size());
++  EXPECT_EQ(
++      32u,
++      NormalizeTicket("BCLI-0000-0000-0000-0000-0000-0000-0000-0000").size());
 +}
 +
 +TEST(CookieImportPolicyTest, DomainsDigestIsOrderIndependent) {
-+  const std::string first =
-+      DomainsDigest({"b.example.com", "a.example.com"});
++  const std::string first = DomainsDigest({"b.example.com", "a.example.com"});
 +  const std::string second =
 +      DomainsDigest({"a.example.com", "b.example.com", "a.example.com"});
 +  EXPECT_EQ(first, second);
@@ -1621,9 +1657,9 @@ index 0000000..c7a626c
 +}
 +
 +TEST(CookieImportPolicyTest, ParsesValidJobAndCountsSessionCookies) {
-+  base::Value::Dict job = MakeJob();
-+  base::Value::List cookies;
-+  base::Value::Dict session = MakeCookie();
++  base::DictValue job = MakeJob();
++  base::ListValue cookies;
++  base::DictValue session = MakeCookie();
 +  session.Set("name", "session");
 +  session.Set("session", true);
 +  session.Remove("expirationDate");
@@ -1643,28 +1679,28 @@ index 0000000..c7a626c
 +
 +TEST(CookieImportPolicyTest, RejectsMalformedJobs) {
 +  {
-+    base::Value::Dict job = MakeJob();
++    base::DictValue job = MakeJob();
 +    job.Remove("consent");
 +    EXPECT_FALSE(Parse(job).has_value());
 +  }
 +  {
-+    base::Value::Dict job = MakeJob();
++    base::DictValue job = MakeJob();
 +    job.Set("jobNonce", "short");
 +    EXPECT_FALSE(Parse(job).has_value());
 +  }
 +  {
-+    base::Value::Dict job = MakeJob();
-+    base::Value::List domains;
++    base::DictValue job = MakeJob();
++    base::ListValue domains;
 +    domains.Append("other.com");
 +    job.Set("domains", std::move(domains));
-+    base::Value::Dict consent = *job.FindDict("consent");
++    base::DictValue consent = std::move(*job.FindDict("consent"));
 +    consent.Set("domainsDigest", DomainsDigest({"other.com"}));
 +    job.Set("consent", std::move(consent));
 +    EXPECT_FALSE(Parse(job).has_value());
 +  }
 +  {
-+    base::Value::Dict job = MakeJob();
-+    base::Value::Dict consent = *job.FindDict("consent");
++    base::DictValue job = MakeJob();
++    base::DictValue consent = std::move(*job.FindDict("consent"));
 +    consent.Set("at", "2000-01-01T00:00:00Z");
 +    job.Set("consent", std::move(consent));
 +    EXPECT_FALSE(Parse(job).has_value());
@@ -1672,53 +1708,53 @@ index 0000000..c7a626c
 +}
 +
 +TEST(CookieImportPolicyTest, RejectsInvalidCookieAttributes) {
-+  auto with_cookie = [](base::Value::Dict cookie) {
-+    base::Value::Dict job = MakeJob();
-+    base::Value::List cookies;
++  auto with_cookie = [](base::DictValue cookie) {
++    base::DictValue job = MakeJob();
++    base::ListValue cookies;
 +    cookies.Append(std::move(cookie));
 +    job.Set("cookies", std::move(cookies));
 +    return job;
 +  };
 +
 +  {
-+    base::Value::Dict cookie = MakeCookie();
++    base::DictValue cookie = MakeCookie();
 +    cookie.Set("hostOnly", true);
 +    EXPECT_FALSE(Parse(with_cookie(std::move(cookie))).has_value());
 +  }
 +  {
-+    base::Value::Dict cookie = MakeCookie();
++    base::DictValue cookie = MakeCookie();
 +    cookie.Set("domain", "example.com");
 +    cookie.Set("hostOnly", false);
 +    EXPECT_FALSE(Parse(with_cookie(std::move(cookie))).has_value());
 +  }
 +  {
-+    base::Value::Dict cookie = MakeCookie();
++    base::DictValue cookie = MakeCookie();
 +    cookie.Set("session", true);
 +    EXPECT_FALSE(Parse(with_cookie(std::move(cookie))).has_value());
 +  }
 +  {
-+    base::Value::Dict cookie = MakeCookie();
++    base::DictValue cookie = MakeCookie();
 +    cookie.Set("sameSite", "no_restriction");
 +    cookie.Set("secure", false);
 +    EXPECT_FALSE(Parse(with_cookie(std::move(cookie))).has_value());
 +  }
 +  {
-+    base::Value::Dict cookie = MakeCookie();
++    base::DictValue cookie = MakeCookie();
 +    cookie.Set("secure", false);
-+    base::Value::Dict partition;
++    base::DictValue partition;
 +    partition.Set("topLevelSite", "https://top.example");
 +    partition.Set("hasCrossSiteAncestor", true);
 +    cookie.Set("partitionKey", std::move(partition));
 +    EXPECT_FALSE(Parse(with_cookie(std::move(cookie))).has_value());
 +  }
 +  {
-+    base::Value::Dict cookie = MakeCookie();
++    base::DictValue cookie = MakeCookie();
 +    cookie.Set("name", "__Host-sid");
 +    EXPECT_FALSE(Parse(with_cookie(std::move(cookie))).has_value());
 +  }
 +  {
-+    base::Value::Dict cookie = MakeCookie();
-+    base::Value::Dict partition;
++    base::DictValue cookie = MakeCookie();
++    base::DictValue partition;
 +    partition.Set("topLevelSite", "https://top.example/path");
 +    partition.Set("hasCrossSiteAncestor", true);
 +    cookie.Set("partitionKey", std::move(partition));
@@ -1762,7 +1798,7 @@ index 0000000..c7a626c
 +  domain.host_only = false;
 +  cookie = BuildCanonicalCookie(domain, &failure);
 +  ASSERT_TRUE(cookie.has_value()) << failure;
-+  EXPECT_FALSE(cookie->IsDomainCookie());
++  EXPECT_TRUE(cookie->IsDomainCookie());
 +  EXPECT_EQ(".example.com", cookie->Domain());
 +
 +  CookieRecord partitioned = domain;
@@ -1797,9 +1833,9 @@ index 0000000..c7a626c
 +  CookieRecord bad_prefix = cookie;
 +  bad_prefix.domain = ".example.com";
 +  bad_prefix.name = "__Host-sid";
-+  EXPECT_EQ("cookie-prefix-rejected",
-+            CookiePolicyFailure(bad_prefix, {"example.com"},
-+                                base::Time::Now()));
++  EXPECT_EQ(
++      "cookie-prefix-rejected",
++      CookiePolicyFailure(bad_prefix, {"example.com"}, base::Time::Now()));
 +}
 +
 +TEST(CookieImportPolicyTest, MapsInclusionStatusToStableCodes) {
@@ -1814,19 +1850,18 @@ index 0000000..c7a626c
 +  EXPECT_EQ("invalid-domain", FailureCodeForInclusionStatus(status));
 +
 +  status = net::CookieInclusionStatus();
-+  status.AddExclusionReason(
-+      net::CookieInclusionStatus::ExclusionReason::
-+          EXCLUDE_SAMESITE_NONE_INSECURE);
++  status.AddExclusionReason(net::CookieInclusionStatus::ExclusionReason::
++                                EXCLUDE_SAMESITE_NONE_INSECURE);
 +  EXPECT_EQ("samesite-rejected", FailureCodeForInclusionStatus(status));
 +}
 +
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc
 new file mode 100644
-index 0000000..ff8679b
+index 0000000..33e8ad1
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc
-@@ -0,0 +1,890 @@
+@@ -0,0 +1,918 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1877,7 +1912,7 @@ index 0000000..ff8679b
 +  return base::TimeFormatAsIso8601(base::Time::Now());
 +}
 +
-+bool GetString(const base::Value::Dict& dict,
++bool GetString(const base::DictValue& dict,
 +               std::string_view key,
 +               std::string* out) {
 +  const std::string* value = dict.FindString(key);
@@ -1906,10 +1941,9 @@ index 0000000..ff8679b
 +}
 +
 +GURL SourceUrlForCookie(const CookieRecord& cookie) {
-+  std::string host =
-+      cookie.host_only ? cookie.domain : cookie.domain.substr(1);
-+  return GURL(base::StrCat(
-+      {cookie.secure ? "https" : "http", "://", host, "/"}));
++  std::string host = cookie.host_only ? cookie.domain : cookie.domain.substr(1);
++  return GURL(
++      base::StrCat({cookie.secure ? "https" : "http", "://", host, "/"}));
 +}
 +
 +}  // namespace
@@ -1955,7 +1989,8 @@ index 0000000..ff8679b
 +  return g_cookie_import_service;
 +}
 +
-+CookieImportService::CookieImportService(Profile* profile) : profile_(profile) {}
++CookieImportService::CookieImportService(Profile* profile)
++    : profile_(profile) {}
 +
 +CookieImportService::~CookieImportService() = default;
 +
@@ -1977,33 +2012,35 @@ index 0000000..ff8679b
 +  ticket_hash_ = TicketHash(ticket_);
 +  instance_id_ = base::HexEncodeLower(crypto::RandBytesAsVector(16));
 +  const std::vector<uint8_t> salt = crypto::RandBytesAsVector(16);
-+  profile_hash_ = Sha256Hex(
-+      base::StrCat({base::HexEncodeLower(salt), "|",
-+                    profile_->GetPath().AsUTF8Unsafe()}));
++  profile_hash_ = Sha256Hex(base::StrCat(
++      {base::HexEncodeLower(salt), "|", profile_->GetPath().AsUTF8Unsafe()}));
 +  session_expires_at_ = base::Time::Now() + kTicketTtl;
-+  pipe_name_ = L"\\\\.\\pipe\\browser-cli-import-" +
-+               base::ASCIIToWide(instance_id_);
++  pipe_name_ =
++      L"\\\\.\\pipe\\browser-cli-import-" + base::ASCIIToWide(instance_id_);
 +
++  // Create the pipe before publishing the descriptor so the native host cannot
++  // find a session whose pipe does not exist yet.
++  pipe_server_ = std::make_unique<CookieImportPipeServer>(pipe_name_, this);
++  if (!pipe_server_->Start()) {
++    LOG(ERROR) << "cookie import: could not create the named pipe";
++    Shutdown();
++    return;
++  }
++
++  cookie_manager_ = profile_->GetDefaultStoragePartition()
++                        ->GetCookieManagerForBrowserProcess();
 +  if (!WriteDescriptor()) {
 +    LOG(ERROR) << "cookie import: could not write session descriptor";
 +    Shutdown();
 +    return;
 +  }
 +
-+  cookie_manager_ = content::BrowserContext::GetDefaultStoragePartition(profile_)
-+                        ->GetCookieManagerForBrowserProcess();
-+  pipe_server_ =
-+      std::make_unique<CookieImportPipeServer>(pipe_name_, this);
-+  pipe_server_->Start();
-+
-+  ShowCookieImportSessionDialog(
-+      base::UTF8ToUTF16(FormatTicket(ticket_)),
-+      base::BindOnce(&CookieImportService::Shutdown,
-+                     weak_factory_.GetWeakPtr()));
-+  session_timer_.Start(
-+      FROM_HERE, kTicketTtl,
-+      base::BindOnce(&CookieImportService::OnSessionTimeout,
-+                     weak_factory_.GetWeakPtr()));
++  ShowCookieImportSessionDialog(base::UTF8ToUTF16(FormatTicket(ticket_)),
++                                base::BindOnce(&CookieImportService::Shutdown,
++                                               weak_factory_.GetWeakPtr()));
++  session_timer_.Start(FROM_HERE, kTicketTtl,
++                       base::BindOnce(&CookieImportService::OnSessionTimeout,
++                                      weak_factory_.GetWeakPtr()));
 +}
 +
 +bool CookieImportService::WriteDescriptor() {
@@ -2028,15 +2065,16 @@ index 0000000..ff8679b
 +          .AsUTF8Unsafe();
 +
 +  const base::Process current = base::Process::Current();
-+  base::Value::Dict descriptor;
++  base::DictValue descriptor;
 +  descriptor.Set("schema", kSessionSchema);
 +  descriptor.Set("protocolVersion", kProtocolVersion);
 +  descriptor.Set("targetProduct", "Browser CLI");
-+  descriptor.Set("targetVersion", std::string(version_info::GetVersionNumber()));
++  descriptor.Set("targetVersion",
++                 std::string(version_info::GetVersionNumber()));
 +  descriptor.Set("targetPid", static_cast<int>(current.Pid()));
-+  descriptor.Set(
-+      "targetStartTimeMs",
-+      static_cast<double>(current.CreationTime().InMillisecondsSinceUnixEpoch()));
++  descriptor.Set("targetStartTimeMs",
++                 static_cast<double>(
++                     current.CreationTime().InMillisecondsSinceUnixEpoch()));
 +  descriptor.Set("targetInstanceId", instance_id_);
 +  descriptor.Set("profileHash", profile_hash_);
 +  descriptor.Set("ticketHash", ticket_hash_);
@@ -2049,7 +2087,8 @@ index 0000000..ff8679b
 +  if (!base::JSONWriter::Write(descriptor, &json)) {
 +    return false;
 +  }
-+  return base::WriteFile(base::FilePath::FromUTF8Unsafe(descriptor_path_), json);
++  return base::WriteFile(base::FilePath::FromUTF8Unsafe(descriptor_path_),
++                         json);
 +}
 +
 +void CookieImportService::RemoveDescriptor() {
@@ -2082,14 +2121,14 @@ index 0000000..ff8679b
 +  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
 +}
 +
-+void CookieImportService::Send(base::Value::Dict message) {
++void CookieImportService::Send(base::DictValue message) {
 +  if (pipe_server_) {
 +    pipe_server_->Send(std::move(message));
 +  }
 +}
 +
 +void CookieImportService::SendError(const std::string& code) {
-+  base::Value::Dict message;
++  base::DictValue message;
 +  message.Set("type", "error");
 +  message.Set("code", code);
 +  Send(std::move(message));
@@ -2104,8 +2143,7 @@ index 0000000..ff8679b
 +  if (now < rate_limited_until_) {
 +    return true;
 +  }
-+  if (failed_auth_attempts_.size() >=
-+      static_cast<size_t>(kMaxTicketFailures)) {
++  if (failed_auth_attempts_.size() >= static_cast<size_t>(kMaxTicketFailures)) {
 +    rate_limited_until_ = now + kRateLimitBlock;
 +    return true;
 +  }
@@ -2114,8 +2152,7 @@ index 0000000..ff8679b
 +
 +void CookieImportService::RecordAuthFailure() {
 +  failed_auth_attempts_.push_back(base::TimeTicks::Now());
-+  if (failed_auth_attempts_.size() >=
-+      static_cast<size_t>(kMaxTicketFailures)) {
++  if (failed_auth_attempts_.size() >= static_cast<size_t>(kMaxTicketFailures)) {
 +    rate_limited_until_ = base::TimeTicks::Now() + kRateLimitBlock;
 +  }
 +}
@@ -2133,7 +2170,7 @@ index 0000000..ff8679b
 +  Shutdown();
 +}
 +
-+void CookieImportService::OnImportPipeMessage(base::Value::Dict message) {
++void CookieImportService::OnImportPipeMessage(base::DictValue message) {
 +  std::string type;
 +  if (!GetString(message, "type", &type)) {
 +    SendError("protocol-mismatch");
@@ -2154,7 +2191,7 @@ index 0000000..ff8679b
 +  } else if (type == "job-commit") {
 +    HandleJobCommit(message);
 +  } else if (type == "cancel") {
-+    HandleCancel();
++    HandleCancel(message);
 +  } else if (type == "close") {
 +    Shutdown();
 +  } else {
@@ -2162,7 +2199,7 @@ index 0000000..ff8679b
 +  }
 +}
 +
-+void CookieImportService::HandleHello(const base::Value::Dict& message) {
++void CookieImportService::HandleHello(const base::DictValue& message) {
 +  if (IsRateLimited()) {
 +    SendError("rate-limited");
 +    Shutdown();
@@ -2189,16 +2226,17 @@ index 0000000..ff8679b
 +         now - hello_attempts_.front() > base::Hours(1)) {
 +    hello_attempts_.pop_front();
 +  }
-+  if (hello_attempts_.size() >=
-+      static_cast<size_t>(kMaxSessionsPerHour)) {
++  if (hello_attempts_.size() >= static_cast<size_t>(kMaxSessionsPerHour)) {
 +    SendError("rate-limited");
 +    Shutdown();
 +    return;
 +  }
 +  hello_attempts_.push_back(now);
 +
++  // The ticket is bound to the native-host relay process. Fail closed if the
++  // pipe client identity is unknown or does not match the claimed host PID.
 +  const std::optional<int> host_pid = message.FindInt("hostPid");
-+  if (host_pid && client_pid_ != 0 &&
++  if (!host_pid || client_pid_ == 0 ||
 +      static_cast<uint32_t>(*host_pid) != client_pid_) {
 +    RecordAuthFailure();
 +    SendError("host-identity-mismatch");
@@ -2211,13 +2249,33 @@ index 0000000..ff8679b
 +    return;
 +  }
 +
++  // Bind the ticket to the job announced in hello. job-begin must repeat the
++  // exact same job nonce, digest, size and chunk count.
++  std::string job_nonce;
++  std::string job_digest;
++  const std::optional<int> total_bytes = message.FindInt("totalBytes");
++  const std::optional<int> chunk_count = message.FindInt("chunkCount");
++  if (!GetString(message, "jobNonce", &job_nonce) ||
++      !IsLowerHexOfLength(job_nonce, 32) ||
++      !GetString(message, "jobDigest", &job_digest) ||
++      !IsLowerHexOfLength(job_digest, 64) || !total_bytes ||
++      *total_bytes <= 0 || *total_bytes > kMaxJobBytes || !chunk_count ||
++      *chunk_count <= 0 || *chunk_count > kMaxChunks) {
++    RecordAuthFailure();
++    SendError("protocol-mismatch");
++    return;
++  }
++
 +  consumed_ = true;
 +  hello_received_ = true;
-+  host_pid_ = host_pid ? static_cast<uint32_t>(*host_pid) : client_pid_;
++  hello_job_nonce_ = std::move(job_nonce);
++  hello_job_digest_ = std::move(job_digest);
++  hello_total_bytes_ = static_cast<size_t>(*total_bytes);
++  hello_chunk_count_ = static_cast<size_t>(*chunk_count);
 +  session_timer_.Stop();
 +  RemoveDescriptor();
 +
-+  base::Value::Dict capabilities;
++  base::DictValue capabilities;
 +  capabilities.Set("cookieStoreWrite", true);
 +  capabilities.Set("persistAcrossRestart", true);
 +  capabilities.Set("partitionedCookies", true);
@@ -2228,7 +2286,7 @@ index 0000000..ff8679b
 +  capabilities.Set("ticketTtlSeconds",
 +                   static_cast<int>(kTicketTtl.InSeconds()));
 +
-+  base::Value::Dict ready;
++  base::DictValue ready;
 +  ready.Set("type", "ready");
 +  ready.Set("protocol", kProtocolVersion);
 +  ready.Set("sessionId", instance_id_);
@@ -2240,7 +2298,7 @@ index 0000000..ff8679b
 +  Send(std::move(ready));
 +}
 +
-+void CookieImportService::HandleJobBegin(const base::Value::Dict& message) {
++void CookieImportService::HandleJobBegin(const base::DictValue& message) {
 +  if (job_) {
 +    SendError("target-busy");
 +    return;
@@ -2261,6 +2319,12 @@ index 0000000..ff8679b
 +    SendError("too-large");
 +    return;
 +  }
++  if (job_nonce != hello_job_nonce_ || job_digest != hello_job_digest_ ||
++      static_cast<size_t>(*total_bytes) != hello_total_bytes_ ||
++      static_cast<size_t>(*chunk_count) != hello_chunk_count_) {
++    SendError("job-binding-mismatch");
++    return;
++  }
 +  job_nonce_ = std::move(job_nonce);
 +  job_digest_ = std::move(job_digest);
 +  total_bytes_ = static_cast<size_t>(*total_bytes);
@@ -2270,20 +2334,18 @@ index 0000000..ff8679b
 +  chunks_.clear();
 +}
 +
-+void CookieImportService::HandleJobChunk(const base::Value::Dict& message) {
++void CookieImportService::HandleJobChunk(const base::DictValue& message) {
 +  std::string job_nonce;
 +  std::string data;
 +  const std::optional<int> index = message.FindInt("index");
-+  if (!GetString(message, "jobNonce", &job_nonce) ||
-+      job_nonce != job_nonce_ || !index || *index < 0 ||
-+      static_cast<size_t>(*index) != next_chunk_ ||
++  if (!GetString(message, "jobNonce", &job_nonce) || job_nonce != job_nonce_ ||
++      !index || *index < 0 || static_cast<size_t>(*index) != next_chunk_ ||
 +      !GetString(message, "data", &data)) {
 +    SendError("chunk-missing");
 +    return;
 +  }
 +  std::string decoded;
-+  if (!base::Base64Decode(data, &decoded,
-+                          base::Base64DecodePolicy::kStrict)) {
++  if (!base::Base64Decode(data, &decoded, base::Base64DecodePolicy::kStrict)) {
 +    SendError("chunk-missing");
 +    return;
 +  }
@@ -2298,10 +2360,10 @@ index 0000000..ff8679b
 +  chunks_.push_back(std::move(decoded));
 +}
 +
-+void CookieImportService::HandleJobCommit(const base::Value::Dict& message) {
++void CookieImportService::HandleJobCommit(const base::DictValue& message) {
 +  std::string job_nonce;
-+  if (!GetString(message, "jobNonce", &job_nonce) ||
-+      job_nonce != job_nonce_ || chunks_.size() != chunk_count_) {
++  if (!GetString(message, "jobNonce", &job_nonce) || job_nonce != job_nonce_ ||
++      chunks_.size() != chunk_count_) {
 +    SendError("chunk-missing");
 +    return;
 +  }
@@ -2324,7 +2386,7 @@ index 0000000..ff8679b
 +    SendError("job-digest-mismatch");
 +    return;
 +  }
-+  std::optional<base::Value::Dict> parsed =
++  std::optional<base::DictValue> parsed =
 +      base::JSONReader::ReadDict(payload, base::JSON_PARSE_RFC,
 +                                 /*max_depth=*/64);
 +  if (!parsed) {
@@ -2345,9 +2407,9 @@ index 0000000..ff8679b
 +  job.state = "awaiting_authorization";
 +  job.created_at = base::Time::Now();
 +  job.updated_at = job.created_at;
-+  job_ = std::move(job);
++  job_ = std::make_unique<Job>(std::move(job));
 +
-+  base::Value::Dict accepted;
++  base::DictValue accepted;
 +  accepted.Set("type", "accepted");
 +  accepted.Set("jobId", job_->id);
 +  accepted.Set("state", job_->state);
@@ -2356,20 +2418,24 @@ index 0000000..ff8679b
 +  accepted.Set("authorization", BuildAuthorization());
 +  Send(std::move(accepted));
 +  SendStatus();
-+  job_timer_.Start(
-+      FROM_HERE, kJobTtl,
-+      base::BindOnce(&CookieImportService::OnJobTimeout,
-+                     weak_factory_.GetWeakPtr()));
++  job_timer_.Start(FROM_HERE, kJobTtl,
++                   base::BindOnce(&CookieImportService::OnJobTimeout,
++                                  weak_factory_.GetWeakPtr()));
 +  StartApproval();
 +}
 +
-+void CookieImportService::HandleCancel() {
++void CookieImportService::HandleCancel(const base::DictValue& message) {
++  std::string job_nonce;
++  if (GetString(message, "jobNonce", &job_nonce) && job_nonce != job_nonce_) {
++    SendError("job-binding-mismatch");
++    return;
++  }
 +  if (!job_) {
 +    SendError("job-binding-mismatch");
 +    return;
 +  }
 +  if (IsTerminalState(job_->state)) {
-+    base::Value::Dict response;
++    base::DictValue response;
 +    response.Set("type", "cancel-ok");
 +    response.Set("state", job_->state);
 +    Send(std::move(response));
@@ -2383,7 +2449,7 @@ index 0000000..ff8679b
 +    FinishJob();
 +    return;
 +  }
-+  base::Value::Dict response;
++  base::DictValue response;
 +  response.Set("type", "cancel-ok");
 +  response.Set("state", job_->state);
 +  Send(std::move(response));
@@ -2401,9 +2467,8 @@ index 0000000..ff8679b
 +  request.session_cookie_count = job_->payload.session_cookies;
 +  request.selected_domain_count =
 +      static_cast<int>(job_->payload.domains.size());
-+  base::OnceCallback<void(bool)> callback =
-+      base::BindOnce(&CookieImportService::OnApprovalResult,
-+                     weak_factory_.GetWeakPtr());
++  base::OnceCallback<void(bool)> callback = base::BindOnce(
++      &CookieImportService::OnApprovalResult, weak_factory_.GetWeakPtr());
 +  if (!approval_callback_.is_null()) {
 +    approval_callback_.Run(request, std::move(callback));
 +    return;
@@ -2439,7 +2504,9 @@ index 0000000..ff8679b
 +}
 +
 +void CookieImportService::ApplyNextCookie(size_t index) {
-+  if (!job_) {
++  // A timeout, denial or cancel may have made the job terminal while a
++  // CookieManager callback was still in flight; stop writing in that case.
++  if (!job_ || IsTerminalState(job_->state)) {
 +    return;
 +  }
 +  if (job_->cancel_requested) {
@@ -2453,14 +2520,13 @@ index 0000000..ff8679b
 +    return;
 +  }
 +  const CookieRecord& cookie = job_->payload.cookies[index];
-+  std::string failure = CookiePolicyFailure(cookie, job_->payload.domains,
-+                                            base::Time::Now());
++  std::string failure =
++      CookiePolicyFailure(cookie, job_->payload.domains, base::Time::Now());
 +  if (!failure.empty()) {
 +    CountFailure(failure);
 +    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-+        FROM_HERE,
-+        base::BindOnce(&CookieImportService::ApplyNextCookie,
-+                       weak_factory_.GetWeakPtr(), index + 1));
++        FROM_HERE, base::BindOnce(&CookieImportService::ApplyNextCookie,
++                                  weak_factory_.GetWeakPtr(), index + 1));
 +    return;
 +  }
 +  std::string build_failure;
@@ -2469,9 +2535,8 @@ index 0000000..ff8679b
 +  if (!canonical) {
 +    CountFailure(build_failure);
 +    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-+        FROM_HERE,
-+        base::BindOnce(&CookieImportService::ApplyNextCookie,
-+                       weak_factory_.GetWeakPtr(), index + 1));
++        FROM_HERE, base::BindOnce(&CookieImportService::ApplyNextCookie,
++                                  weak_factory_.GetWeakPtr(), index + 1));
 +    return;
 +  }
 +  if (!cookie_manager_) {
@@ -2524,7 +2589,9 @@ index 0000000..ff8679b
 +    return;
 +  }
 +  job_timer_.Stop();
-+  if (job_->cancel_requested) {
++  if (job_->state == "failed" || job_->state == "denied") {
++    // Keep a terminal state decided earlier (timeout, denial, store failure).
++  } else if (job_->cancel_requested) {
 +    job_->state = "cancelled";
 +  } else if (!job_->error_code.empty() &&
 +             job_->error_code == "cookie-store-unavailable") {
@@ -2541,9 +2608,8 @@ index 0000000..ff8679b
 +  if (!cookie_manager_) {
 +    return;
 +  }
-+  cookie_manager_->FlushCookieStore(
-+      base::BindOnce(&CookieImportService::OnFlushDone,
-+                     weak_factory_.GetWeakPtr()));
++  cookie_manager_->FlushCookieStore(base::BindOnce(
++      &CookieImportService::OnFlushDone, weak_factory_.GetWeakPtr()));
 +}
 +
 +void CookieImportService::OnFlushDone() {
@@ -2577,14 +2643,14 @@ index 0000000..ff8679b
 +  if (!job_) {
 +    return;
 +  }
-+  base::Value::Dict message;
++  base::DictValue message;
 +  message.Set("type", "status");
 +  message.Set("view", BuildPublicView());
 +  Send(std::move(message));
 +}
 +
-+base::Value::Dict CookieImportService::BuildTotals() const {
-+  base::Value::Dict totals;
++base::DictValue CookieImportService::BuildTotals() const {
++  base::DictValue totals;
 +  if (!job_) {
 +    totals.Set("cookies", 0);
 +    totals.Set("domains", 0);
@@ -2599,17 +2665,15 @@ index 0000000..ff8679b
 +  }
 +  totals.Set("cookies", static_cast<int>(job_->payload.cookies.size()));
 +  totals.Set("domains", static_cast<int>(cookie_domains.size()));
-+  totals.Set("selectedDomains",
-+             static_cast<int>(job_->payload.domains.size()));
++  totals.Set("selectedDomains", static_cast<int>(job_->payload.domains.size()));
 +  totals.Set("sessionCookies", job_->payload.session_cookies);
 +  totals.Set("partitionedCookies", job_->payload.partitioned_cookies);
 +  return totals;
 +}
 +
-+base::Value::Dict CookieImportService::BuildAuthorization() const {
-+  base::Value::Dict authorization;
-+  authorization.Set("targetUserConfirmed",
-+                    job_ && job_->target_user_confirmed);
++base::DictValue CookieImportService::BuildAuthorization() const {
++  base::DictValue authorization;
++  authorization.Set("targetUserConfirmed", job_ && job_->target_user_confirmed);
 +  authorization.Set("simulated", job_ && job_->authorization_simulated);
 +  authorization.Set("source",
 +                    job_ ? job_->authorization_source : std::string("none"));
@@ -2650,8 +2714,8 @@ index 0000000..ff8679b
 +  return "not_started";
 +}
 +
-+base::Value::Dict CookieImportService::BuildPublicView() const {
-+  base::Value::Dict view;
++base::DictValue CookieImportService::BuildPublicView() const {
++  base::DictValue view;
 +  view.Set("contract", kContractId);
 +  view.Set("protocolVersion", kProtocolVersion);
 +  if (!job_) {
@@ -2664,31 +2728,30 @@ index 0000000..ff8679b
 +  view.Set("totals", BuildTotals());
 +
 +  const int total = static_cast<int>(job_->payload.cookies.size());
-+  base::Value::Dict progress;
++  base::DictValue progress;
 +  progress.Set("applied", job_->applied);
 +  progress.Set("failed", job_->failed);
-+  progress.Set("remaining",
-+               std::max(0, total - job_->applied - job_->failed));
++  progress.Set("remaining", std::max(0, total - job_->applied - job_->failed));
 +  view.Set("progress", std::move(progress));
 +
 +  view.Set("authorization", BuildAuthorization());
 +
-+  base::Value::Dict data_copied;
++  base::DictValue data_copied;
 +  data_copied.Set("cookies", false);
 +  view.Set("dataCopied", std::move(data_copied));
 +
-+  base::Value::Dict cookie_imported;
++  base::DictValue cookie_imported;
 +  cookie_imported.Set("status", ComputeCookieImportedStatus());
 +  cookie_imported.Set("applied", job_->applied);
 +  cookie_imported.Set("failed", job_->failed);
-+  base::Value::Dict failures;
++  base::DictValue failures;
 +  for (const auto& [code, count] : job_->failures) {
 +    failures.Set(code, count);
 +  }
 +  cookie_imported.Set("failures", std::move(failures));
 +  view.Set("cookieImported", std::move(cookie_imported));
 +
-+  base::Value::Dict session_cookies;
++  base::DictValue session_cookies;
 +  session_cookies.Set("count", job_->payload.session_cookies);
 +  session_cookies.Set("mayNotSurviveRestart", true);
 +  session_cookies.Set(
@@ -2696,7 +2759,7 @@ index 0000000..ff8679b
 +      "Session cookies are not guaranteed to survive a browser restart.");
 +  view.Set("sessionCookies", std::move(session_cookies));
 +
-+  base::Value::Dict login;
++  base::DictValue login;
 +  login.Set("status", "not_verified");
 +  login.Set(
 +      "note",
@@ -2705,7 +2768,7 @@ index 0000000..ff8679b
 +  view.Set("loginVerified", std::move(login));
 +
 +  if (!job_->error_code.empty()) {
-+    base::Value::Dict error;
++    base::DictValue error;
 +    error.Set("code", job_->error_code);
 +    error.Set("message", FailureText(job_->error_code));
 +    view.Set("error", std::move(error));
@@ -2719,10 +2782,10 @@ index 0000000..ff8679b
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_service.h b/chrome/browser/browser_cli/cookie_import/cookie_import_service.h
 new file mode 100644
-index 0000000..90b75c5
+index 0000000..33d1d72
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_service.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,154 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2742,11 +2805,11 @@ index 0000000..90b75c5
 +#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
 +#include "base/timer/timer.h"
-+#include "net/cookies/cookie_access_result.h"
 +#include "base/values.h"
 +#include "build/build_config.h"
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h"
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_policy.h"
++#include "net/cookies/cookie_access_result.h"
 +
 +class Profile;
 +
@@ -2770,9 +2833,9 @@ index 0000000..90b75c5
 +// cookies, and never reports login verification.
 +class CookieImportService : public CookieImportPipeServer::Delegate {
 + public:
-+  using ApprovalCallback = base::RepeatingCallback<void(
-+      const ApprovalRequest&,
-+      base::OnceCallback<void(bool)>)>;
++  using ApprovalCallback =
++      base::RepeatingCallback<void(const ApprovalRequest&,
++                                   base::OnceCallback<void(bool)>)>;
 +
 +  static void Start(Profile* profile);
 +  static void Stop();
@@ -2784,7 +2847,7 @@ index 0000000..90b75c5
 +
 +  // CookieImportPipeServer::Delegate:
 +  void OnImportPipeConnected(uint32_t client_pid) override;
-+  void OnImportPipeMessage(base::Value::Dict message) override;
++  void OnImportPipeMessage(base::DictValue message) override;
 +  void OnImportPipeDisconnected() override;
 +
 +  void SetApprovalCallbackForTesting(ApprovalCallback callback);
@@ -2801,11 +2864,11 @@ index 0000000..90b75c5
 +  bool WriteDescriptor();
 +  void RemoveDescriptor();
 +
-+  void HandleHello(const base::Value::Dict& message);
-+  void HandleJobBegin(const base::Value::Dict& message);
-+  void HandleJobChunk(const base::Value::Dict& message);
-+  void HandleJobCommit(const base::Value::Dict& message);
-+  void HandleCancel();
++  void HandleHello(const base::DictValue& message);
++  void HandleJobBegin(const base::DictValue& message);
++  void HandleJobChunk(const base::DictValue& message);
++  void HandleJobCommit(const base::DictValue& message);
++  void HandleCancel(const base::DictValue& message);
 +
 +  void StartApproval();
 +  void OnApprovalResult(bool approved);
@@ -2818,12 +2881,12 @@ index 0000000..90b75c5
 +  void OnJobTimeout();
 +  void OnSessionTimeout();
 +
-+  void Send(base::Value::Dict message);
++  void Send(base::DictValue message);
 +  void SendError(const std::string& code);
 +  void SendStatus();
-+  base::Value::Dict BuildPublicView() const;
-+  base::Value::Dict BuildTotals() const;
-+  base::Value::Dict BuildAuthorization() const;
++  base::DictValue BuildPublicView() const;
++  base::DictValue BuildTotals() const;
++  base::DictValue BuildAuthorization() const;
 +  std::string ComputeCookieImportedStatus() const;
 +
 +  bool IsRateLimited();
@@ -2847,8 +2910,11 @@ index 0000000..90b75c5
 +  bool consumed_ = false;
 +  bool shutting_down_ = false;
 +  uint32_t client_pid_ = 0;
-+  uint32_t host_pid_ = 0;
 +
++  std::string hello_job_nonce_;
++  std::string hello_job_digest_;
++  size_t hello_total_bytes_ = 0;
++  size_t hello_chunk_count_ = 0;
 +  std::string job_nonce_;
 +  std::string job_digest_;
 +  size_t total_bytes_ = 0;
@@ -2857,7 +2923,7 @@ index 0000000..90b75c5
 +  size_t next_chunk_ = 0;
 +  std::vector<std::string> chunks_;
 +
-+  std::optional<Job> job_;
++  std::unique_ptr<Job> job_;
 +  int last_progress_sent_ = 0;
 +
 +  ApprovalCallback approval_callback_;

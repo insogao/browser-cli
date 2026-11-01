@@ -454,15 +454,20 @@ git apply --check -R /path/to/browser-cli/chromium/patches/013-command-line-inte
   不出现窗口；context-menu Preferences/Search 等按用户点击只呈现目标窗口并 HUMAN；
   stock Chromium 行为不变。
 
-## Proposed patch（不在 manifest，未应用、未编译）
+## Proposed patch（不在 manifest，未构建 chrome）
 
 - `proposed/036-browser-cli-cookie-import.patch`：v2 原生 Cookie 导入目标
   （Windows named pipe + 目标浏览器内授权弹窗 + CookieManager/CookieStore 写入）。
-  当前状态：**proposed，未加入 `patch-manifest.json`，未编译、未运行单测、未集成**。
-  已用只读 `git apply --check` 在 post-033 checkout 上验证可应用；这不等于可构建或通过
-  runtime 验收。契约、威胁模型、线路协议与验收清单见
-  `docs/p1-cookie-import-native-v2-2026-11-01.md`。
+  当前状态：**proposed，未加入 `patch-manifest.json`，未 `gn gen`/`ninja chrome`，
+  未在真实浏览器中运行**。2026-11-01 已按 post-033 checkout 修正编译阻塞（
+  `base::DictValue`/`base::ListValue`、移除的 `base::Contains`、私有
+  `DialogDelegateView` 构造、非静态 `GetDefaultStoragePartition`、不完整类型
+  `std::optional<Job>` 等）；5 个 TU 与带 hunk 的 `chrome_browser_main.cc` 用
+  `out/WinDev` 的真实 clang-cl 参数编译通过，`CookieImportPolicyTest.*` 9/9 通过。
+  `git apply --check` 通过；这不等于 GN target、链接或 runtime 验收通过。契约、
+  威胁模型、线路协议、精确构建步骤与证据见
+  `docs/p1-cookie-import-native-v2-2026-11-01.md`（§12）。
 - 静态门禁：`tests/tools/test_cookie_import_native.py`（patch 必需 API/规则、LF、
-  未进入 manifest、文档不虚报集成状态）。
+  未进入 manifest、文档不虚报集成状态、禁止已移除的旧 Chromium API）。
 - 协议参考测试：`tests/tools/cookie-import/test_reference_target.mjs`（命名管道参考目标，
   测试替身，`native:false`/`authorization.simulated:true`，不启动浏览器）。

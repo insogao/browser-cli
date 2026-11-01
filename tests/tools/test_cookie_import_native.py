@@ -65,6 +65,14 @@ REQUIRED_PATCH_TEXT = [
     # Build/main integration is present but proposed.
     "cookie_import_service",
     "browser-cli-cookie-import",
+    # API surface verified against the current Chromium checkout by compiling
+    # the sources with the out/WinDev flags (2026-11-01).
+    "base::DictValue",
+    "profile_->GetDefaultStoragePartition()",
+    "views::DialogDelegate",
+    "std::make_unique<Job>",
+    "job-binding-mismatch",
+    "cookie_import_policy",
 ]
 
 FORBIDDEN_PATCH_TEXT = [
@@ -76,6 +84,14 @@ FORBIDDEN_PATCH_TEXT = [
     "--no-sandbox",
     "x-bp-pair",
     "validatePairCode",
+    # APIs that no longer exist / never existed in the current checkout.
+    "base::Value::Dict",
+    "base::Value::List",
+    "base::Contains",
+    "base/containers/contains.h",
+    "DialogDelegateView",
+    "GetDefaultStoragePartition(profile_)",
+    "std::optional<Job> job_",
 ]
 
 
@@ -128,7 +144,8 @@ def main() -> int:
         doc = read_text(DOC)
         for phrase in [
             "browser-cli.cookie-import/v2",
-            "未集成、未编译",
+            "未进入 chromium 构建",
+            "未链接",
             "proposed patch",
             "ticket-consumed",
             "public-suffix-rejected",
