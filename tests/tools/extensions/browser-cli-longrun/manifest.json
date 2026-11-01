@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Browser CLI Long-Run Probe",
+  "version": "1.0.0",
+  "description": "Test-only MV3 extension page that repaints on a timer and messages its service worker. Used by tests/tools/longrun-stability-gate.py; it is never installed in a product profile.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxaKzwHfLuXKKY3xgJgkOpBVRONMPNIzyKFfe9gipfjDs1XdS1jfqvVdAyNh55SFhTGTqq4XN1bI49Vp1I/YlQ9hD45HI2wkrAOokoOztHcfmUyuNZtpr/ZydN6P+FWtYBCQbYPiMD9DP+AIWFudOqFxcW6qUJaE3n3S+JGuB6lnghXFR1XUtrBzseSLB5ZC4YUcNZztAYRrGCMV5NkFRqzeqG7Brcq/7T0ZU0YTS3UGIucgAgV9IFc0hBALSlXZBcOmNrgr+rtO/HhHn08ASPdKEwYNxip1QOceiMQ/jdid9BHPnz5V/i3TFTiBb8r0TnSBJ+j3yi7GOoM+23W0yXQIDAQAB",
+  "permissions": [
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "action": {
+    "default_title": "longrun-probe"
+  }
+}

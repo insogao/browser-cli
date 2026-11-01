@@ -47,6 +47,32 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
    回调并加 buffer 上限保护。
 没有通过周期重启页面掩盖。PR：browser-cli #3；证据 `D:\c\logs\hs-*`。
 
+### 2.1 20 分钟多窗口稳定性门禁（2026-11-01）
+
+新增 `tests/tools/longrun-stability-gate.py`（8 窗口：normal 4 + agent/managed 4），
+在 WinDev 上跑满 **1202.7 s**（setup 17.5 s 不计入）。结果 **FAIL**：
+
+- normal w1 dynamic/w2 canvas/w3 OOPIF/w4 WebGL（w4 被 w2 完全遮挡）连续 20 分钟
+  存活，截图新鲜度 w1 22/22、w2 12/12、w4 3/3；
+- agent w6/w7/w8 分别在 **60.1 s** 触发同一 `layer_tree_view.cc:554` DCHECK，
+  **84.8 s** target crash；w5 extension page 在 41.4 s 被真实
+  `--browser-cli-user-explicit-show` 呈现后存活，241.0 s 原生隐藏，**315.1 s**
+  再次 DCHECK，**323.6 s** crash；
+- 真实 crash 计数：presentation DCHECK 4、target crash 4、renderer PID 消失 3、
+  extension-renderer PID 消失 1；GPU/network utility crash 0；browser 未退出；
+- 资源：private 峰值 1.827 GB、handles 峰值 15,815、GPU process private 峰值
+  371.8 MB、CPU 平均约 1.4% of 32 CPUs；normal 窗口无单调暴涨；
+- SW 重启 PASS（page→worker 新实例），HUMAN/ASSIST/AI 所有权转换 PASS
+  （human v1/assist v2/ai v3 全部 set/get 复核）；
+- WinRelease 不存在：`out/WinRelease` 的 non-component 构建在
+  `[15719/58343]` 因 `Scalarizer.obj` FAILED 停止，未产出 `chrome.exe`；
+  因此本轮只是 WinDev baseline，不能宣称 release 构建通过。
+
+证据：`D:/c/logs/longrun-20min-final/`；提交的摘要：
+`docs/evidence/windows-longrun-20min-2026-11-01.json`；完整设计/判定：
+`docs/windows-longrun-stability-gate-2026-11-01.md`。**结论仍是 FAIL，hidden/managed
+long-run 崩溃未修复。**
+
 ## 3. GPU/TSF 安全与 patch 034/035（C）
 
 - 安全策略位（browser/GPU/renderer/storage utility/默认 network utility）在 Browser CLI
@@ -98,5 +124,6 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 ## 6. 结论
 
 Release-like E2E 已 PASS（210/210），TSF 和 DComp 普通/in-process 路径均有构建验证；
-hidden 长驻崩溃已复现并定位但**未修复**；P1 原生端点仍未实现；安全等价未证明。
-因此仍不能宣称 Windows RC 发布就绪或合并到 main。
+hidden 长驻崩溃已复现并定位但**未修复**；20 分钟多窗口门禁在 WinDev 上 **FAIL**
+（4 个 managed 窗口全部崩溃，4 个 normal 窗口稳定）；P1 原生端点仍未实现；安全等价
+未证明。因此仍不能宣称 Windows RC 发布就绪或合并到 main。
