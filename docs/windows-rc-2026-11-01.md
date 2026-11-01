@@ -1,8 +1,8 @@
 # Windows RC 验收汇总（2026-11-01）
 
 状态：**Draft / 未发布**。所有 PR 保持 Draft；未 merge。构建为
-`D:\c\src\out\WinDev`，Chromium 156.0.8067.0，patch 001–035（普通模式只需
-001–033 + `disable_fieldtrial_testing_config=true`）。
+`D:\c\src\out\WinRelease`（非 component）与 `out/WinDev`，Chromium 156.0.8067.0；
+WinRelease patch 001–036（含 TSF field-trial、GPU 034/035、hidden 036）。
 
 ## 1. Release-like E2E（A）
 
@@ -41,11 +41,11 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 不改变模型可见性，仍崩；真正 model-hidden（先 show 再 hide）180s 稳定；static/no-paint 稳定；
 8 窗口并发时所有动态窗口崩溃，browser/其他进程存活。周期截图 10s 可避免但只是 workaround。
 
-修复方向（未实现）：
-1. 产品层：managed presentation 被拒绝时同步隐藏 WebContents/widget，避免“逻辑可见但不呈现”；
-2. Chromium：undrawn/superseded frame 发送 failed presentation feedback，renderer 消费失败
-   回调并加 buffer 上限保护。
-没有通过周期重启页面掩盖。PR：browser-cli #3；证据 `D:\c\logs\hs-*`。
+两条路线都已建立：
+- A1（模型可见性同步）：21 分钟 8 窗口 soak 稳定，但 WinRelease release 矩阵显示 managed 窗口 AI raw input 不落地（RC-A2/A3/A7 clicks=0），**未选**。PR #7 保留 Draft。
+- A2（presentation feedback 生命周期，patch 036）：不隐藏 WebContents，保留 AI/人类输入语义；WinRelease 构建后 release 矩阵 **210/210 PASS**，21 分钟 8 窗口 managed-hidden soak **8/8 alive、model-visible、0 crash、0 FATAL、VERDICT STABLE**。已选为根修，clean PR #9（base GPU PR #2）。
+- 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK、0 renderer/GPU/network crash、0 FATAL；所有 dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景 PASS；资源稳定。唯一 BLOCKED 是 Native Messaging Host restart 未覆盖。
+- 没有删除 DCHECK、扩大 buffer、周期 reload/重启页面或额外禁用后台优化。
 
 ## 3. GPU/TSF 安全与 patch 034/035（C）
 
@@ -59,7 +59,8 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - `disable_fieldtrial_testing_config=true` 同时移除了两个 Windows 安全 study：
   browser ACG（`BrowserDynamicCodeDisabled`）和 network service sandbox
   （`NetworkServiceSandboxWindows`）。browser ACG 不能重新开启，因为 Sogou Xbyak 需要 JIT；
-  network service sandbox 是否显式启用仍是发布安全决策。官方 Chrome 无 seed 的隔离 profile
+  normal launcher 和 release 矩阵已显式加 `--enable-features=NetworkServiceSandbox`，
+  实测 network utility 为 Low IL + AppContainer + CIG/ACG。官方 Chrome 无 seed 的隔离 profile
   同样两者皆关；server-side variations seed 状态 NOT-TESTED。
 - Patch 034：in-process DComp 初始化、`Intermediate D3D Window`、WGC 彩色、后台截图 PASS；
   `--single-process` 在 `extensions_client.cc:38` FATAL（早于 GPU 初始化，patch 034 未触达）。
@@ -78,16 +79,21 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
   明确 `mayNotSurviveRestart`；target 永远不能自报 `loginVerified`。
 - BrowserPilot：42/42 + 11/11 + 15/15 + 14/14 tests PASS；typecheck/build PASS。
 - browser-cli：v2 contract/reference tests 62/62 + 7/7；native patch
-  `chromium/patches/proposed/036-browser-cli-cookie-import.patch` **proposed only**，未入
-  manifest、未编译、未集成。原生 CookieStore 端点仍未打通，不能宣称产品闭环。
-- PR：BrowserPilot #5（v2）、browser-cli #4（proposed native patch）。
+  `chromium/patches/proposed/037-browser-cli-cookie-import.patch` 已修正 API/unsafe-buffer，
+  `cookie_import_unittests` 9/9 PASS、`chrome.dll` link 成功；但仍未执行目标 pipe/授权弹窗/
+  CookieManager 写入/重启保留 E2E，未入 manifest，不能宣称产品闭环。
+- PR：BrowserPilot #5（v2）、browser-cli #4（native proposal compiled，E2E pending）。
 
 ## 5. PR / 状态
 
 - browser-cli #1：patch 030–033 + TSF field-trial + gate + docs；Draft。
 - browser-cli #2：patch 034/035 + WGC harness + security/lifecycle；Draft，依赖 #1。
 - browser-cli #3：hidden long-run reproduction；Draft，依赖 #1。
-- browser-cli #4：P1 v2 proposed native patch; Draft，依赖 #1。
+- browser-cli #4：P1 v2 native patch compiled (036→037 renumbered); Draft，依赖 #1。
+- browser-cli #5：WinRelease build/config/security; Draft，依赖 #1。
+- browser-cli #6：20-minute long-run gate; Draft，依赖 #1。
+- browser-cli #7：hidden route 1 (not selected); Draft。
+- browser-cli #8/#9：hidden route 2; #9 is clean base on GPU PR #2, selected。
 - BrowserPilot #1：K4/K15/latch + A harness + fixture；Draft。
 - BrowserPilot #2：F3 screenshot fallback；Draft，依赖 #1。
 - BrowserPilot #3：normal-mode + IME；Draft，依赖 browser-cli #1。
@@ -97,6 +103,8 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 
 ## 6. 结论
 
-Release-like E2E 已 PASS（210/210），TSF 和 DComp 普通/in-process 路径均有构建验证；
-hidden 长驻崩溃已复现并定位但**未修复**；P1 原生端点仍未实现；安全等价未证明。
-因此仍不能宣称 Windows RC 发布就绪或合并到 main。
+Release-like E2E 已在非 component WinRelease 上 PASS（210/210）；hidden route 2 通过
+21 分钟 8 窗口 soak 和 20 分钟多窗口长稳（0 crash）；TSF/DComp 034/035 构建验证。
+仍不能宣称 Windows RC 发布就绪：Native Messaging Host restart 未覆盖、签名/安装器/更新未完成、
+unsigned component→WinRelease 安全差异与 server-side seed 未验证、P1 原生写入 E2E 未跑。
+所有 PR 继续 Draft。
