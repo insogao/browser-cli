@@ -144,6 +144,13 @@ browser ACG（`BrowserDynamicCodeDisabled`），使 SogouPY 的 Xbyak JIT 失败
 **WinDev 未被触碰**：`out/WinDev/chrome.exe` 仍是 2026-10-27、`chrome.dll` 仍是
 2026-10-31 的时间戳；`out/WinRelease` 是独立目录。
 
+**入口脚本幂等性（实测）**：证据采集完成后又跑了一次
+`scripts/configure-windows-release.sh`（`gn gen` 21.4 s，`GN configure OK (57 args lines)`），
+再跑 `scripts/build-windows-release.sh --jobs 6`；ninja 只执行 4 步（`.res` + `chrome.dll`/
+`chrome.exe` link + `reorder_imports`，因为图标生成器重写了 `.ico` 的 mtime），**三个产物的
+SHA-256 与上表完全相同**（`/Brepro` 可复现），所以被测二进制就是该配置产出的二进制。
+图标生成器可以在后续改成“字节相同则不写”，避免每次 configure 触发一次 relink（非阻塞）。
+
 ---
 
 ## 5. 安全对照：进程缓解 / 模块面 / CIG / 启动
