@@ -632,6 +632,95 @@ fixture/静态证据；**没有运行时证据，也没有可执行入口**。**
 7. 逐窗口截图：待 Gate C 解除 BLOCKED 后单独验收（本契约不覆盖）；
 8. CPU/GPU/内存与长期运行数据：PROJECT-PROGRESS F 区独立条目，不在本契约内。
 
+## `hidden-stability-cdp-check.py`（Windows 长驻后台/隐藏页面稳定性 harness；2026-11-01）
+
+复现并量化长期驻留窗口的 **presentation-callback 累积**：managed 窗口在原生
+`ShowWindow` 被策略剥离后仍是**逻辑可见**（`document.visibilityState=visible`、rAF/定时器运行），
+渲染进程持续提交 frame，但 viz 永不 present；`LayerTreeView::presentation_callbacks_` 到 60 条
+（第 61 条）触发 `layer_tree_view.cc:554` DCHECK，**只杀死 renderer，浏览器进程仍存活**。
+真实 BrowserPilot popup（`dist/popup/index.html`）在 59.8 s 复现；`--freshness` 用页面 marker
+色块与 DOM 计数比对，**绝不把白图/单像素当作成功**；`--screenshot-every` 只作为“截图驱动”
+对照，不当作修复。
+
+```sh
+# 复现：managed 默认窗口（模型可见、原生隐藏）+ 1 Hz 文本更新
+python tests/tools/hidden-stability-cdp-check.py \
+  --chrome D:/c/src/out/WinDev/chrome.exe \
+  --scenario managed-default --content text --windows 1 \
+  --duration 80 --mode diagnostic --expect crash \
+  --evidence-dir D:/c/logs/hs-managed-text
+
+# 对照：模型与原生都隐藏（先 show 再 SW_HIDE），180 s + 前后截图
+python tests/tools/hidden-stability-cdp-check.py ... \
+  --scenario normal-hidden --content text,canvas --windows 2 \
+  --duration 180 --freshness both --expect stable
+
+# 真实 popup（另一 worktree 的 dist，只读，不成为本仓库依赖）
+python tests/tools/hidden-stability-cdp-check.py ... --content extension \
+  --extension-dir D:/work/wt/bp-a-r1r2/dist --extension-page popup/index.html
+```
+
+内容：`text` / `raf` / `canvas` / `webgl` / `extension` / `iframe`（跨站 OOPIF）/ `static` /
+`no-paint`。场景：`managed-default`、`managed-hidden`、`managed-minimized`、`normal-visible`、
+`normal-hidden`、`normal-minimized`、`normal-occluded`。注意：当前构建中
+`managed-hidden`/`managed-minimized` 只是在**从未 show 的** managed 窗口上调用
+`SW_HIDE`/`SW_MINIMIZE`，不会改变模型可见性，因此**仍会复现**；真正的模型隐藏对照是
+`normal-hidden`（先 show 再 hide）。
+
+### route 1（模型可见性同步）验收选项
+
+`chromium/patches/proposed/034-managed-window-contents-visibility.patch` 修复后，
+用同一 harness 断言“原生不可见 ⇒ 模型 hidden”，并覆盖长驻、导航、JS/DOM、HUMAN 接管与
+re-show：
+
+| 选项 | 作用 |
+| --- | --- |
+| `--assert-model off\|auto\|hidden\|visible` | 结束样本与原生状态比对；`hidden` 还要求 `rafCount` 首末相同 |
+| `--assert-transitions` | diagnostic 模式下要求日志出现 `transition=managed-contents-hidden`（有接管时还要求 `managed-contents-restored`） |
+| `--navigate-every N` | 每 N 秒对每个窗口做**新的顶层导航**（不是 reload） |
+| `--dom-every N` | 每 N 秒执行一次可见 DOM 变更（`__hsBump(1)`），不导航 |
+| `--human-takeover-at T` | T 秒时启动第二个 `chrome.exe --browser-cli-user-explicit-show`（同一隔离 profile，ProcessSingleton 转发），模拟用户显式 show |
+| `--human-hide-at T` | T 秒时对当前可见窗口 `SW_HIDE`（需先有 takeover） |
+| `--human-retakeover-at T` | T 秒时再次显式 show，验证 re-show after hidden |
+| `--takeover-timeout/--takeover-settle` | 二次调用超时与状态稳定时间 |
+
+主验收（8 窗口 ≥20 分钟，**无周期截图、无 reload**）：
+
+```sh
+python tests/tools/hidden-stability-cdp-check.py \
+  --chrome <rebuilt-chrome.exe> \
+  --scenario managed-default \
+  --window-content text,raf,canvas,webgl,extension,iframe,static,no-paint \
+  --windows 8 --duration 1260 --sample-interval 15 \
+  --mode release-like --expect stable --freshness both --assert-model hidden \
+  --evidence-dir D:/c/logs/a1-route1-s1-8w-21m
+
+# 21 分钟 + 每 5 分钟导航 + 每 60 s JS/DOM
+python tests/tools/hidden-stability-cdp-check.py ... \
+  --navigate-every 300 --dom-every 60 --assert-model auto ...
+
+# HUMAN 接管 / 隐藏 / 再显示（22 分钟，2 窗口，diagnostic）
+python tests/tools/hidden-stability-cdp-check.py ... \
+  --human-takeover-at 600 --human-hide-at 750 --human-retakeover-at 900 \
+  --mode diagnostic --assert-model auto --assert-transitions ...
+```
+
+判定：`model_assertion ok=true`（必要时 `raf_stalled=true`）、
+`transition_assertion ok=true`、无 `targetCrashed`/probe 超时、无
+`layer_tree_view.cc:554`、before/after 截图 fresh、`human_events` 全部 `ok=true`。
+完整场景、基线与风险见
+[`../docs/windows-hidden-route1-model-visibility-2026-11-01.md`](../docs/windows-hidden-route1-model-visibility-2026-11-01.md)。
+
+证据目录：`result.json`（配置/目标/崩溃/内存/截图/trace/model 与 transition 断言/
+human_events）、`samples.jsonl`（每轮 probe + native + 进程内存）、`events.jsonl`
+（CDP 事件/日志/导航与 DOM 动作）、`chrome.log`（diagnostic）、`screenshots/*.png`、
+`summary.txt`。崩溃判定同时接受 `Target/Inspector.targetCrashed` 和 `chrome.log` 中的精确
+DCHECK 行；`--expect crash|stable` 控制退出码。
+
+约束：独立 `tempfile.mkdtemp` profile；不使用 `--no-sandbox`；进程只通过 `win_job` 的
+Job Object 回收（包括第二个 `--browser-cli-user-explicit-show` 调用）；不做周期重启/刷新；
+不做 show/activate 前台补救。静态门禁为 `tests/check-browser-launch-hygiene.sh`。
+
 ## `check-browser-launch-hygiene.sh`（静态门禁，强制）
 
 扫描 `tests/ scripts/ cli/ launcher/ browserpilot-integration/` 下所有会启动

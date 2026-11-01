@@ -1,0 +1,184 @@
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -1094,6 +1094,13 @@
+   // The owning BrowserWindowInterface object. `browser_` will outlive this.
+   const raw_ptr<BrowserWindowInterface> browser_;
+ 
++#if BUILDFLAG(IS_WIN)
++  // Browser CLI: true while this managed background window's renderer
++  // visibility was suppressed because its native presentation was denied.
++  // Cleared as soon as the widget becomes visible again.
++  bool browser_cli_contents_hidden_ = false;
++#endif
++
+   base::CallbackListSubscription chip_visibility_subscription_;
+ 
+   // BrowserView layout (LTR one is pictured here).
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -24,6 +24,7 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/i18n/rtl.h"
+ #include "base/location.h"
++#include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/raw_ref.h"
+ #include "base/memory/weak_ptr.h"
+@@ -413,6 +414,7 @@
+ #include "ui/gfx/color_palette.h"
+ #include "ui/gfx/win/hwnd_util.h"
+ #include "ui/native_theme/native_theme_win.h"
++#include "ui/views/widget/browser_cli_presentation_win.h"
+ #include "ui/views/win/scoped_fullscreen_visibility.h"
+ 
+ // To avoid conflicts with the macro from the Windows SDK...
+@@ -656,6 +658,61 @@
+   return dst->HitTestPoint(*point);
+ }
+ 
++#if BUILDFLAG(IS_WIN)
++// Browser CLI: keeps the renderer visibility model consistent with a managed
++// window's native presentation state.
++//
++// A managed background window (--browser-cli-background-presentation without
++// USER_EXPLICIT/HUMAN ownership and without a foreground-assist lease) never
++// reaches the desktop: DesktopWindowTreeHostWin::Show() returns before showing
++// the content window and HWNDMessageHandler::OnWindowPosChanging() strips
++// SWP_SHOWWINDOW. That denial only changes the native window. WebContents
++// starts out VISIBLE and WebContentsImpl::PrimaryMainFrameCommitted() re-shows
++// the RenderWidgetHostView on every navigation commit, so the renderer keeps
++// committing main frames that no display will ever present. viz throttles
++// BeginFrames for such undrawn frames to about 1 Hz; each frame still registers
++// a presentation-time callback (PaintTiming / ReportTimeSwapPromise) that is
++// never consumed, and after about 60 s Blink's
++// LayerTreeView::AddCallback() DCHECK (61 > 60) kills the renderer.
++//
++// Returns true when |browser|'s window is a managed background window, |widget|
++// is not natively visible, and the same policy call the native host gate just
++// made denies presentation. A USER_EXPLICIT show and a live assist lease are
++// allowed by that call, so they never enter this state.
++bool BrowserCliShouldKeepContentsHidden(BrowserWindowInterface* browser,
++                                        views::Widget* widget) {
++  if (!views::BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled()) {
++    return false;
++  }
++  if (!browser || !widget || widget->IsVisible()) {
++    return false;
++  }
++  return !views::BrowserCliAllowsPresentation(
++      widget, views::BrowserCliPresentationAction::kShowAndActivate);
++}
++
++// Hides every tab of a managed background window. WebContents that are already
++// hidden are left untouched so no observer sees a duplicate WasHidden().
++void BrowserCliHideContentsForUnpresentedWindow(
++    BrowserWindowInterface* browser) {
++  TabStripModel* tab_strip_model = browser->GetTabStripModel();
++  if (!tab_strip_model) {
++    return;
++  }
++  for (int index = 0; index < tab_strip_model->count(); ++index) {
++    content::WebContents* contents =
++        tab_strip_model->GetWebContentsAt(index);
++    if (contents && !contents->IsBeingDestroyed() &&
++        contents->GetVisibility() != content::Visibility::HIDDEN) {
++      contents->WasHidden();
++    }
++  }
++  LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++            << " transition=managed-contents-hidden"
++            << " reason=native-presentation-denied native=win-hwnd";
++}
++#endif  // BUILDFLAG(IS_WIN)
++
+ }  // namespace
+ 
+ // Implements the exclusive access context and bubble context.
+@@ -1657,6 +1714,18 @@
+     return;
+   }
+ 
++#if BUILDFLAG(IS_WIN)
++  // Browser CLI: a denied managed presentation leaves the HWND hidden. Make
++  // the renderer visibility model agree so no unpresentable frame reaches the
++  // presentation callback buffer (layer_tree_view.cc:554). A USER_EXPLICIT
++  // show or a live assist lease is allowed by the same policy call and is
++  // therefore left untouched.
++  if (BrowserCliShouldKeepContentsHidden(browser_, browser_widget_.get())) {
++    browser_cli_contents_hidden_ = true;
++    BrowserCliHideContentsForUnpresentedWindow(browser_);
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   OnWindowDidShow();
+ 
+   // The fullscreen transition clears out focus, but there are some cases (for
+@@ -1679,6 +1748,13 @@
+ void BrowserView::ShowInactive() {
+   if (!browser_widget_->IsVisible()) {
+     browser_widget_->ShowInactive();
++#if BUILDFLAG(IS_WIN)
++    // Browser CLI: same managed-background model sync as Show().
++    if (BrowserCliShouldKeepContentsHidden(browser_, browser_widget_.get())) {
++      browser_cli_contents_hidden_ = true;
++      BrowserCliHideContentsForUnpresentedWindow(browser_);
++    }
++#endif  // BUILDFLAG(IS_WIN)
+   }
+ }
+ 
+@@ -2139,6 +2215,21 @@
+     restore_focus_on_activation_ = true;
+   }
+ 
++#if BUILDFLAG(IS_WIN)
++  // Browser CLI: an active tab in a managed window that is still natively
++  // invisible would otherwise be re-shown by
++  // WebContentsImpl::PrimaryMainFrameCommitted() and start accumulating
++  // presentation callbacks again. Keep the renderer hidden until the window is
++  // really presented.
++  if (BrowserCliShouldKeepContentsHidden(browser_, browser_widget_.get())) {
++    browser_cli_contents_hidden_ = true;
++    if (!new_contents->IsBeingDestroyed() &&
++        new_contents->GetVisibility() != content::Visibility::HIDDEN) {
++      new_contents->WasHidden();
++    }
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   // Update all the UI bits.
+   UpdateTitleBar();
+ 
+@@ -2901,6 +2992,32 @@
+                                             bool visible) {
+   UpdateLoadingAnimations(visible);
+ 
++#if BUILDFLAG(IS_WIN)
++  // Browser CLI: remember that a managed window went native-hidden so the next
++  // real presentation restores the renderer even if the occlusion-driven
++  // visibility pipeline is late (re-show after hidden).
++  if (!visible &&
++      views::BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled()) {
++    browser_cli_contents_hidden_ = true;
++  }
++  // Browser CLI: the window was actually presented (USER_EXPLICIT show,
++  // granted assist lease, or a native user restore). Restore the renderer
++  // visibility that the managed-background sync suppressed.
++  if (visible && browser_cli_contents_hidden_ &&
++      widget == browser_widget_.get()) {
++    browser_cli_contents_hidden_ = false;
++    if (content::WebContents* contents = GetActiveWebContents()) {
++      if (!contents->IsBeingDestroyed() &&
++          contents->GetVisibility() != content::Visibility::VISIBLE) {
++        contents->WasShown();
++      }
++    }
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=managed-contents-restored"
++              << " reason=native-presentation-applied native=win-hwnd";
++  }
++#endif  // BUILDFLAG(IS_WIN)
++
+   if (visible &&
+       base::FeatureList::IsEnabled(
+           features::kDeferLayoutDuringBrowserStartup) &&
