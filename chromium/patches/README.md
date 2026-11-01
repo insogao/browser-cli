@@ -456,7 +456,7 @@ git apply --check -R /path/to/browser-cli/chromium/patches/013-command-line-inte
 
 ## Proposed patch（不在 manifest，未构建 chrome）
 
-- `proposed/036-browser-cli-cookie-import.patch`：v2 原生 Cookie 导入目标
+- `proposed/037-browser-cli-cookie-import.patch`：v2 原生 Cookie 导入目标
   （Windows named pipe + 目标浏览器内授权弹窗 + CookieManager/CookieStore 写入）。
   当前状态：**proposed，未加入 `patch-manifest.json`，未 `gn gen`/`ninja chrome`，
   未在真实浏览器中运行**。2026-11-01 已按 post-033 checkout 修正编译阻塞（

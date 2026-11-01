@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PATCH = REPO_ROOT / "chromium" / "patches" / "proposed" / "036-browser-cli-cookie-import.patch"
+PATCH = REPO_ROOT / "chromium" / "patches" / "proposed" / "037-browser-cli-cookie-import.patch"
 MANIFEST = REPO_ROOT / "chromium" / "patch-manifest.json"
 DOC = REPO_ROOT / "docs" / "p1-cookie-import-native-v2-2026-11-01.md"
 

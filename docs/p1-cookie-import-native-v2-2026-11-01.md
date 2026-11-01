@@ -7,7 +7,7 @@ Worktree：`D:\work\wt\bc-rc-p1`
 
 - BrowserPilot 侧契约与来源扩展：`D:\work\wt\bp-rc-p1\scripts\import\contract.mjs`、
   `D:\work\wt\bp-rc-p1\extensions\import-source\`
-- 本仓库 proposed patch：`chromium/patches/proposed/036-browser-cli-cookie-import.patch`
+- 本仓库 proposed patch：`chromium/patches/proposed/037-browser-cli-cookie-import.patch`
 - 原 P1 背景：`docs/p1-browser-data-import-2026-10-30.md`
 
 ---
@@ -229,7 +229,7 @@ CookieManager/持久化后端决定，本 proposed patch 未构建，因此未�
 
 ## 9. Native Chromium 映射（proposed patch）
 
-文件（全部在 `chromium/patches/proposed/036-browser-cli-cookie-import.patch`）：
+文件（全部在 `chromium/patches/proposed/037-browser-cli-cookie-import.patch`）：
 
 - `chrome/browser/browser_cli/cookie_import/cookie_import_policy.{h,cc}`：
   票据、domain digest、job digest、字段校验、PSL/前缀/Partitioned 规则、
@@ -351,10 +351,10 @@ network service 内部调用 `CookieStore::SetCanonicalCookieAsync`。**没有�
 ```sh
 # 1. 只读检查（不修改 checkout）
 cd /path/to/chromium/src
-git apply --check /path/to/browser-cli/chromium/patches/proposed/036-browser-cli-cookie-import.patch
+git apply --check /path/to/browser-cli/chromium/patches/proposed/037-browser-cli-cookie-import.patch
 
 # 2. 应用（post-033 working tree；不要在未确认基线上应用）
-git apply /path/to/browser-cli/chromium/patches/proposed/036-browser-cli-cookie-import.patch
+git apply /path/to/browser-cli/chromium/patches/proposed/037-browser-cli-cookie-import.patch
 
 # 3. 重新生成 GN（Windows）
 gn gen out/WinDev
