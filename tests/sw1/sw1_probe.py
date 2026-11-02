@@ -220,6 +220,8 @@ class ProbeRun:
         self.chrome = os.path.abspath(args.chrome)
         self.duration = float(args.duration)
         self.stop_at = float(args.stop_at)
+        self.restart_every = float(getattr(args, "restart_every", 0.0))
+        self.next_restart_at = self.stop_at + self.restart_every
         self.idle_after = float(args.idle_after)
         self.evidence = os.path.abspath(args.evidence_dir)
         self.hide_at = float(args.hide_at)
@@ -999,6 +1001,15 @@ class ProbeRun:
                     self.push_probe_to_background()
                 if not self.stop_done and elapsed >= stop_threshold:
                     self.issue_stop()
+                if self.restart_every > 0 and elapsed >= self.next_restart_at:
+                    ids = sorted(self.worker_targets)
+                    for target_id in ids:
+                        try:
+                            self.browser.call("Target.closeTarget", {"targetId": target_id}, 10)
+                        except Exception as error:
+                            self.event("repeat-restart-error", target_id=target_id, error=str(error))
+                    self.event("repeat-restart", at_s=elapsed, target_ids=ids)
+                    self.next_restart_at = elapsed + self.restart_every
                 self.maybe_native_timeline(elapsed)
                 if self.scenario == "idle_wake_filtered" and self.stop_done and not self.wake_at:
                     if self.termination_at is not None:
@@ -1153,6 +1164,8 @@ def main(argv=None):
                         help="wall-clock seconds for the observation window")
     parser.add_argument("--stop-at", type=float, default=8.0,
                         help="elapsed seconds before the scenario stop action")
+    parser.add_argument("--restart-every", type=float, default=0.0,
+                        help="repeat Target.closeTarget on the current worker every N seconds (0 = off)")
     parser.add_argument("--idle-after", type=float, default=15.0,
                         help="idle_*: stop page pings at this time")
     parser.add_argument("--background-tab", action="store_true",
