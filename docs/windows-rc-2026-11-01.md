@@ -44,7 +44,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 两条路线都已建立：
 - A1（模型可见性同步）：21 分钟 8 窗口 soak 稳定，但 WinRelease release 矩阵显示 managed 窗口 AI raw input 不落地（RC-A2/A3/A7 clicks=0），**未选**。PR #7 已关闭。
 - A2（presentation feedback 生命周期，patch 036）：不隐藏 WebContents，保留 AI/人类输入语义；修复 WinRelease 缺失 patch 033 接线后，release 矩阵 **14/14 cases、226/226 checks PASS**（含 RC-A1/A5/A8），21 分钟 8 窗口 managed-hidden soak **8/8 alive、model-visible、0 crash、0 FATAL、VERDICT STABLE**。已选为根修，PR #9 已更新审计补丁（`2bab9da`）。
-- 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK、0 renderer/GPU/network crash、0 FATAL；所有 dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景 PASS；资源稳定。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启，PR #7）。
+- 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK；dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景与资源趋势此前 PASS。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启，PR #7）。**2026-11-02 带 NetworkServiceSandbox 的复跑在 570s 发现 extension service worker renderer 的独立 Blink DCHECK，整体 FAIL；见 §6。**
 - 没有删除 DCHECK、扩大 buffer、周期 reload/重启页面或额外禁用后台优化。
 
 ## 3. GPU/TSF 安全与 patch 034/035（C）
