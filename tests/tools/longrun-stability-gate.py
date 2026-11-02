@@ -219,7 +219,7 @@ ALLOWED_FLAG_PATTERNS = [
     (r"^--log-file=.+$", "diagnostic"),
     (r"^--browser-cli-background-presentation$", "product-switch"),
     (r"^--browser-cli-user-explicit-show$", "product-switch"),
-    (r"^--enable-features=InputOwnershipEnforcement,NetworkServiceSandbox$", "product-feature"),
+    (r"^--enable-features=(InputOwnershipEnforcement,)?NetworkServiceSandbox$", "product-feature"),
     (r"^--disable-extensions-except=.+$", "test-extension"),
     (r"^--load-extension=.+$", "test-extension"),
 ]
