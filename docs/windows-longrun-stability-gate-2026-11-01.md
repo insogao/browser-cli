@@ -285,3 +285,40 @@ python tests/tools/longrun-stability-gate.py \
   extension SW restart 已 PASS。整体 gate 因此报 BLOCKED，不是 crash failure。
 - 未加 NetworkServiceSandbox；B 的安全矩阵另行验证了显式 flag 下 network utility
   Low IL/AppContainer。
+
+---
+
+## 9. 2026-11-02 WinRelease + NetworkServiceSandbox 20 分钟 gate
+
+修正后的 harness 同时给 normal/agent 两个 session 传
+`--enable-features=NetworkServiceSandbox`（agent 与 `InputOwnershipEnforcement` 合并）。
+命令：
+
+```bash
+python tests/tools/longrun-stability-gate.py \
+  --chrome D:/c/src/out/WinRelease/chrome.exe \
+  --duration 1200 --sample-interval 15 \
+  --evidence-dir D:/c/logs/longrun-2026-11-02c
+```
+
+结果（`D:/c/logs/longrun-2026-11-02c`）：**FAIL**。
+
+- 1212.8s，8 windows（normal + agent）。
+- **0** presentation-buffer DCHECK；A2 的隐藏窗口 presentation 路径没有回归。
+- dynamic/canvas/WebGL/OOPIF、normal/agent concurrent、presentation transition、
+  hidden/minimized/occluded、ownership、freshness、**SW restart**、resource trends：PASS。
+- NetworkServiceSandbox：两个 session 的 browser 命令行均含显式 flag；network utility
+  命令行均为 `--service-sandbox-type=network`。**PASS**（安全矩阵的 IL/AppContainer 证据见 C）。
+- 资源：private 1.251→1.182 GB（peak 1.251 GB），handles 12.2k→12.2k（peak 12.7k），
+  CPU 平均 1.6%；无持续增长。**PASS**。
+- **新阻断项**：agent 的 extension-renderer（PID 9308）在 570.1s 触发
+  `third_party/blink/renderer/modules/service_worker/service_worker_event_queue.cc:185:
+  DCHECK failed: HasScheduledIdleCallback()`；w5 extension page target 在 578.7s
+  `Inspector.targetCrashed`。gate 记录 `fatal-log=1`、`target-crashed=1`，因此
+  `extension page: FAIL`、`renderer/gpu/network crash counts: FAIL`，整体 FAIL。
+- Host restart 不在本 gate 内（gate 没有 host 进程，仍标 BLOCKED）；由独立
+  BrowserPilot PR #7 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启）。
+- 该 SW 崩溃与 A2 presentation 无关；它是本 build 上的独立 Blink DCHECK。根因暂定为
+  `Target.closeTarget` 重启 service worker 后，替换 worker 的 idle-callback 状态不一致，
+  在约 9.5 分钟后空闲/生命周期变化时触发。未删除 DCHECK、未提高阈值、未用周期 reload
+  绕过。该阻断项在修复/隔离前不能宣称 RC 长稳 PASS。
