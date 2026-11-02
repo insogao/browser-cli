@@ -74,6 +74,12 @@ test-only instrumentation channel, not a product flag. The short release-like
 E2E matrix separately proves the no-global-debugger launch contract; this gate's
 PASS would not re-claim that check.
 
+By default, browser-level Target.setAutoAttach excludes service_worker targets
+so the gate does not hold a DevTools session on the extension worker (a DevTools
+session changes its idle/keepalive lifecycle). Set
+BROWSER_CLI_LONGRUN_SW_DEVTOOLS=1 to run the SW-1 upstream-watch reproduction
+with the worker DevTools-attached.
+
 Usage:
   python tests/tools/longrun-stability-gate.py --dry-run
   python tests/tools/longrun-stability-gate.py --self-test
@@ -272,6 +278,12 @@ SESSION_SPECS = {
         "label": "Agent (managed presentation + InputOwnershipEnforcement)",
     },
 }
+
+# The release-like gate must not attach DevTools to the extension service
+# worker: a DevTools session changes the worker's idle/keepalive lifecycle.
+# Set BROWSER_CLI_LONGRUN_SW_DEVTOOLS=1 only for the SW-1 upstream-watch
+# reproduction that intentionally exercises that path.
+SW_DEVTOOLS_ATTACH = os.environ.get("BROWSER_CLI_LONGRUN_SW_DEVTOOLS") == "1"
 
 PROBE_JS = (
     "(window.__hsProbe ? window.__hsProbe() : "
@@ -972,11 +984,23 @@ class BrowserSession:
         except Exception as error:
             gate.setup_errors.append("%s: Target.setDiscoverTargets: %s" % (self.name, error))
         try:
-            self.browser.call("Target.setAutoAttach", {
+            auto_attach = {
                 "autoAttach": True,
                 "waitForDebuggerOnStart": False,
                 "flatten": True,
-            }, 10)
+            }
+            if not SW_DEVTOOLS_ATTACH:
+                # Keep Target.setDiscoverTargets (targetCrashed/targetDestroyed
+                # events) but do not attach a DevTools session to the service
+                # worker. First match wins; browser/tab must stay excluded for
+                # a browser-level auto-attach filter.
+                auto_attach["filter"] = [
+                    {"type": "service_worker", "exclude": True},
+                    {"type": "browser", "exclude": True},
+                    {"type": "tab", "exclude": True},
+                    {},
+                ]
+            self.browser.call("Target.setAutoAttach", auto_attach, 10)
         except Exception as error:
             gate.setup_errors.append("%s: Target.setAutoAttach: %s" % (self.name, error))
         gate.verify_command_line(self)
@@ -1345,6 +1369,7 @@ class LongRunGate:
             "sessions": {name: spec["label"] for name, spec in SESSION_SPECS.items()},
             "browserpilot_dir": self.browserpilot_dir,
             "ownership_enabled": self.enable_ownership,
+            "sw_devtools_attach": SW_DEVTOOLS_ATTACH,
             "freshness": "bump marker + capture; repeated only on normal w1/w2",
             "anti_cheat": [
                 "no periodic page reload",
