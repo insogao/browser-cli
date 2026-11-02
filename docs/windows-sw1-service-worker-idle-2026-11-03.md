@@ -105,13 +105,28 @@ exposed by the harness's unfiltered auto-attach.
 
 ## 6. Regression
 
-- WinDev with the fix + **unfiltered** autoAttach (DevTools attached):
-  690 s, 0 FATAL, 0 target crashes, SW restart PASS, all presentation/ownership
-  scenarios except the known WinDev-only producer-log check.
-- WinRelease with the fix: 20-minute release-like run and DevTools-attached
-  stress recorded below (to be filled by the acceptance run).
+Artifact: `D:/c/src/out/WinRelease/chrome.exe`, final A2 + SW-1 build
+(`chrome.dll` sha256 `15197e207d4de6f62a51ae8e437b40076000d5c6d74ab6c1e808b474bc3b270e`),
+no P1 code.
+
+- **WinRelease 20-minute release-like gate** (`D:/c/logs/sw1-winrelease-20m`):
+  1185.0 s, 8 windows, filtered autoAttach (`sw_devtools_attach=false`).
+  `fatal-log=0`, `target-crashed=0`, all crash counters 0; SW restart PASS
+  (new target ID); hidden/presentation/ownership/freshness/resources PASS.
+  Verdict `BLOCKED` only because this gate has no Native Messaging Host
+  process; Host restart is covered separately by BrowserPilot PR #7.
+- **WinRelease DevTools-attached stress** (`D:/c/logs/sw1-winrelease-attached-fixed`):
+  `baseline_attached` 600 s with SW DevTools attached (the path that crashed at
+  374.4 s before the fix), exit 0, 0 FATAL, worker still attached.
+- **Natural idle/wake** (`D:/c/logs/sw1-idle-wake-fixed`): filtered
+  `idle_wake_filtered` 120 s, exit 0; worker terminated naturally after the idle
+  timeout and a real page message started a new instance. The token does not
+  leak or block termination.
+- WinDev with the fix + unfiltered autoAttach: 690 s, 0 FATAL, 0 target
+  crashes, SW restart PASS.
 - The long-run harness now excludes `service_worker` from
   `Target.setAutoAttach` by default (release-like: no DevTools session on the
   worker). `BROWSER_CLI_LONGRUN_SW_DEVTOOLS=1` enables the upstream-watch
   reproduction with SW DevTools attached.
-- A2, Host restart and P1 regression results are unchanged.
+- A2 unit tests `LayerTreeView*` 28/28 still pass; release matrix and P1/Host
+  regression are recorded in the RC docs after this run.
