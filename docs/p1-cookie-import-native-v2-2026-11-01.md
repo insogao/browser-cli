@@ -10,6 +10,13 @@ Worktree：`D:\work\wt\bc-rc-p1`
 - 本仓库 proposed patch：`chromium/patches/proposed/037-browser-cli-cookie-import.patch`
 - 原 P1 背景：`docs/p1-browser-data-import-2026-10-30.md`
 
+> **2026-11-02 update.** E2E execution and the two UI-thread DCHECK blockers are
+> recorded in `docs/p1-native-cookie-import-e2e-2026-11-02.md`. Patch 037 was
+> compiled into `out/WinDev` on 2026-11-01; it is still **not** in
+> `chromium/patch-manifest.json`. The “未进入 chromium 构建 / 未链接” wording in
+> the 2026-11-01 status table is the historical snapshot for the manifest/CI
+> state at that date; the new document is the current E2E result.
+
 ---
 
 ## 1. 结论（先说边界）
