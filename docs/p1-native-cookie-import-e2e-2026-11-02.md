@@ -168,6 +168,11 @@ void CookieImportService::Shutdown() {
   `Browser CLI Import - Chromium`（PID `9284`），批准窗口被置为 topmost 后
   接受真实 Win32 `SendInput` 点击；点击落在 Allow 按钮中心 `(1696,792)`，
   作业继续到 done。
+
+  这说明批准窗口确实显示且点击生效；但最终组合运行中前台仍是来源浏览器
+  （PID `9284`），`Show()+Activate()` 没有稳定把批准窗口带到前台。产品若
+  使用 managed-hidden 目标，必须由用户显式触发并把批准窗口呈现给用户；
+  仅创建窗口或仅由 harness 置 topmost 后点击，不能证明真实用户看到了它。
 - **站点**：`127.0.0.1:<临时端口>`，`/set` 写入随机 canary 的持久 Cookie
   和 session Cookie；`/login-check` 只返回 `LOGIN_OK`/`LOGIN_MISSING`；
   `/session-check` 返回 `SESSION_PRESENT`/`SESSION_MISSING`；
