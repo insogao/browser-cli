@@ -482,6 +482,6 @@ source:target-browser-dialog}`；批准窗口真实显示并接受 Win32 `SendIn
 
 - 仅 Windows component `out/WinDev` 原始产物；未在本轮重建 non-component
   `out/WinRelease` 的 P1 变体，也未把 037 加入 `patch-manifest.json`。
-- 目标主窗口为隐藏、批准窗口单独呈现；锁屏/多桌面/远程会话下的呈现未测试。
+- 目标主窗口为隐藏、批准窗口单独呈现；`target-approve` 以 managed-hidden（`--browser-cli-background-presentation`）重跑 approve 场景 **PASS**：票据/批准窗口均 `shown=true`，`targetUserConfirmed=true`、`simulated=false`、`applied=2`、重启后 `LOGIN_OK`/`SESSION_MISSING`。锁屏/多桌面/远程会话下的呈现仍未测试。
 - 没有读取真实 Chrome/Edge/WorkBuddy Profile 或 Cookie；所有站点/Cookie 为合成数据。
 - 该 patch 仍是 **proposed**，未合并；产品发布就绪状态不变。
