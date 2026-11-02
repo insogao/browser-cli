@@ -322,3 +322,25 @@ python tests/tools/longrun-stability-gate.py \
   `Target.closeTarget` 重启 service worker 后，替换 worker 的 idle-callback 状态不一致，
   在约 9.5 分钟后空闲/生命周期变化时触发。未删除 DCHECK、未提高阈值、未用周期 reload
   绕过。该阻断项在修复/隔离前不能宣称 RC 长稳 PASS。
+
+---
+
+## 10. SW-1 修复后复跑（2026-11-03）
+
+- 修复：`037-sw1-service-worker-keepalive-idle.patch`。`ServiceWorkerGlobalScope::AddKeepAlive()`
+  改为持有 `ServiceWorkerEventQueue::StayAwakeToken`，`ClearKeepAlive()` 释放；不再只调用裸
+  `ResetIdleTimeout()`。保留 `HasScheduledIdleCallback()` DCHECK，未做周期 reload/keepalive。
+- harness：默认 `Target.setAutoAttach` 的 filter 排除 `service_worker`（release-like 门禁不
+  给 SW 挂 DevTools session）；`BROWSER_CLI_LONGRUN_SW_DEVTOOLS=1` 可显式运行 DevTools-attached
+  上游观察模式。
+- WinRelease 20 分钟（`D:/c/logs/sw1-winrelease-20m`，final `chrome.dll` sha256
+  `15197e20...b270e`，无 P1）：1185.0s，8 windows，`fatal-log=0`、`target-crashed=0`、
+  全部 crash counters 0；dynamic/canvas/WebGL/OOPIF、presentation、hidden/minimized/occluded、
+  ownership、freshness、SW restart、resource trends 全部 PASS。SW restart 以 new target id 证明。
+  整体仍为 `BLOCKED` 仅因本 gate 没有 Native Messaging Host；Host restart 由 BrowserPilot
+  PR #7 独立 PASS（196/196、20 分钟 31/31）。
+- WinRelease DevTools-attached 对照（`D:/c/logs/sw1-winrelease-attached-fixed`）：
+  `baseline_attached` 600s exit 0，0 FATAL；修复前同一路径 374.4s 必现 DCHECK。
+- 自然 idle/wake（`D:/c/logs/sw1-idle-wake-fixed`）：120s exit 0；worker 自然终止后由真实页面
+  消息唤醒新实例，token 不阻止正常终止/资源释放。
+- 回归：A2 release 矩阵 226/226 PASS；P1 9/9 PASS；Host restart 结果见 PR #7。
