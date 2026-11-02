@@ -519,3 +519,23 @@ probes, was not used as evidence, and must not be repeated without an isolated
 `--user-data-dir`. A version query should not initialize a profile or hit that
 path; this needs separate root-cause work before RC. It does not change any
 verdict above, but it reinforces that `releasable=false` is correct.
+
+---
+
+## 8. Post-audit remediation (2026-11-02)
+
+This section records changes made after the audit snapshot above. The original
+FAIL findings are kept for history; they must not be read as current state.
+
+| Original finding | Current state | Evidence |
+| --- | --- | --- |
+| NetworkServiceSandbox missing on client/long-run/show | **FIXED in branches** | `native-host/client.mjs` now appends `--enable-features=NetworkServiceSandbox`; long-run gate appends `InputOwnershipEnforcement,NetworkServiceSandbox`; release-matrix show args already carry the combined switch; `check-normal-launch.mjs` now positively asserts it. |
+| Duplicate `--enable-features` in release matrix | **FIXED** | normal/agent launch args now carry exactly one `--enable-features` value. |
+| 20-minute gate did not exercise the sandbox | **RERUN** | `D:/c/logs/longrun-2026-11-02` was launched with the combined feature switch; evidence command lines show it. |
+| Host restart BLOCKED | **PASS via dedicated gate** | BrowserPilot PR #7: 196/196 matrix; 20-minute 8-window run 31/31 with a real host restart at t=601s; stale connections/authorizations invalidated. |
+| PR #7/#8 hygiene | **FIXED** | browser-cli PR #7 (A1 rejected) and #8 (old A2 superseded) are closed, not merged; PR #9 carries the audited 036. |
+| P1 exact artifact blocked by UI-thread DCHECKs | **FIXED** | Rebased proposed patch 037 onto 001-036; async descriptor delete; `WithBaseSyncPrimitives` pipe join with WeakPtr delegate; synchronous client PID; drain/peek before pipe close; USER_EXPLICIT consent presentation. Exact WinDev artifact: 9/9 scenarios PASS, including `ticket-expired` delivery. |
+| WinRelease `releasable=false` | **UNCHANGED** | Still internal unsigned test build; no signing/installer/updater work. |
+
+The P1 patch remains **proposed** (not in `patch-manifest.json`) and all PRs
+remain Draft. The product is still not release-ready.
