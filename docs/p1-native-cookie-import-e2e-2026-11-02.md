@@ -24,17 +24,17 @@ Cookie、真实 Profile 或真实 token。
 
 | 项目 | 结论 | 证据 |
 | --- | --- | --- |
-| **已将 patch 037 编译进 `out/WinDev/chrome.dll` 的原始产物** | **BLOCKED** | 第一次 `hello` 即触发 DCHECK，目标进程崩溃；来源扩展收到 `target-disconnected` |
-| 本地 E2E 构建热修（只在 `out/WinDev` 重新编译/链接，**不属于 patch 037**） | 8 个场景 PASS，1 个场景 FAIL（见 §4） | 见 §3、§4 |
+| **修复前 patch 037 编译进 `out/WinDev/chrome.dll` 的原始产物** | **BLOCKED（历史）** | 第一次 `hello` 即触发 DCHECK，目标进程崩溃；来源扩展收到 `target-disconnected` |
+| **修复后的 patch 037（sha256 `20c87f17...`）编译进 `out/WinDev/chrome.dll`** | **PASS** | 8/8 场景 PASS（approve/deny/cancel/host/source/duplicate/cross/audit）；expiry 单独运行；见 §7 |
+| 本地 E2E 构建热修（历史，不属于 patch 037） | 8 个场景 PASS，1 个场景 FAIL（见 §4） | 见 §3、§4 |
 | 原生 CookieManager 写入 | **PASS** | 目标 `cookieImported = imported`，`applied=2, failed=0`；测试站点返回 `LOGIN_OK`；`VALUE_MATCH` |
 | 重启持久化 | **PASS** | 同一 Profile 重启后 `LOGIN_OK`；会话 Cookie 变为 `SESSION_MISSING` |
-| 目标浏览器独立批准 | **PASS** | 目标批准窗口 `visible=True`（组合运行 HWND `15734624`），目标主窗口 `visible=False`；物理 `SendInput` 点击 Allow（topmost）；`authorization.simulated=false`，`source=target-browser-dialog` |
-| 过期票据 | 执行层 **PASS**（5 分钟 TTL 后会话被销毁，票据不可再用），协议层 **FAIL**（`ticket-expired` 帧未送达） | `elapsedMs=298898`，`expiryOutcome=closed`，描述符删除，relay 返回 `target-not-running`；见 §4.9 |
+| 目标浏览器独立批准 | **PASS** | 目标批准窗口 `visible=True`，目标主窗口 `visible=False`；物理 `SendInput` 点击 Allow（topmost）；`authorization.simulated=false`，`source=target-browser-dialog` |
+| 过期票据 | **PASS（修复后）** | 5 分钟 TTL 后会话被销毁，票据不可再用；`ticket-expired` 帧在关闭前 drain；见 §7 |
 
-**不得宣称产品闭环完成。** 原始 patch 037 产物在当前
-`dcheck_always_on` 的 Windows 构建中无法完成第一次 `hello`；下面的
-E2E 结果来自同一 `chrome.dll` 的本地构建热修，热修没有提交到 patch 037，
-也没有修改 `D:\c\src` 的源码。
+**历史说明：** 修复前原始 patch 037 在当前 `dcheck_always_on` 的 Windows
+构建中无法完成第一次 `hello`，早期 §4 结果来自本地热修。§7 是修复后
+patch 本身在原始构建产物上的重跑结果，不依赖任何未提交热修。
 
 ---
 

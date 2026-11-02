@@ -1,55 +1,57 @@
 diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
-index 8f6060d2..000f32cb 100644
 --- a/chrome/browser/BUILD.gn
 +++ b/chrome/browser/BUILD.gn
-@@ -1532,6 +1532,8 @@ source_set("core") {
-       ":shutdown_watchdog_mac",
-       "//chrome/app_shim",
-       "//chrome/browser/apps/app_shim",
-+      "//chrome/browser/browser_cli:foreground_assist_presentation",
-+      "//chrome/browser/browser_cli:user_explicit_presentation",
-       "//chrome/browser/enterprise/connectors/device_trust/key_management/core/mac",
-       "//chrome/browser/mac",
-       "//chrome/browser/mac:impl",
-@@ -1585,6 +1587,27 @@ source_set("core") {
+@@ -1602,6 +1602,7 @@
+ 
+   if (is_win) {
+     deps += [
++      "//chrome/browser/browser_cli/cookie_import",
+       "//chrome/browser/browser_cli:foreground_assist_presentation_win",
+       "//chrome/browser/browser_cli:user_explicit_presentation_win",
      ]
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -224,6 +224,9 @@
+ #include "chrome/browser/browser_cli/foreground_assist.h"
+ #include "chrome/browser/browser_cli/foreground_assist_presentation.h"
+ #include "chrome/browser/browser_cli/user_explicit_presentation.h"
++#if BUILDFLAG(IS_WIN)
++#include "chrome/browser/browser_cli/cookie_import/cookie_import_service.h"
++#endif  // BUILDFLAG(IS_WIN)
+ #endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_MAC)
+@@ -1643,6 +1646,14 @@
    }
  
-+  deps += [
-+    "//chrome/browser/browser_cli:reopen_window_selection",
-+    "//chrome/browser/browser_cli:user_explicit_show",
-+  ]
-+
-+  # ArbitrateBrowserCliCommandLineIntent() and
-+  # CommandLineForColdStartStartup() live in :foreground_assist, which already
-+  # depends on //ui/views, so it stays restricted to platforms that build
-+  # views; the Windows chrome_browser_main.cc call sites need it in the graph.
-+  if (is_mac || is_win) {
-+    deps += [ "//chrome/browser/browser_cli:foreground_assist" ]
+ #if BUILDFLAG(IS_WIN)
++  // The cookie-import target is opt-in: the user must launch Browser CLI with
++  // --browser-cli-cookie-import. It never starts for a normal run.
++  if (is_initial_profile &&
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "browser-cli-cookie-import")) {
++    browser_cli::CookieImportService::Start(profile);
 +  }
 +
-+  if (is_win) {
-+    deps += [
-+      "//chrome/browser/browser_cli/cookie_import",
-+      "//chrome/browser/browser_cli:foreground_assist_presentation_win",
-+      "//chrome/browser/browser_cli:user_explicit_presentation_win",
-+    ]
-+  }
+   // Verify that the profile is not on a network share and if so prepare to show
+   // notification to the user.
+   if (NetworkProfileBubble::ShouldCheckNetworkProfile(profile)) {
+@@ -2304,6 +2315,12 @@
+   // Android specific MessageLoop
+   NOTREACHED();
+ #else
++  // Stop the cookie-import pipe and delete the short-lived session
++  // descriptor before profile teardown. No job is rolled back.
++#if BUILDFLAG(IS_WIN)
++  browser_cli::CookieImportService::Stop();
++#endif  // BUILDFLAG(IS_WIN)
 +
-   if (!is_win && !is_android) {
-     sources += [
-       "certificate_viewer_stub.cc",
-@@ -4214,6 +4237,7 @@ source_set("core_unit_tests") {
-       "//chrome/browser/profiles:profile",
-       "//chrome/common:channel_info",
-       "//components/version_info:channel",
-+      "//ui/views",
-     ]
-     if (is_chrome_branded) {
-       deps += [ "//chrome/test/base:scoped_channel_override" ]
+   // Shutdown the UpgradeDetector here before `ChromeBrowserMainPartsAsh`
+   // disconnects DBus services in its PostDestroyThreads.
+   UpgradeDetector::GetInstance()->Shutdown();
 diff --git a/chrome/browser/browser_cli/cookie_import/BUILD.gn b/chrome/browser/browser_cli/cookie_import/BUILD.gn
 new file mode 100644
-index 00000000..30e943f0
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/BUILD.gn
 @@ -0,0 +1,69 @@
@@ -124,10 +126,9 @@ index 00000000..30e943f0
 +}
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc
 new file mode 100644
-index 00000000..bcd43f6f
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.cc
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,192 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -146,6 +147,7 @@ index 00000000..bcd43f6f
 +#include "ui/views/controls/textfield/textfield.h"
 +#include "ui/views/layout/box_layout.h"
 +#include "ui/views/view.h"
++#include "ui/views/widget/browser_cli_presentation_win.h"
 +#include "ui/views/widget/widget.h"
 +#include "ui/views/window/dialog_delegate.h"
 +
@@ -293,13 +295,15 @@ index 00000000..bcd43f6f
 +void ShowDialog(std::unique_ptr<views::DialogDelegate> dialog) {
 +  views::Widget* widget = views::DialogDelegate::CreateDialogWidget(
 +      std::move(dialog), /*context=*/nullptr, /*parent=*/nullptr);
-+  if (widget) {
-+    widget->Show();
-+    // The browser may be running without a visible window (managed hidden
-+    // mode). The import flow is user-triggered, so bring the consent UI to the
-+    // front instead of relying on an existing browser window.
-+    widget->Activate();
++  if (!widget) {
++    return;
 +  }
++  // The browser may be running without a visible window (managed hidden
++  // mode). The import flow is user-triggered, so present the consent UI
++  // through the same USER_EXPLICIT gateway as an explicit show: the host gate
++  // grants per-window ownership and the documented retry handles a swallowed
++  // first ShowWindow. Do not fall back to a raw Show() outside the policy.
++  views::BrowserCliPresentForUserExplicitAction(widget);
 +}
 +
 +}  // namespace
@@ -319,7 +323,6 @@ index 00000000..bcd43f6f
 +#endif  // BUILDFLAG(IS_WIN)
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h
 new file mode 100644
-index 00000000..f61fab13
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h
 @@ -0,0 +1,32 @@
@@ -357,10 +360,9 @@ index 00000000..f61fab13
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_DIALOG_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
 new file mode 100644
-index 00000000..29816de5
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,358 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -384,6 +386,8 @@ index 00000000..29816de5
 +#include "base/synchronization/lock.h"
 +#include "base/synchronization/waitable_event.h"
 +#include "base/task/sequenced_task_runner.h"
++#include "base/task/task_traits.h"
++#include "base/task/thread_pool.h"
 +#include "base/threading/platform_thread.h"
 +#include "base/time/time.h"
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_policy.h"
@@ -417,8 +421,8 @@ index 00000000..29816de5
 +class CookieImportPipeServer::Core
 +    : public base::RefCountedThreadSafe<CookieImportPipeServer::Core> {
 + public:
-+  Core(std::wstring pipe_name, Delegate* delegate)
-+      : pipe_name_(std::move(pipe_name)), delegate_(delegate) {}
++  Core(std::wstring pipe_name, base::WeakPtr<Delegate> delegate)
++      : pipe_name_(std::move(pipe_name)), delegate_(std::move(delegate)) {}
 +
 +  void Enqueue(base::DictValue message) {
 +    std::string frame = EncodeFrame(message);
@@ -433,6 +437,7 @@ index 00000000..29816de5
 +  }
 +
 +  void RequestStop() { stop_.store(true); }
++  uint32_t GetClientPid() const { return client_pid_.load(); }
 +
 +  // Blocks until the pipe has been created (or creation failed).
 +  bool WaitForStart() {
@@ -451,9 +456,10 @@ index 00000000..29816de5
 +  void PostMessage(base::DictValue message);
 +
 +  const std::wstring pipe_name_;
-+  const raw_ptr<Delegate> delegate_;
++  const base::WeakPtr<Delegate> delegate_;
 +  std::atomic<bool> stop_{false};
 +  std::atomic<bool> start_ok_{false};
++  std::atomic<uint32_t> client_pid_{0};
 +  base::WaitableEvent started_{base::WaitableEvent::ResetPolicy::MANUAL,
 +                               base::WaitableEvent::InitialState::NOT_SIGNALED};
 +  base::Lock lock_;
@@ -464,7 +470,7 @@ index 00000000..29816de5
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE,
 +      base::BindOnce(&Delegate::OnImportPipeMessage,
-+                     base::Unretained(delegate_), std::move(message)));
++                     delegate_, std::move(message)));
 +}
 +
 +bool CookieImportPipeServer::Core::ProcessBuffer(std::string* buffer) {
@@ -507,6 +513,9 @@ index 00000000..29816de5
 +    if (!::WriteFile(pipe, frame.data(), static_cast<DWORD>(frame.size()),
 +                     &written, nullptr) ||
 +        written == 0) {
++      LOG(WARNING) << "cookie import: pipe write failed error="
++                   << ::GetLastError() << " bytes=" << written
++                   << " frame=" << frame.size();
 +      return;
 +    }
 +    base::AutoLock lock(lock_);
@@ -560,9 +569,10 @@ index 00000000..29816de5
 +        if (!::GetNamedPipeClientProcessId(pipe, &client_pid)) {
 +          client_pid = 0;
 +        }
++        client_pid_.store(client_pid);
 +        content::GetUIThreadTaskRunner({})->PostTask(
 +            FROM_HERE, base::BindOnce(&Delegate::OnImportPipeConnected,
-+                                      base::Unretained(delegate_), client_pid));
++                                      delegate_, client_pid));
 +      } else {
 +        const DWORD error = ::GetLastError();
 +        if (error == ERROR_PIPE_CONNECTED) {
@@ -571,10 +581,11 @@ index 00000000..29816de5
 +          if (!::GetNamedPipeClientProcessId(pipe, &client_pid)) {
 +            client_pid = 0;
 +          }
++          client_pid_.store(client_pid);
 +          content::GetUIThreadTaskRunner({})->PostTask(
 +              FROM_HERE,
 +              base::BindOnce(&Delegate::OnImportPipeConnected,
-+                             base::Unretained(delegate_), client_pid));
++                             delegate_, client_pid));
 +        } else if (error != ERROR_PIPE_LISTENING) {
 +          break;
 +        }
@@ -609,9 +620,37 @@ index 00000000..29816de5
 +    base::PlatformThread::Sleep(base::Milliseconds(10));
 +  }
 +
++  if (connected) {
++    // A terminal frame such as ticket-expired is queued immediately before
++    // Stop(). Drain it before closing the pipe, otherwise the client only sees
++    // a disconnect and cannot distinguish expiry from a host crash. The write
++    // queue is bounded and each attempt is non-blocking (PIPE_NOWAIT).
++    for (int attempt = 0; attempt < 100; ++attempt) {
++      DrainWrites(pipe);
++      {
++        base::AutoLock lock(lock_);
++        if (write_queue_.empty()) {
++          break;
++        }
++      }
++      base::PlatformThread::Sleep(base::Milliseconds(5));
++    }
++    // The frame is in the pipe buffer now, but DisconnectNamedPipe discards
++    // unread data. Wait (bounded) until the client has consumed the buffer
++    // before tearing the pipe down.
++    for (int attempt = 0; attempt < 100; ++attempt) {
++      DWORD available = 0;
++      if (!::PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) ||
++          available == 0) {
++        break;
++      }
++      base::PlatformThread::Sleep(base::Milliseconds(5));
++    }
++  }
++
 +  content::GetUIThreadTaskRunner({})->PostTask(
 +      FROM_HERE, base::BindOnce(&Delegate::OnImportPipeDisconnected,
-+                                base::Unretained(delegate_)));
++                                delegate_));
 +  if (connected) {
 +    ::DisconnectNamedPipe(pipe);
 +  }
@@ -636,8 +675,8 @@ index 00000000..29816de5
 +
 +CookieImportPipeServer::CookieImportPipeServer(std::wstring pipe_name,
 +                                               Delegate* delegate)
-+    : core_(base::MakeRefCounted<Core>(std::move(pipe_name), delegate)),
-+      delegate_(delegate) {}
++    : core_(base::MakeRefCounted<Core>(std::move(pipe_name),
++                                       delegate->AsWeakPtr())) {}
 +
 +CookieImportPipeServer::~CookieImportPipeServer() {
 +  Stop();
@@ -658,19 +697,35 @@ index 00000000..29816de5
 +
 +void CookieImportPipeServer::Stop() {
 +  core_->RequestStop();
-+  if (thread_) {
-+    thread_->Join();
-+    thread_.reset();
++  if (!thread_) {
++    return;
 +  }
++  // Joining a SimpleThread waits on a base sync primitive, which is forbidden
++  // on the UI thread. Hand the bounded join to a WithBaseSyncPrimitives pool
++  // task; all delegate callbacks use a WeakPtr, so the pipe thread may safely
++  // outlive this server by a few milliseconds.
++  auto thread = std::move(thread_);
++  base::ThreadPool::PostTask(
++      FROM_HERE,
++      {base::WithBaseSyncPrimitives(), base::TaskPriority::BEST_EFFORT,
++       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
++      base::BindOnce(
++          [](std::unique_ptr<base::SimpleThread> pipe_thread) {
++            pipe_thread->Join();
++          },
++          std::move(thread)));
++}
++
++uint32_t CookieImportPipeServer::GetClientPid() const {
++  return core_->GetClientPid();
 +}
 +
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h
 new file mode 100644
-index 00000000..a3de3761
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.h
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,71 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -682,8 +737,8 @@ index 00000000..a3de3761
 +#include <memory>
 +#include <string>
 +
-+#include "base/memory/raw_ptr.h"
 +#include "base/memory/ref_counted.h"
++#include "base/memory/weak_ptr.h"
 +#include "base/threading/simple_thread.h"
 +#include "base/values.h"
 +
@@ -708,6 +763,10 @@ index 00000000..a3de3761
 +  class Delegate {
 +   public:
 +    virtual ~Delegate() = default;
++    // The pipe thread may outlive the service by a few milliseconds during
++    // asynchronous shutdown; all callbacks are posted through this weak
++    // pointer so a destroyed delegate is never dereferenced.
++    virtual base::WeakPtr<Delegate> AsWeakPtr() = 0;
 +    virtual void OnImportPipeConnected(uint32_t client_pid) = 0;
 +    virtual void OnImportPipeMessage(base::DictValue message) = 0;
 +    virtual void OnImportPipeDisconnected() = 0;
@@ -721,6 +780,10 @@ index 00000000..a3de3761
 +  bool Start();
 +  void Send(base::DictValue message);
 +  void Stop();
++  // Returns the PID of the connected pipe client, or 0 before connect. The
++  // pipe thread records it synchronously so hello can verify identity without
++  // waiting for the asynchronous UI callback.
++  uint32_t GetClientPid() const;
 +
 +  // Public only so the pipe thread implementation in the .cc can subclass
 +  // base::SimpleThread with access to the run loop.
@@ -729,7 +792,6 @@ index 00000000..a3de3761
 + private:
 +  scoped_refptr<Core> core_;
 +  std::unique_ptr<base::SimpleThread> thread_;
-+  raw_ptr<Delegate> delegate_;
 +};
 +
 +}  // namespace browser_cli
@@ -737,7 +799,6 @@ index 00000000..a3de3761
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_PIPE_SERVER_WIN_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc
 new file mode 100644
-index 00000000..4f344b92
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.cc
 @@ -0,0 +1,703 @@
@@ -1446,7 +1507,6 @@ index 00000000..4f344b92
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h
 new file mode 100644
-index 00000000..318a9266
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy.h
 @@ -0,0 +1,141 @@
@@ -1593,7 +1653,6 @@ index 00000000..318a9266
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_POLICY_H_
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc
 new file mode 100644
-index 00000000..d6847a63
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_policy_unittest.cc
 @@ -0,0 +1,298 @@
@@ -1897,10 +1956,9 @@ index 00000000..d6847a63
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc b/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc
 new file mode 100644
-index 00000000..33e8ad1c
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_service.cc
-@@ -0,0 +1,918 @@
+@@ -0,0 +1,942 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1927,6 +1985,7 @@ index 00000000..33e8ad1c
 +#include "base/strings/string_util.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
 +#include "base/time/time.h"
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_dialog.h"
 +#include "chrome/browser/browser_cli/cookie_import/cookie_import_policy.h"
@@ -2131,10 +2190,23 @@ index 00000000..33e8ad1c
 +}
 +
 +void CookieImportService::RemoveDescriptor() {
-+  if (!descriptor_path_.empty()) {
-+    base::DeleteFile(base::FilePath::FromUTF8Unsafe(descriptor_path_));
-+    descriptor_path_.clear();
++  if (descriptor_path_.empty()) {
++    return;
 +  }
++  const base::FilePath path = base::FilePath::FromUTF8Unsafe(descriptor_path_);
++  descriptor_path_.clear();
++  // File I/O is not allowed on the UI thread. The descriptor is already
++  // consumed or the session is shutting down, so deleting it off-thread is
++  // safe; the ticket hash it contains can no longer be used.
++  base::ThreadPool::PostTask(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
++       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
++      base::BindOnce(
++          [](const base::FilePath& descriptor_path) {
++            (void)base::DeleteFile(descriptor_path);
++          },
++          path));
 +}
 +
 +void CookieImportService::Shutdown() {
@@ -2194,6 +2266,11 @@ index 00000000..33e8ad1c
 +  if (failed_auth_attempts_.size() >= static_cast<size_t>(kMaxTicketFailures)) {
 +    rate_limited_until_ = base::TimeTicks::Now() + kRateLimitBlock;
 +  }
++}
++
++base::WeakPtr<CookieImportPipeServer::Delegate>
++CookieImportService::AsWeakPtr() {
++  return weak_factory_.GetWeakPtr();
 +}
 +
 +void CookieImportService::OnImportPipeConnected(uint32_t client_pid) {
@@ -2274,9 +2351,14 @@ index 00000000..33e8ad1c
 +
 +  // The ticket is bound to the native-host relay process. Fail closed if the
 +  // pipe client identity is unknown or does not match the claimed host PID.
++  // Read the PID from the pipe thread rather than the asynchronous
++  // OnImportPipeConnected callback: a client may send hello immediately after
++  // connect, before that UI task runs.
 +  const std::optional<int> host_pid = message.FindInt("hostPid");
-+  if (!host_pid || client_pid_ == 0 ||
-+      static_cast<uint32_t>(*host_pid) != client_pid_) {
++  const uint32_t pipe_client_pid =
++      pipe_server_ ? pipe_server_->GetClientPid() : 0;
++  if (!host_pid || pipe_client_pid == 0 ||
++      static_cast<uint32_t>(*host_pid) != pipe_client_pid) {
 +    RecordAuthFailure();
 +    SendError("host-identity-mismatch");
 +    return;
@@ -2821,10 +2903,9 @@ index 00000000..33e8ad1c
 +}  // namespace browser_cli
 diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_service.h b/chrome/browser/browser_cli/cookie_import/cookie_import_service.h
 new file mode 100644
-index 00000000..33d1d72b
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_service.h
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,155 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2885,6 +2966,7 @@ index 00000000..33d1d72b
 +  ~CookieImportService() override;
 +
 +  // CookieImportPipeServer::Delegate:
++  base::WeakPtr<CookieImportPipeServer::Delegate> AsWeakPtr() override;
 +  void OnImportPipeConnected(uint32_t client_pid) override;
 +  void OnImportPipeMessage(base::DictValue message) override;
 +  void OnImportPipeDisconnected() override;
@@ -2979,148 +3061,3 @@ index 00000000..33d1d72b
 +}  // namespace browser_cli
 +
 +#endif  // CHROME_BROWSER_BROWSER_CLI_COOKIE_IMPORT_COOKIE_IMPORT_SERVICE_H_
-diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
-index b2619baa..bc4a420b 100644
---- a/chrome/browser/chrome_browser_main.cc
-+++ b/chrome/browser/chrome_browser_main.cc
-@@ -218,6 +218,17 @@
- #include "chrome/browser/first_run/upgrade_util.h"
- #endif
- 
-+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+#include "base/logging.h"
-+
-+#include "chrome/browser/browser_cli/foreground_assist.h"
-+#include "chrome/browser/browser_cli/foreground_assist_presentation.h"
-+#include "chrome/browser/browser_cli/user_explicit_presentation.h"
-+#if BUILDFLAG(IS_WIN)
-+#include "chrome/browser/browser_cli/cookie_import/cookie_import_service.h"
-+#endif  // BUILDFLAG(IS_WIN)
-+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+
- #if BUILDFLAG(IS_MAC)
- #include <Security/Security.h>
- 
-@@ -556,6 +567,31 @@ void ProcessSingletonNotificationCallbackImpl(
-   }
- #endif
- 
-+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+  // Browser CLI: exactly one producer may consume a direct invocation. The
-+  // shared arbitration gives any assist request/release intent priority over
-+  // the explicit `show` switch, so a conflicting command line is denied and
-+  // logged by the assist producer (conflicting-producer-switches) and never
-+  // reaches the USER_EXPLICIT show producer or its presentation gateway. A
-+  // pure show request keeps the existing presentation path, and a command line
-+  // without either intent falls through to stock handling. The assist intent is
-+  // always consumed (fail closed): it must never act as an ordinary URL / app
-+  // launch that could change a HUMAN-owned window or create a visible window.
-+  switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(command_line)) {
-+    case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
-+      browser_cli::HandleForegroundAssistRequest(command_line);
-+      return;
-+    case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
-+      if (browser_cli::HandleUserExplicitShowRequest(command_line,
-+                                                     current_directory)) {
-+        return;
-+      }
-+      break;
-+    case browser_cli::BrowserCliCommandLineIntent::kOrdinary:
-+      break;
-+  }
-+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+
-   StartupProfilePathInfo startup_profile_path_info =
-       GetStartupProfilePath(current_directory, command_line,
-                             /*ignore_profile_picker=*/false);
-@@ -998,8 +1034,6 @@ void ChromeBrowserMainParts::RecordBrowserStartupTime() {
- // -----------------------------------------------------------------------------
- // TODO(viettrungluu): move more/rest of BrowserMain() into BrowserMainParts.
- 
--
--
- // content::BrowserMainParts implementation ------------------------------------
- 
- int ChromeBrowserMainParts::PreEarlyInitialization() {
-@@ -1612,6 +1646,14 @@ void ChromeBrowserMainParts::PostProfileInit(Profile* profile,
-   }
- 
- #if BUILDFLAG(IS_WIN)
-+  // The cookie-import target is opt-in: the user must launch Browser CLI with
-+  // --browser-cli-cookie-import. It never starts for a normal run.
-+  if (is_initial_profile &&
-+      base::CommandLine::ForCurrentProcess()->HasSwitch(
-+          "browser-cli-cookie-import")) {
-+    browser_cli::CookieImportService::Start(profile);
-+  }
-+
-   // Verify that the profile is not on a network share and if so prepare to show
-   // notification to the user.
-   if (NetworkProfileBubble::ShouldCheckNetworkProfile(profile)) {
-@@ -2121,9 +2163,50 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
- #endif
- 
-   // This step is costly.
--  if (browser_creator_->Start(*base::CommandLine::ForCurrentProcess(),
--                              base::FilePath(), profile_info,
--                              last_opened_profiles)) {
-+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+  // Browser CLI: a cold start carrying an agent foreground-assist intent must
-+  // never be processed by the ordinary startup as a URL / app / incognito /
-+  // automation / headless launch. The effective command line drops those launch
-+  // arguments (and every positional URL) and adds --no-startup-window, so
-+  // StartupBrowserCreator only brings up the process (silent_launch: no URL,
-+  // no window, no profile picker); the assist handler below then denies and
-+  // logs the original request. Command lines without an assist intent are
-+  // passed through unchanged.
-+  const base::CommandLine launch_command_line =
-+      browser_cli::CommandLineForColdStartStartup(
-+          *base::CommandLine::ForCurrentProcess());
-+#else
-+  const base::CommandLine& launch_command_line =
-+      *base::CommandLine::ForCurrentProcess();
-+#endif
-+  if (browser_creator_->Start(launch_command_line, base::FilePath(),
-+                              profile_info, last_opened_profiles)) {
-+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+    // Browser CLI: the same single arbitration as the ProcessSingleton path.
-+    // An assist intent (including a command line that also carries the
-+    // explicit show switch) is denied/logged and consumed by the assist
-+    // producer, so it can never present a window through the USER_EXPLICIT
-+    // path; the startup above ran with the sanitized command line (no URL /
-+    // app side effects, no startup window), so the denied request cannot fall
-+    // back to an ordinary launch either. A pure show request still presents
-+    // exactly one window: the startup path has already created its window
-+    // (its native show was denied by the background policy), and with
-+    // --no-startup-window the producer creates one for the resolved profile.
-+    switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(
-+        *base::CommandLine::ForCurrentProcess())) {
-+      case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
-+        browser_cli::HandleForegroundAssistRequest(
-+            *base::CommandLine::ForCurrentProcess());
-+        break;
-+      case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
-+        browser_cli::HandleUserExplicitShowRequest(
-+            *base::CommandLine::ForCurrentProcess(), base::FilePath());
-+        break;
-+      case browser_cli::BrowserCliCommandLineIntent::kOrdinary:
-+        break;
-+    }
-+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
-+
- #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
-     // Initialize autoupdate timer. Timer callback costs basically nothing
-     // when browser is not in persistent mode, so it's OK to let it ride on
-@@ -2232,6 +2315,12 @@ void ChromeBrowserMainParts::PostMainMessageLoopRun() {
-   // Android specific MessageLoop
-   NOTREACHED();
- #else
-+  // Stop the cookie-import pipe and delete the short-lived session
-+  // descriptor before profile teardown. No job is rolled back.
-+#if BUILDFLAG(IS_WIN)
-+  browser_cli::CookieImportService::Stop();
-+#endif  // BUILDFLAG(IS_WIN)
-+
-   // Shutdown the UpgradeDetector here before `ChromeBrowserMainPartsAsh`
-   // disconnects DBus services in its PostDestroyThreads.
-   UpgradeDetector::GetInstance()->Shutdown();
