@@ -362,7 +362,7 @@ diff --git a/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_
 new file mode 100644
 --- /dev/null
 +++ b/chrome/browser/browser_cli/cookie_import/cookie_import_pipe_server_win.cc
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,362 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -646,6 +646,10 @@ new file mode 100644
 +      }
 +      base::PlatformThread::Sleep(base::Milliseconds(5));
 +    }
++    // Give the client one last scheduling slice after it has consumed the
++    // terminal frame. Without this, a server-side DisconnectNamedPipe can
++    // still race the client's final data callback under load.
++    base::PlatformThread::Sleep(base::Milliseconds(50));
 +  }
 +
 +  content::GetUIThreadTaskRunner({})->PostTask(

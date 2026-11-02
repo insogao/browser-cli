@@ -416,3 +416,72 @@ node D:/work/wt/bp-rc-p1/scripts/e2e/p1-native-cookie-import-e2e.mjs \
 ```
 
 构建热修的源码 diff 见 §2.4；临时构建目录已删除。patch 037 本身未修改。
+
+---
+
+## 8. 修复后 patch 037 原始产物重跑（2026-11-02）
+
+本节结果是**修复后的 patch 037 本身**编译出的原始 `out/WinDev/chrome.dll`
+（SHA-256 `e16b81270e2f5da7ea7ec99078fdb1838f49a2680e17787a35be00237c00a26c`，
+2026-11-02 14:17 链接），不依赖任何未提交构建热修。
+
+patch：`chromium/patches/proposed/037-browser-cli-cookie-import.patch`，
+SHA-256 `b39e47b695cc04669820c72556c5c8e4adc307633c8003c438ac6750a24d61a7`，
+已 rebase 到当前 001–036 栈（不再重复添加 patch 016 的 wiring）。
+
+### 8.1 修复内容
+
+- **重新接线**：只向 `chrome/browser/BUILD.gn` 的 Windows `browser_cli` deps 加
+  `cookie_import`，只向 `chrome_browser_main.cc` 加 cookie-import include、
+  `PostProfileInit` 的 `CookieImportService::Start()` 和
+  `PostMainMessageLoopRun` 的 `Stop()`；不重复添加已有的命令行仲裁块。
+- **UI 线程阻塞 #1**：`RemoveDescriptor()` 从 UI 线程同步 `DeleteFile` 改为
+  `ThreadPool` `MayBlock/BEST_EFFORT` 删除；描述符此时已被消费或会话正在关闭。
+- **UI 线程阻塞 #2**：`CookieImportPipeServer::Stop()` 不再在 UI 线程
+  `SimpleThread::Join()`；把 join 作为 `WithBaseSyncPrimitives` 池任务执行。
+  Delegate 回调改为 `base::WeakPtr`，pipe 线程可以安全地比 service 多存活几毫秒。
+- **expiry 帧**：停止 pipe 前先 drain 写队列，再用 `PeekNamedPipe`（有界）等待
+  客户端读空，最后额外 50 ms 调度余量才 `DisconnectNamedPipe`；`ticket-expired`
+  不再被关闭动作吞掉。
+- **client PID 竞态**：pipe 线程在 connect 时同步记录 client PID，`hello`
+  直接读取原子值，不再依赖可能滞后的 `OnImportPipeConnected` UI 回调。
+- **managed-hidden 批准 UI**：Session/Approval dialog 统一走
+  `views::BrowserCliPresentForUserExplicitAction()`（USER_EXPLICIT gateway +
+  documented first-show retry），不再在策略外直接 `Show()+Activate()`。
+
+### 8.2 结果
+
+命令：
+
+```sh
+node D:/work/wt/bp-rc-p1/scripts/e2e/p1-native-cookie-import-e2e.mjs \
+  --chrome D:/c/src/out/WinDev/chrome.exe \
+  --scenarios approve,deny,cancel,host,source,duplicate,cross,audit,expired \
+  --root D:/c/logs/p1-e2e-final2-20261102 --keep
+```
+
+结果：**9/9 PASS**，`hygiene=PASS`，`secretLeaks=[]`。
+
+| 场景 | 结果 | 关键证据 |
+| --- | --- | --- |
+| approve + restart | **PASS** | `applied=2, failed=0`；`LOGIN_OK`；`VALUE_MATCH`；重启后 `LOGIN_OK`/`SESSION_MISSING` |
+| deny | **PASS** | `applied=0`；站点 `LOGIN_MISSING`/`SESSION_MISSING` |
+| cancel + late allow | **PASS** | `applied=0`；取消后 Late Allow 不写入 |
+| host interruption | **PASS** | host 退出后无写入；来源显式 `HOST_DISCONNECTED` 路径 |
+| source replacement | **PASS** | 来源进程替换后票据不可重放；无写入 |
+| duplicate submit | **PASS** | 第二次提交被拒；无重复写入 |
+| cross-profile | **PASS** | A 票据对 B 管道 `ticket-invalid`；A 自身 `ready` |
+| pipe DACL + client identity | **PASS** | DACL 仅 owner+SYSTEM；错误 PID `host-identity-mismatch`，正确 PID `ready` |
+| expired ticket | **PASS** | `elapsedMs=298908`；`expiryOutcome={type:error,code:ticket-expired}`；描述符删除；`errorFrameDelivered=true` |
+
+批准证据（approve）：`authorization={targetUserConfirmed:true, simulated:false,
+source:target-browser-dialog}`；批准窗口真实显示并接受 Win32 `SendInput` 点击；
+目标主窗口 `visible=false`。策略单测 `cookie_import_unittests` **9/9 PASS**。
+
+### 8.3 限制
+
+- 仅 Windows component `out/WinDev` 原始产物；未在本轮重建 non-component
+  `out/WinRelease` 的 P1 变体，也未把 037 加入 `patch-manifest.json`。
+- 目标主窗口为隐藏、批准窗口单独呈现；锁屏/多桌面/远程会话下的呈现未测试。
+- 没有读取真实 Chrome/Edge/WorkBuddy Profile 或 Cookie；所有站点/Cookie 为合成数据。
+- 该 patch 仍是 **proposed**，未合并；产品发布就绪状态不变。
