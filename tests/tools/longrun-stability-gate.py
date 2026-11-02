@@ -219,7 +219,7 @@ ALLOWED_FLAG_PATTERNS = [
     (r"^--log-file=.+$", "diagnostic"),
     (r"^--browser-cli-background-presentation$", "product-switch"),
     (r"^--browser-cli-user-explicit-show$", "product-switch"),
-    (r"^--enable-features=InputOwnershipEnforcement$", "product-feature"),
+    (r"^--enable-features=InputOwnershipEnforcement,NetworkServiceSandbox$", "product-feature"),
     (r"^--disable-extensions-except=.+$", "test-extension"),
     (r"^--load-extension=.+$", "test-extension"),
 ]
@@ -934,7 +934,9 @@ class BrowserSession:
         ]
         if self.managed:
             args.insert(1, "--browser-cli-background-presentation")
-            args.append("--enable-features=InputOwnershipEnforcement")
+            args.append("--enable-features=InputOwnershipEnforcement,NetworkServiceSandbox")
+        else:
+            args.append("--enable-features=NetworkServiceSandbox")
         extensions = []
         if self.has_extension:
             extensions.append(PROBE_EXT_DIR)
@@ -2563,7 +2565,7 @@ def self_test():
         "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=12345",
         "--enable-logging", "--log-file=C:\\temp\\x.log",
         "--browser-cli-background-presentation",
-        "--enable-features=InputOwnershipEnforcement",
+        "--enable-features=InputOwnershipEnforcement,NetworkServiceSandbox",
         "--disable-extensions-except=C:\\a,C:\\b", "--load-extension=C:\\a,C:\\b",
     ]
     classified, errors = classify_args(good_args)
