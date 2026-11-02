@@ -458,3 +458,5 @@ git apply --check -R /path/to/browser-cli/chromium/patches/013-command-line-inte
   人工核对：managed 后台下无来源的程序化 `OpenURLFromTab` 不激活 app/不授 HUMAN、
   不出现窗口；context-menu Preferences/Search 等按用户点击只呈现目标窗口并 HUMAN；
   stock Chromium 行为不变。
+
+| `037-sw1-service-worker-keepalive-idle.patch` | SW-1（**Service Worker keepalive 与 idle timeout 状态机**） | `ServiceWorkerGlobalScope::AddKeepAlive()` 改为持有一个 `ServiceWorkerEventQueue::StayAwakeToken`，`ClearKeepAlive()` 释放；不再只调用裸 `ResetIdleTimeout()`。根因：外部 keepalive 取消 idle callback 后不重新 arm，队列出现“无 inflight、未 idle timeout、无 scheduled callback”的非法状态；DevTools 附加的 SW 在 `OnRequestTermination` 收到 `SetIdleDelay(30s)` 时触发 `service_worker_event_queue.cc:185 DCHECK(HasScheduledIdleCallback())`。保留 DCHECK、不删除检测、不做周期 reload/keepalive。 | **证据**：未过滤 autoAttach（SW DevTools attached）的 WinDev 修复后 690s 0 FATAL、SW restart PASS；过滤 autoAttach 的 WinRelease 700s 0 FATAL；原 20 分钟 run 在 570.1s FATAL（PID 9308），w5 578.7s targetCrashed。上游对照：stock Chromium 156 同样只在 DevTools 附加路径可复现，Browser CLI 自定义 patch 不触及 SW。sha256 见 manifest。 | 
