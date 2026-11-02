@@ -122,6 +122,9 @@ no P1 code.
   `idle_wake_filtered` 120 s, exit 0; worker terminated naturally after the idle
   timeout and a real page message started a new instance. The token does not
   leak or block termination.
+- **Repeated restart pressure** (`D:/c/logs/sw1-repeat-restart-fixed`):
+  `close_filtered` 240 s with `Target.closeTarget` every 20 s (13 restart
+  events, 7 distinct worker instances), exit 0, 0 FATAL, final target empty.
 - WinDev with the fix + unfiltered autoAttach: 690 s, 0 FATAL, 0 target
   crashes, SW restart PASS.
 - The long-run harness now excludes `service_worker` from
