@@ -6,8 +6,11 @@
 配套补丁：`chromium/patches/036-presentation-callback-lifecycle.patch`
 （3 文件；仅 Blink，无 Viz 改动）。
 
-状态：**提案已落盘；本 worktree 已在 WinRelease 构建并验证**。共享源码 `D:/c/src` 只读，
-未修改、未应用补丁。分支 `agent/rc-hidden-a2`，基线 `833b880`（browser-cli PR #1）。
+状态：**2026-11-02 A2 复核完成：发现并修复 remembered-failure FIFO 顺序缺陷；失败完成
+改为按 frame token 顺序完成“已知失败的连续前缀”，`blink_platform_unittests` 在
+out/WinRelease 实测 28/28 PASS。** 复核细节、caller 契约审计与 `[44,43]/success(43)`
+before/after 见 `docs/windows-hidden-presentation-callback-audit-2026-11-02.md`。
+下方保留原始提案记录；其中 §3.1 的机制描述与 §5.1 的测试清单已被复核修正。
 
 ---
 
@@ -157,13 +160,19 @@ Task trace: blink::ReportTimeSwapPromise::DidSwap
 
 | 文件 | 改动 |
 | --- | --- |
-| `third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h` | 公开常量 `kPresentationCallbackPressureLimit = 30`；4 个私有方法；有界 remembered FIFO |
-| `.../layer_tree_view.cc` | 失败反馈压力路径、late-registration 完成、frame sink loss 完成、`static_assert(limit < kMaxBufferSize)` |
-| `.../layer_tree_view_unittest.cc` | 5 个新单测 + 保留既有成功路径测试 |
+| `third_party/blink/renderer/platform/widget/compositing/layer_tree_view.h` | 公开常量 `kPresentationCallbackPressureLimit = 30`；私有 drain/remember/forget/take 方法；有界 remembered 表；`latest_presented_frame_token_` 与 stalled 标记 |
+| `.../layer_tree_view.cc` | 失败反馈的 stalled 判定与 front-first drain、late-registration 完成、frame sink loss/replacement 完成、`static_assert(limit < kMaxBufferSize)` |
+| `.../layer_tree_view_unittest.cc` | 12 个新单测 + 保留既有成功路径测试 |
 
-大小：577 行 diff（约 +300 行，其中大部分是注释与测试）。
+大小：约 893 行 diff（A2 复核后；其中大部分是注释与测试）。
 
-### 3.1 关键逻辑
+> **2026-11-02 A2 复核修正：** 原提案“只完成 failed token 自己”的写法会让较新的
+> callback 先于较旧的 callback 运行，破坏 Paint Timing 的按序归因；同时 remembered 表
+> 按到达顺序清理，`[44,43] + success(43)` 会残留陈旧失败。当前实现改为“**只从队首
+> 完成失败已知的连续前缀**”，并在 success 时删除**全部** `token <= success_token` 的
+> remembered 条目。详见审计文档。
+
+### 3.1 关键逻辑（原始提案；已被 A2 复核修正，见上方说明与审计文档）
 
 ```cpp
 // DidPresentCompositorFrame()
@@ -240,22 +249,35 @@ if (frame_timing_details.presentation_feedback.failed()) {
 
 ## 5. 测试
 
-### 5.1 单元测试（补丁内，需构建 `blink_platform_unittests`）
+### 5.1 单元测试（补丁内，已在 out/WinRelease 实测）
 
 ```sh
-# 在应用 001–034 的 Chromium out 目录
-autoninja -C out/WinDev blink_platform_unittests
-out/WinDev/blink_platform_unittests.exe --gtest_filter='LayerTreeViewTest.*'
+export DEPOT_TOOLS_WIN_TOOLCHAIN=0
+export vs2026_install="C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools"
+
+# 共享源码 D:/c/src：应用 001–036 后的 checkout
+third_party/ninja/ninja.exe -C out/WinRelease blink_platform_unittests
+out/WinRelease/blink_platform_unittests.exe --gtest_filter='LayerTreeView*'
 ```
+
+结果（2026-11-02）：`28/28 PASS`（3 个 shard 批次 10+10+8），
+`SUCCESS: all tests passed.`；关键 5 个用例 `--gtest_repeat=3` 稳定。
+`[44,43]/success(43)` 反例在修复前 FAIL、修复后 PASS，详见审计文档。
 
 | 测试 | 断言 |
 | --- | --- |
 | `RunPresentationCallbackOnSuccess`（既有） | failed(1) 后 success(2) 仍运行 token 1 回调（契约不回归） |
 | `FailedPresentationBelowPressureKeepsCallbacks` | 低于阈值：failure 不运行任何回调；后续 success 全部运行 |
-| `FailedPresentationAtPressureCompletesOnlyFailedFrame` | 阈值上：只完成失败 token 自己；其它 token 仍等 success |
-| `LatePresentationCallbackAfterFailureCompletesWithFailure` | 反馈先于注册：注册时立即以 failed details 完成，且不会重复入队 |
-| `PresentationCallbackQueueBoundedWhenNeverPresented` | 连续 500 帧“只失败、不成功”：队列稳定在阈值，不触发 60 DCHECK |
-| `FrameSinkLossCompletesPresentationCallbacks` | sink 丢失：全部以 failure 完成；新 sink 的 token 不冲突 |
+| `FailedPresentationCompletesKnownFailedPrefixInOrder` | 阈值上：只按 token 顺序完成失败已知的连续前缀；乱序失败不导致乱序完成 |
+| `RememberedFailuresOutOfOrderCannotFailLateCallbackAfterSuccess` | `[44,43] + success(43)`：迟到 token 43 不得被陈旧失败完成 |
+| `SuccessSupersedesRememberedFailuresUpToItsToken` | success 清理 `<= token` 的全部 remembered；之后的陈旧失败被忽略 |
+| `LatePresentationCallbackCompletesWithFailureWhenInOrder` | 反馈先于注册 + 队列已空 + stalled：立即以 failed details 完成且不重复入队 |
+| `LatePresentationCallbackWaitsForEarlierFrames` | 反馈先于注册但队首仍 pending：入队，随后按序完成 |
+| `DuplicateFailedPresentationIsRememberedOnce` | 重复失败去重，success 后不留陈旧条目 |
+| `PresentationCallbackQueueBoundedWhenNeverPresented` | 30 帧突发 + 乱序失败 + 500 帧 1 Hz 无 success：530 个 callback 全部按序完成一次 |
+| `FrameSinkLossCompletesPresentationCallbacks` | sink 丢失：全部以 failure 完成；remembered/ token 复用不串味 |
+| `FrameSinkReplacementClearsPendingPresentationCallbacks` | 线程模式 `RequestNewLayerTreeFrameSink()` 同样清理旧 sink 回调 |
+| `RepeatedFrameSinkLossRunsEveryCallbackOnce` | rapid show/hide × 5：每轮 token 从 1 重启，callback 恰好运行一次 |
 
 ### 5.2 浏览器级矩阵（真实构建 + 隔离 profile）
 
@@ -314,18 +336,20 @@ PresentationCallbacksCompletedOnFrameSinkLoss  (sink loss)
 
 ## 7. 风险与未覆盖项
 
-1. **callback 语义变化（仅压力状态）**：>30 个 pending 时，失败 token 的回调不再等
-   后续 success，而是立即收到 failed details。正常可见窗口（队列通常 1–3 条）不受影响；
-   上游 `RunPresentationCallbackOnSuccess` 语义保留。指标类消费者（Paint Timing /
-   Event Timing / same-document navigation）会记录失败时间而不是后续 success 时间。
-2. **反馈/注册乱序**：已用有界（32 条）remembered FIFO 覆盖“失败先到、回调后注册”；
-   若 FIFO 被挤掉（极端长延迟），该回调会留在队列里，最终由 DCHECK fail-closed。
-   该竞态要求失败反馈快于同线程的 swap 回调投递，正常几乎不可能。
-3. **token 复用**：frame sink 丢失时清空 remembered 与 pending；新 sink 的 token
-   不会命中旧条目。`LayerTreeHostImpl::next_frame_token_` 本身跨 sink 单调递增，
-   但这不构成依赖。
-4. **false failure**：只在 token 自己收到 failure 时完成；不会因为“新 token 失败”而
-   完成旧 token。低于阈值完全不做。Viz 的 undrawn 最新帧不被失败。
+1. **callback 语义变化（仅 stalled 状态）**：队列达到 30 且此后没有 success 时，失败
+   token 的回调不再等后续 success，而是按 frame token 顺序收到 failed details。正常
+   可见窗口（队列通常 1–3 条）不受影响；上游 `RunPresentationCallbackOnSuccess` 语义
+   保留。指标类消费者（Paint Timing / Event Timing / same-document navigation）会
+   记录失败时间而不是后续 success 时间；A2 复核确认它们都接受该语义，且要求按序完成。
+2. **反馈/注册乱序**：remembered 表记录**每一次**失败反馈（不只 stalled 时），同 token
+   去重，上限 64；成功时删除**全部** `<= success_token` 的条目，`[44,43]+success(43)`
+   不再残留陈旧失败。若表被上限挤出（极端长延迟），对应回调会留在队列里，最终由
+   DCHECK fail-closed。
+3. **token 复用**：frame sink 丢失/替换时清空 remembered、`latest_presented_frame_token_`
+   与 stalled；新 sink 的 token 不会命中旧条目。
+4. **false failure**：只在 token 自己的 one-shot failure 已知、且该 token 位于队首
+   （失败已知的连续前缀内）时完成；不会因为“新 token 失败”而完成旧 token。低于阈值
+   完全不做。Viz 的 undrawn 最新帧不被失败。
 5. **screenshot / copy 路径**：`patch 027` 的 `ActivatePendingRootFrameForCopy()` 会让
    display 真正聚合一次并产生 success，从而自然 drain 队列；补丁不改变该行为。
    周期截图仍只能算 workaround，不作为稳定性证明。
@@ -347,11 +371,14 @@ PresentationCallbacksCompletedOnFrameSinkLoss  (sink loss)
 
 ## 8. 剩余工作
 
-1. 构建 `blink_platform_unittests`，跑 §5.1（必须先过）。
+1. ~~构建 `blink_platform_unittests`，跑 §5.1（必须先过）。~~
+   **2026-11-02 A2 完成**：out/WinRelease 28/28 PASS，含 `[44,43]/success(43)` 反例、
+   乱序失败/成功、重复失败、late registration、sink loss/replacement、rapid show/hide、
+   530 帧无 success 用例；见 `docs/windows-hidden-presentation-callback-audit-2026-11-02.md`。
 2. 构建 `chrome`，用 §5.2 的 9 个场景真实跑一遍；重点：
    managed-default 180 s、OOPIF 父子、rapid show/hide、GPU restart。
 3. 在 trace 中核对失败完成事件全部 `failed() == true`，且没有成功时间伪造。
-4. 若上游化：把“压力完成”策略拆成独立 UMA（如
+4. 若上游化：把“stalled 后按序完成”策略拆成独立 UMA（如
    `Renderer.PresentationCallbacks.CompletedOnFailure`），用真实可见场景确认
    阈值 30 不会误触发（正常窗口 pending 应 <5）。
 5. 与 route 1（产品层模型可见性）合并评估：若 managed 窗口改为真正 model-hidden，
