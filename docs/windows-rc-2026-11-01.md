@@ -44,7 +44,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 两条路线都已建立：
 - A1（模型可见性同步）：21 分钟 8 窗口 soak 稳定，但 WinRelease release 矩阵显示 managed 窗口 AI raw input 不落地（RC-A2/A3/A7 clicks=0），**未选**。PR #7 已关闭。
 - A2（presentation feedback 生命周期，patch 036）：不隐藏 WebContents，保留 AI/人类输入语义；修复 WinRelease 缺失 patch 033 接线后，release 矩阵 **14/14 cases、226/226 checks PASS**（含 RC-A1/A5/A8），21 分钟 8 窗口 managed-hidden soak **8/8 alive、model-visible、0 crash、0 FATAL、VERDICT STABLE**。已选为根修，PR #9 已更新审计补丁（`2bab9da`）。
-- 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK；dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景与资源趋势此前 PASS。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启，PR #7）。**2026-11-02 带 NetworkServiceSandbox 的复跑在 570s 发现 extension service worker renderer 的独立 Blink DCHECK，整体 FAIL；见 §6。**
+- 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK；dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景与资源趋势 PASS。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启，PR #7）。2026-11-02 曾发现 extension service worker 的独立 Blink DCHECK（`SetIdleDelay`）；SW-1 已根因修复（`AddKeepAlive` 持有 `StayAwakeToken`，patch 037，PR #10）。修复后 WinRelease 20 分钟复跑 **0 FATAL / 0 target crash / SW restart PASS**。
 - 没有删除 DCHECK、扩大 buffer、周期 reload/重启页面或额外禁用后台优化。
 
 ## 3. GPU/TSF 安全与 patch 034/035（C）
@@ -100,6 +100,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - browser-cli #7：hidden route 1 (not selected); **closed**。
 - browser-cli #8：旧 A2 route 2; **closed, superseded by #9**。
 - browser-cli #9：audited A2 patch 036; Draft，base GPU #2，selected。
+- browser-cli #10：SW-1 service worker keepalive/idle 状态机修复（patch 037）；Draft，依赖 #9。
 - BrowserPilot #1：K4/K15/latch + A harness + fixture；Draft。
 - BrowserPilot #2：F3 screenshot fallback；Draft，依赖 #1。
 - BrowserPilot #3：normal-mode + IME；Draft，依赖 browser-cli #1。
@@ -114,16 +115,15 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 Release-like E2E 已在非 component WinRelease 上 **14/14 cases、226/226 checks PASS**（含
 RC-A1/A5/A8）；A2 的 hidden presentation 路径在 20 分钟 8 窗口 run 中 **0 presentation
 DCHECK**。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、
-t=601s 真实重启）。P1 原生导入在修复后的原始 WinDev 产物上 **9/9 场景 PASS**（真实
-CookieManager 写入、登录、重启持久化、managed-hidden 批准窗口），但 037 仍是 proposed。
+t=601s 真实重启）。SW-1（service worker `SetIdleDelay` DCHECK）已根因修复：patch 037
+让 `AddKeepAlive` 持有 `StayAwakeToken`；修复后 WinRelease 20 分钟 run **0 FATAL、0 target
+crash、SW restart PASS**，DevTools-attached 600s 对照也 0 FATAL，重复重启压力 13 次/7 个实例
+clean。P1 原生导入在修复后的原始 WinDev 产物上 **9/9 场景 PASS**（真实 CookieManager 写入、
+登录、重启持久化、managed-hidden 批准窗口），但 P1 037 仍是 proposed。
 NetworkServiceSandbox 已覆盖 normal launcher、release 矩阵、client wake path 和 long-run
 两个 session；release 矩阵与 long-run 的 network utility 均使用 network sandbox。
 
 仍不能宣称 Windows RC 发布就绪：
-- **新阻断项**：20 分钟 long-run 中 extension service worker 替换 renderer 在空闲后触发
-  `service_worker_event_queue.cc:185 HasScheduledIdleCallback` DCHECK（t=570s，
-  w5 targetCrashed t=578.7s，fatal-log=1）。该崩溃与 A2 presentation 无关，但仍是 WinRelease
-  FATAL；未删除 DCHECK、未用周期 reload 绕过，需单独根因/修复。
 - 签名/安装器/更新/发布者身份未完成；WinRelease 仍是 unsigned internal test build，
   `releasable=false`。
 - unsigned component→WinRelease 安全差异、逐模块签名、server-side seed 未验证。
