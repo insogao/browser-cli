@@ -1,6 +1,6 @@
 # P1 native CookieStore import E2E（2026-11-02）
 
-范围：patch 037（`chromium/patches/proposed/037-browser-cli-cookie-import.patch`）
+范围：patch 038（`chromium/patches/proposed/038-browser-cli-cookie-import.patch`）
 的真实最小闭环：
 
 ```
@@ -24,15 +24,15 @@ Cookie、真实 Profile 或真实 token。
 
 | 项目 | 结论 | 证据 |
 | --- | --- | --- |
-| **修复前 patch 037 编译进 `out/WinDev/chrome.dll` 的原始产物** | **BLOCKED（历史）** | 第一次 `hello` 即触发 DCHECK，目标进程崩溃；来源扩展收到 `target-disconnected` |
-| **修复后的 patch 037（sha256 `20c87f17...`）编译进 `out/WinDev/chrome.dll`** | **PASS** | 8/8 场景 PASS（approve/deny/cancel/host/source/duplicate/cross/audit）；expiry 单独运行；见 §7 |
-| 本地 E2E 构建热修（历史，不属于 patch 037） | 8 个场景 PASS，1 个场景 FAIL（见 §4） | 见 §3、§4 |
+| **修复前 patch 038 编译进 `out/WinDev/chrome.dll` 的原始产物** | **BLOCKED（历史）** | 第一次 `hello` 即触发 DCHECK，目标进程崩溃；来源扩展收到 `target-disconnected` |
+| **修复后的 patch 038（sha256 `20c87f17...`）编译进 `out/WinDev/chrome.dll`** | **PASS** | 8/8 场景 PASS（approve/deny/cancel/host/source/duplicate/cross/audit）；expiry 单独运行；见 §7 |
+| 本地 E2E 构建热修（历史，不属于 patch 038） | 8 个场景 PASS，1 个场景 FAIL（见 §4） | 见 §3、§4 |
 | 原生 CookieManager 写入 | **PASS** | 目标 `cookieImported = imported`，`applied=2, failed=0`；测试站点返回 `LOGIN_OK`；`VALUE_MATCH` |
 | 重启持久化 | **PASS** | 同一 Profile 重启后 `LOGIN_OK`；会话 Cookie 变为 `SESSION_MISSING` |
 | 目标浏览器独立批准 | **PASS** | 目标批准窗口 `visible=True`，目标主窗口 `visible=False`；物理 `SendInput` 点击 Allow（topmost）；`authorization.simulated=false`，`source=target-browser-dialog` |
 | 过期票据 | **PASS（修复后）** | 5 分钟 TTL 后会话被销毁，票据不可再用；`ticket-expired` 帧在关闭前 drain；见 §7 |
 
-**历史说明：** 修复前原始 patch 037 在当前 `dcheck_always_on` 的 Windows
+**历史说明：** 修复前原始 patch 038 在当前 `dcheck_always_on` 的 Windows
 构建中无法完成第一次 `hello`，早期 §4 结果来自本地热修。§7 是修复后
 patch 本身在原始构建产物上的重跑结果，不依赖任何未提交热修。
 
@@ -43,7 +43,7 @@ patch 本身在原始构建产物上的重跑结果，不依赖任何未提交�
 ### 2.1 构建
 
 - Chromium `156.0.8067.0`，`D:\c\src\out\WinDev`，component build。
-- patch 037 已应用到 `D:\c\src` working tree；`out/WinDev/chrome.dll`
+- patch 038 已应用到 `D:\c\src` working tree；`out/WinDev/chrome.dll`
   构建时间 `2026-11-01 22:27:02`，原始 SHA-256
   `07c7310e148bc3bafe0c782a98f15f0f8ac117ea47d9b8f96494030fe5552ae9`。
 - 策略单测：`out/WinDev/cookie_import_unittests.exe
@@ -385,7 +385,7 @@ void CookieImportService::Shutdown() {
 
 ## 6. 剩余工作
 
-1. 修复 patch 037 的两个 UI 线程 DCHECK（`RemoveDescriptor` 的
+1. 修复 patch 038 的两个 UI 线程 DCHECK（`RemoveDescriptor` 的
    `DeleteFile`、`Shutdown` 的 `Stop/Join`）；不要把 `ScopedAllow...ForTesting`
    留在产品代码中，应把阻塞 I/O/join 移到允许阻塞的线程或异步收尾。
 2. 修复 expiry 错误帧：在停止 pipe 线程前 drain 写队列，或由 pipe 线程
@@ -415,17 +415,17 @@ node D:/work/wt/bp-rc-p1/scripts/e2e/p1-native-cookie-import-e2e.mjs \
   --report D:/work/.tmp-browsercli/e2e-all-report-final.json --keep
 ```
 
-构建热修的源码 diff 见 §2.4；临时构建目录已删除。patch 037 本身未修改。
+构建热修的源码 diff 见 §2.4；临时构建目录已删除。patch 038 本身未修改。
 
 ---
 
-## 8. 修复后 patch 037 原始产物重跑（2026-11-02）
+## 8. 修复后 patch 038 原始产物重跑（2026-11-02）
 
-本节结果是**修复后的 patch 037 本身**编译出的原始 `out/WinDev/chrome.dll`
+本节结果是**修复后的 patch 038 本身**编译出的原始 `out/WinDev/chrome.dll`
 （SHA-256 `e16b81270e2f5da7ea7ec99078fdb1838f49a2680e17787a35be00237c00a26c`，
 2026-11-02 14:17 链接），不依赖任何未提交构建热修。
 
-patch：`chromium/patches/proposed/037-browser-cli-cookie-import.patch`，
+patch：`chromium/patches/proposed/038-browser-cli-cookie-import.patch`，
 SHA-256 `b39e47b695cc04669820c72556c5c8e4adc307633c8003c438ac6750a24d61a7`，
 已 rebase 到当前 001–036 栈（不再重复添加 patch 016 的 wiring）。
 
