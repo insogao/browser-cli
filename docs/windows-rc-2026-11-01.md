@@ -1,6 +1,6 @@
 # Windows RC 验收汇总（2026-11-01）
 
-状态：**Draft / 未发布**。所有 PR 保持 Draft；未 merge。构建为
+状态：**内部 RC 已集成，public 未发布**。内部开发链已按依赖顺序 merge；main 仍未合并。构建为
 `D:\c\src\out\WinRelease`（非 component）与 `out/WinDev`，Chromium 156.0.8067.0；
 WinRelease patch 001–036（含 TSF field-trial、GPU 034/035、hidden 036）。
 
@@ -117,24 +117,24 @@ long-run 崩溃未修复。**
 
 ## 5. PR / 状态
 
-- browser-cli #1：patch 030–033 + TSF field-trial + gate + docs；Draft。
-- browser-cli #2：patch 034/035 + WGC harness + security/lifecycle；Draft，依赖 #1。
-- browser-cli #3：hidden long-run reproduction；Draft，依赖 #1。
-- browser-cli #4：P1 v2 native patch compiled; Draft，依赖 #1；修复后的 037 已推送。
-- browser-cli #5：WinRelease build/config/security; Draft，依赖 #1。
-- browser-cli #6：20-minute long-run gate; Draft，依赖 #1。
+- browser-cli #1：patch 030–033 + TSF field-trial + gate + docs；Draft（到 main，public 未合并）。
+- browser-cli #2：patch 034/035 + WGC harness + security/lifecycle；**merged** into internal chain。
+- browser-cli #3：hidden long-run reproduction；Draft（support）。
+- browser-cli #4：P1 provenance；**closed**，patch 038 已由 #11 集成，不重复合并。
+- browser-cli #5：WinRelease build/config/security；**merged** into internal chain。
+- browser-cli #6：20-minute long-run gate；**merged** into internal chain。
 - browser-cli #7：hidden route 1 (not selected); **closed**。
 - browser-cli #8：旧 A2 route 2; **closed, superseded by #9**。
-- browser-cli #9：audited A2 patch 036; Draft，base GPU #2，selected。
-- browser-cli #10：SW-1 service worker keepalive/idle 状态机修复（patch 037）；Draft，依赖 #9。
-- browser-cli #11：最终 001–038 集成 + 统一内部 RC 门禁；Draft，依赖 #10。
+- browser-cli #9：audited A2 patch 036；**merged** into internal chain。
+- browser-cli #10：SW-1 patch 037；**merged** into internal chain。
+- browser-cli #11：最终 001–038 集成 + 统一内部 RC 门禁；**merged** into internal chain。
 - BrowserPilot #1：K4/K15/latch + A harness + fixture；Draft。
-- BrowserPilot #2：F3 screenshot fallback；Draft，依赖 #1。
+- BrowserPilot #2：F3 screenshot fallback；**merged** into host branch。
 - BrowserPilot #3：normal-mode + IME；Draft，依赖 browser-cli #1。
 - BrowserPilot #4：P1 prototype；Draft。
 - BrowserPilot #5：P1 v2 product flow；Draft，依赖 #4。
-- BrowserPilot #6：release-like E2E matrix；Draft，依赖 #1。
-- BrowserPilot #7：Native Messaging Host restart RC gate；Draft，base #1 branch。
+- BrowserPilot #6：release-like E2E matrix；**merged** into host branch。
+- BrowserPilot #7：Native Messaging Host restart RC gate；**merged** into host branch。
 - BrowserPilot #8：P1 native cookie-import E2E harness；Draft，base P1 product。
 
 ## 6. 最终 001–038 集成（2026-11-03）
@@ -177,4 +177,4 @@ NetworkServiceSandbox 已覆盖 normal launcher、release 矩阵、client wake p
   `releasable=false`。
 - unsigned component→WinRelease 安全差异、逐模块签名、server-side seed 未验证。
 - P1 patch 已重编号为 038 并进入内部集成分支。
-所有 PR 继续 Draft。
+内部开发链已按依赖顺序 merge；main #1/#3 仍 Draft；public 未合并，`releasable=false`。
