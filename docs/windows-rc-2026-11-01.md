@@ -47,6 +47,32 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK；dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景与资源趋势 PASS。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启，PR #7）。2026-11-02 曾发现 extension service worker 的独立 Blink DCHECK（`SetIdleDelay`）；SW-1 已根因修复（`AddKeepAlive` 持有 `StayAwakeToken`，patch 037，PR #10）。修复后 WinRelease 20 分钟复跑 **0 FATAL / 0 target crash / SW restart PASS**。
 - 没有删除 DCHECK、扩大 buffer、周期 reload/重启页面或额外禁用后台优化。
 
+### 2.1 20 分钟多窗口稳定性门禁（2026-11-01）
+
+新增 `tests/tools/longrun-stability-gate.py`（8 窗口：normal 4 + agent/managed 4），
+在 WinDev 上跑满 **1202.7 s**（setup 17.5 s 不计入）。结果 **FAIL**：
+
+- normal w1 dynamic/w2 canvas/w3 OOPIF/w4 WebGL（w4 被 w2 完全遮挡）连续 20 分钟
+  存活，截图新鲜度 w1 22/22、w2 12/12、w4 3/3；
+- agent w6/w7/w8 分别在 **60.1 s** 触发同一 `layer_tree_view.cc:554` DCHECK，
+  **84.8 s** target crash；w5 extension page 在 41.4 s 被真实
+  `--browser-cli-user-explicit-show` 呈现后存活，241.0 s 原生隐藏，**315.1 s**
+  再次 DCHECK，**323.6 s** crash；
+- 真实 crash 计数：presentation DCHECK 4、target crash 4、renderer PID 消失 3、
+  extension-renderer PID 消失 1；GPU/network utility crash 0；browser 未退出；
+- 资源：private 峰值 1.827 GB、handles 峰值 15,815、GPU process private 峰值
+  371.8 MB、CPU 平均约 1.4% of 32 CPUs；normal 窗口无单调暴涨；
+- SW 重启 PASS（page→worker 新实例），HUMAN/ASSIST/AI 所有权转换 PASS
+  （human v1/assist v2/ai v3 全部 set/get 复核）；
+- WinRelease 不存在：`out/WinRelease` 的 non-component 构建在
+  `[15719/58343]` 因 `Scalarizer.obj` FAILED 停止，未产出 `chrome.exe`；
+  因此本轮只是 WinDev baseline，不能宣称 release 构建通过。
+
+证据：`D:/c/logs/longrun-20min-final/`；提交的摘要：
+`docs/evidence/windows-longrun-20min-2026-11-01.json`；完整设计/判定：
+`docs/windows-longrun-stability-gate-2026-11-01.md`。**结论仍是 FAIL，hidden/managed
+long-run 崩溃未修复。**
+
 ## 3. GPU/TSF 安全与 patch 034/035（C）
 
 - 安全策略位（browser/GPU/renderer/storage utility/默认 network utility）在 Browser CLI
@@ -142,7 +168,7 @@ t=601s 真实重启）。SW-1（service worker `SetIdleDelay` DCHECK）已根因
 让 `AddKeepAlive` 持有 `StayAwakeToken`；修复后 WinRelease 20 分钟 run **0 FATAL、0 target
 crash、SW restart PASS**，DevTools-attached 600s 对照也 0 FATAL，重复重启压力 13 次/7 个实例
 clean。P1 原生导入在修复后的原始 WinDev 产物上 **9/9 场景 PASS**（真实 CookieManager 写入、
-登录、重启持久化、managed-hidden 批准窗口），但 P1 037 仍是 proposed。
+登录、重启持久化、managed-hidden 批准窗口），P1 已重编号为 038 并进入集成分支。
 NetworkServiceSandbox 已覆盖 normal launcher、release 矩阵、client wake path 和 long-run
 两个 session；release 矩阵与 long-run 的 network utility 均使用 network sandbox。
 
@@ -150,5 +176,5 @@ NetworkServiceSandbox 已覆盖 normal launcher、release 矩阵、client wake p
 - 签名/安装器/更新/发布者身份未完成；WinRelease 仍是 unsigned internal test build，
   `releasable=false`。
 - unsigned component→WinRelease 安全差异、逐模块签名、server-side seed 未验证。
-- P1 patch 037 未入 manifest、未合并。
+- P1 patch 已重编号为 038 并进入内部集成分支。
 所有 PR 继续 Draft。

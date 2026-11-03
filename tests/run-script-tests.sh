@@ -1670,6 +1670,96 @@ else
 fi
 
 echo
+echo "== 31. Long-run stability gate harness (static; no browser) =="
+LONGRUN="$REPO_ROOT/tests/tools/longrun-stability-gate.py"
+LONGRUN_PY=""
+for candidate in python python3; do
+  if command -v "$candidate" >/dev/null 2>&1 \
+     && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+    LONGRUN_PY="$candidate"
+    break
+  fi
+done
+if [ -f "$LONGRUN" ] && [ -n "$LONGRUN_PY" ]; then
+  if "$LONGRUN_PY" -c "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read())" \
+       "$LONGRUN" >"$TMP/out.txt" 2>&1; then
+    ok "longrun harness python syntax"
+  else
+    bad "longrun harness python syntax"
+    sed 's/^/      /' "$TMP/out.txt" | head -6
+  fi
+  if "$LONGRUN_PY" "$LONGRUN" --self-test >"$TMP/out.txt" 2>&1 \
+     && grep -q 'PASS self-test' "$TMP/out.txt"; then
+    ok "longrun harness --self-test (flag classification + PNG analysis)"
+  else
+    bad "longrun harness --self-test"
+    sed 's/^/      /' "$TMP/out.txt" | tail -6
+  fi
+  if "$LONGRUN_PY" "$LONGRUN" --dry-run >"$TMP/out.txt" 2>&1 \
+     && grep -q 'DRY RUN' "$TMP/out.txt" \
+     && grep -q 'w8' "$TMP/out.txt" \
+     && grep -q 'Managed windows w5/w6/w7/w8' "$TMP/out.txt" \
+     && grep -q 'Forbidden' "$TMP/out.txt"; then
+    ok "longrun harness --dry-run prints the 8-window plan and anti-cheat rules"
+  else
+    bad "longrun harness --dry-run plan"
+    sed 's/^/      /' "$TMP/out.txt" | tail -8
+  fi
+  # The test extension must carry the trusted public key so the kernel
+  # ownership API allowlist accepts it; verify the derived id instead of
+  # trusting a hard-coded URL.
+  if "$LONGRUN_PY" - "$REPO_ROOT/tests/tools/extensions/browser-cli-longrun/manifest.json" <<'PY' >"$TMP/out.txt" 2>&1
+import base64, hashlib, json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+digest = hashlib.sha256(base64.b64decode(manifest["key"])).hexdigest()[:32]
+extension_id = "".join(chr(ord("a") + int(ch, 16)) for ch in digest)
+print(extension_id)
+sys.exit(0 if extension_id == "nnollghpaggbcdkkgoieneffnlijinio" else 1)
+PY
+  then
+    ok "longrun probe extension derives the trusted ownership API id"
+  else
+    bad "longrun probe extension id derivation"
+    sed 's/^/      /' "$TMP/out.txt" | head -4
+  fi
+  # No periodic reload and only the service-worker close are allowed.
+  if ! grep -qE 'Page\.reload|location\.reload' "$LONGRUN" \
+     && [ "$(grep -c '"Target\.closeTarget"' "$LONGRUN")" -le 1 ] \
+     && grep -q 'tempfile.mkdtemp' "$LONGRUN" \
+     && grep -q -- '--user-data-dir=' "$LONGRUN" \
+     && grep -qF 'browser-launch-hygiene: windows-only' "$LONGRUN"; then
+    ok "longrun harness: no page reload, one SW close, temp profile, Windows hygiene marker"
+  else
+    bad "longrun harness anti-cheat/hygiene source markers"
+  fi
+  mkdir -p "$TMP/lr-pass" "$TMP/lr-bogus" "$TMP/lr-fail" "$TMP/lr-blocked"
+  printf '%s\n' '{"verdict":"PASS","failures":[],"blockers":[],"crash_evidence":[]}' >"$TMP/lr-pass/result.json"
+  printf '%s\n' '{"verdict":"PASS","failures":[],"blockers":[],"crash_evidence":[{"basis":"x"}]}' >"$TMP/lr-bogus/result.json"
+  printf '%s\n' '{"verdict":"FAIL","failures":["x"],"blockers":[],"crash_evidence":[]}' >"$TMP/lr-fail/result.json"
+  printf '%s\n' '{"verdict":"BLOCKED","failures":[],"blockers":["x"],"crash_evidence":[]}' >"$TMP/lr-blocked/result.json"
+  "$LONGRUN_PY" "$LONGRUN" --check "$TMP/lr-pass" >/dev/null 2>&1
+  LR_PASS=$?
+  "$LONGRUN_PY" "$LONGRUN" --check "$TMP/lr-bogus" >/dev/null 2>&1
+  LR_BOGUS=$?
+  "$LONGRUN_PY" "$LONGRUN" --check "$TMP/lr-fail" >/dev/null 2>&1
+  LR_FAIL=$?
+  "$LONGRUN_PY" "$LONGRUN" --check "$TMP/lr-blocked" >/dev/null 2>&1
+  LR_BLOCKED=$?
+  if [ "$LR_PASS" -eq 0 ] && [ "$LR_BOGUS" -ne 0 ] && [ "$LR_FAIL" -ne 0 ] \
+     && [ "$LR_BLOCKED" -ne 0 ]; then
+    ok "longrun evidence checker: PASS=0, fake PASS/FAIL/BLOCKED nonzero"
+  else
+    bad "longrun evidence checker exit codes (pass=$LR_PASS bogus=$LR_BOGUS fail=$LR_FAIL blocked=$LR_BLOCKED)"
+  fi
+else
+  if [ ! -f "$LONGRUN" ]; then
+    bad "longrun stability gate harness is missing"
+  else
+    printf 'SKIP  longrun stability gate harness (no working python)\n'
+  fi
+fi
+
+echo
 echo "== 99. chrome.browserCli allowlist contract =="
 ALLOWLIST_CHECK="$REPO_ROOT/tests/check-extension-allowlist.py"
 if [ -f "$ALLOWLIST_CHECK" ] && command -v python3 >/dev/null 2>&1; then
