@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// browser-launch-hygiene: windows-only (no keychain); profile is created with mktemp/mkdtempSync
 // Internal RC dogfooding: suspend/resume proxy for system sleep/wake.
 //
 // This does NOT put the host machine to sleep. It launches the unified

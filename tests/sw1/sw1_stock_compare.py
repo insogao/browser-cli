@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# browser-launch-hygiene: windows-only (no keychain)
 """SW-1 stock comparison: is the SetIdleDelay DCHECK upstream, custom, or harness?
 
 Uses Agent B's MV3 probe extension (tests/sw1/probe-ext) and the same stop

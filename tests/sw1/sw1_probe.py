@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# browser-launch-hygiene: windows-only (no keychain)
 """SW-1: isolate the WinRelease ServiceWorkerEventQueue::SetIdleDelay DCHECK.
 
 The failing 20-minute long-run used a probe MV3 extension in a managed
