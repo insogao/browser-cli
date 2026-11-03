@@ -133,3 +133,32 @@ no P1 code.
   reproduction with SW DevTools attached.
 - A2 unit tests `LayerTreeView*` 28/28 still pass; release matrix and P1/Host
   regression are recorded in the RC docs after this run.
+
+## 7. Single token vs. observed keepalive sequence: final audit
+
+`observed_keepalive_sequence_number_` and `keep_alive_token_` serve different
+purposes:
+
+- `observed_keepalive_sequence_number_` is the last browser-issued sequence
+  number. The renderer returns it in `RequestTermination`; the browser rejects
+  stale replies (`has_stale_keepalive_sequence_number`).
+- `keep_alive_token_` is the renderer-side lifetime guard. The browser may call
+  `AddKeepAlive` for overlapping external requests, but it calls
+  `ClearKeepAlive` only when `!HasWorkInBrowser()` (both normal finish and
+  timeout paths check this). One token therefore represents the whole
+  keepalive interval; it is not a per-sequence reference count.
+
+Audited cases:
+
+| case | behavior |
+| --- | --- |
+| overlapping AddKeepAlive(N), AddKeepAlive(N+1) | token created once; observed sequence advances to N+1; HasInflightEvent stays true; `SetIdleDelay` returns |
+| old request completes while newer keepalive is outstanding | browser sees `HasWorkInBrowser()==true`, does not send Clear; token remains |
+| duplicate ClearKeepAlive | first Clear releases token and the destructor re-arms; second Clear takes the fallback ResetIdleTimeout+CheckEventQueue path, cancels/schedules once, no double callback |
+| worker destruction | `Dispose()` resets `event_queue_`; the token's WeakPtr becomes null, so its destructor is a no-op; no callback into a dead queue |
+| DevTools-attached idle/RequestTermination | 600 s WinRelease attached run: 0 FATAL; the token keeps the queue active across the `SetIdleDelay(30 s)` reply |
+| natural idle and wake | filtered `idle_wake_filtered`: worker stops after the idle timeout; a real page message creates a new instance |
+| repeated restart pressure | 240 s, close every 20 s: 13 restart events / 7 instances, 0 FATAL |
+
+No DCHECK was removed or relaxed. `ClearKeepAlive` still has the old
+`ResetIdleTimeout()+CheckEventQueue()` path for a Clear without AddKeepAlive.
