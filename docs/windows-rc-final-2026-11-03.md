@@ -31,7 +31,8 @@ same artifact.
 
 1. Keep the complete `D:/c/src/out/WinRelease` directory together; the launcher
    and all DLL/resource files must stay in that directory.
-2. Run `D:\work\wtc-integration	oolsc\launch-internal-rc.cmd`.
+2. Run `D:\work\wtc-integration	ools
+c\launch-internal-rc.cmd`.
 3. First launch creates `%LOCALAPPDATA%\BrowserCLI-RC-Internal`; use
    `RC_PROFILE` for a separate internal profile.
 4. To validate the artifact, run the unified gate in `## Internal acceptance`.
@@ -59,6 +60,22 @@ The unified gate requires all stages PASS and exits 0:
 3. P1 native approval + CookieManager write + restart.
 4. SW DevTools-attached stress (SW-1 path).
 5. Natural SW idle termination/wake.
+
+## Unified acceptance result (2026-11-03)
+
+`tests/rc-final/run-final-gate.py` on the unified artifact returned **PASS,
+exit 0** (`D:/c/logs/rc-final-20261103d/rc-final-report.json`):
+
+| stage | result | evidence |
+| --- | --- | --- |
+| release-like 14-case matrix | PASS, 226/226 | AI input, Sogou IME, hidden/occluded screenshots, OOPIF, NetworkServiceSandbox |
+| P1 native import | PASS, 9/9 | approval, CookieManager write, restart, expiry, host/source interruption |
+| SW DevTools-attached | PASS | 600s, 0 FATAL, old SW-1 crash path |
+| SW natural idle/wake | PASS | worker terminates and new instance starts |
+| 1200s host/8-window gate | PASS, 1224.9s, 31/31 | real Native Messaging Host restart, 8 windows, screenshots, resources |
+
+No stage reported BLOCKED. The artifact is internal only; signing/installer/
+updater remain out of scope.
 
 ## Known limitations / not public release
 
