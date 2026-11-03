@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Browser CLI RC <browser-cli@localhost>
+Date: Sat, 1 Nov 2026 00:00:00 +0800
+Subject: [PROPOSED] gpu: collect overlay info after in-process DComp init
+
+Patch 034 initializes DirectComposition in GpuInit::InitializeInProcess(), but
+InitializePlatformOverlaySettings() still runs before that block. The call
+collects GPUInfo::overlay_info from gl::DirectCompositionSupported(), so an
+in-process GPU reports:
+
+  directComposition = false
+  supportsOverlays  = false
+
+even though the DComp device exists and the display compositor presents through
+DCompPresenter. Verified with CDP SystemInfo.getInfo on this build:
+in-process = false/false, out-of-process GPU = true/true, same page and flags.
+
+GpuInit::Initialize() (out-of-process) already orders this correctly:
+InitializeDirectComposition() first, then InitializePlatformOverlaySettings().
+This proposed patch moves the overlay collection to the same position in the
+in-process path, after the DComp block and before SetSkiaBackendType().
+
+This file is PROPOSED ONLY. It is not in chromium/patch-manifest.json and has
+not been applied to any build; D:/c/src is shared and was not modified.
+
+diff --git a/gpu/ipc/service/gpu_init.cc b/gpu/ipc/service/gpu_init.cc
+index 2bdbe86d..0000000 100644
+--- a/gpu/ipc/service/gpu_init.cc
++++ b/gpu/ipc/service/gpu_init.cc
+@@ -1160,8 +1160,6 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+     }
+   }
+ 
+-  InitializePlatformOverlaySettings(&gpu_info_, gpu_feature_info_);
+-
+   if (!gl_disabled) {
+     if (!CollectGpuExtraInfo(&gpu_extra_info_, gpu_preferences)) {
+       VLOG(1) << "gpu::CollectGpuExtraInfo failed";
+@@ -1271,6 +1269,13 @@ void GpuInit::InitializeInProcess(base::CommandLine* command_line,
+   }
+ #endif  // BUILDFLAG(IS_WIN)
+ 
++  // Browser CLI RC: collect overlay info only after DirectComposition is
++  // initialized, matching GpuInit::Initialize(). Collecting it earlier records
++  // GPUInfo::overlay_info.direct_composition / supports_overlays as false even
++  // though gl::DirectCompositionSupported() becomes true below, and probes
++  // overlay support before the DComp device exists.
++  InitializePlatformOverlaySettings(&gpu_info_, gpu_feature_info_);
++
+   SetSkiaBackendType();
+   RecordUMA();
+ }
+-- 
+2.39.0

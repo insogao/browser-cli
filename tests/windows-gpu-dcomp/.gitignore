@@ -1,0 +1,3 @@
+# Build output of tools/build-wgc.ps1 (not committed).
+tools/wgc-capture.exe
+tools/*.obj
