@@ -188,6 +188,11 @@
       "order": 37,
       "file": "037-sw1-service-worker-keepalive-idle.patch",
       "sha256": "fdd28b5c34f6753e188b50882d8ce940db59591cbc6c1077ae6d65ff71809592"
+    },
+    {
+      "order": 38,
+      "file": "038-browser-cli-cookie-import.patch",
+      "sha256": "b39e47b695cc04669820c72556c5c8e4adc307633c8003c438ac6750a24d61a7"
     }
   ]
 }
