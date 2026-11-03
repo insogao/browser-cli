@@ -90,6 +90,7 @@ updater remain out of scope.
   mode remains an upstream regression monitor.
 - No smart-screen reputation, per-module signing, EDR/AppLocker validation, or
   server-side variations-seed verification.
+- True system S3/S0 sleep/wake was not executed; dogfooding used a test-process suspend/resume proxy. Lock screen, network change and NAT rebind remain release-engineering follow-ups.
 - Not a replacement for the formal Phase 9 signing/installer/updater work.
 
 ## Internal release preflight
