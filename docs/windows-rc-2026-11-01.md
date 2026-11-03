@@ -101,6 +101,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - browser-cli #8：旧 A2 route 2; **closed, superseded by #9**。
 - browser-cli #9：audited A2 patch 036; Draft，base GPU #2，selected。
 - browser-cli #10：SW-1 service worker keepalive/idle 状态机修复（patch 037）；Draft，依赖 #9。
+- browser-cli #11：最终 001–038 集成 + 统一内部 RC 门禁；Draft，依赖 #10。
 - BrowserPilot #1：K4/K15/latch + A harness + fixture；Draft。
 - BrowserPilot #2：F3 screenshot fallback；Draft，依赖 #1。
 - BrowserPilot #3：normal-mode + IME；Draft，依赖 browser-cli #1。
@@ -109,6 +110,27 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - BrowserPilot #6：release-like E2E matrix；Draft，依赖 #1。
 - BrowserPilot #7：Native Messaging Host restart RC gate；Draft，base #1 branch。
 - BrowserPilot #8：P1 native cookie-import E2E harness；Draft，base P1 product。
+
+## 7. 最终 001–038 集成（2026-11-03）
+
+独立集成分支 `agent/rc-integration`（PR #11）依次应用 001–038，P1 已从 037
+重编号为 038。统一 WinRelease 产物：
+
+- `chrome.exe` sha256 `0441080d...67bb1`
+- `chrome.dll` sha256 `a848a1c7...a308d2c`
+
+统一入口 `tests/rc-final/run-final-gate.py` **exit 0 / PASS**：
+
+| 阶段 | 结果 |
+| --- | --- |
+| release matrix 14 cases | PASS，226/226 |
+| P1 native import | PASS，9/9 |
+| SW DevTools-attached 600s | PASS，0 FATAL |
+| SW natural idle/wake | PASS |
+| 1200s host/8-window | PASS，1224.9s，31/31，真实 host restart |
+
+没有 BLOCKED。内部 RC 可运行（`tools/rc/launch-internal-rc.cmd`），但仍是
+unsigned internal test build，`releasable=false`；正式签名/安装器/更新器未完成。
 
 ## 6. 结论
 
