@@ -1,8 +1,8 @@
 # Windows RC 验收汇总（2026-11-01）
 
 状态：**Draft / 未发布**。所有 PR 保持 Draft；未 merge。构建为
-`D:\c\src\out\WinDev`，Chromium 156.0.8067.0，patch 001–035（普通模式只需
-001–033 + `disable_fieldtrial_testing_config=true`）。
+`D:\c\src\out\WinRelease`（非 component）与 `out/WinDev`，Chromium 156.0.8067.0；
+WinRelease patch 001–036（含 TSF field-trial、GPU 034/035、hidden 036）。
 
 ## 1. Release-like E2E（A）
 
@@ -41,11 +41,11 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 不改变模型可见性，仍崩；真正 model-hidden（先 show 再 hide）180s 稳定；static/no-paint 稳定；
 8 窗口并发时所有动态窗口崩溃，browser/其他进程存活。周期截图 10s 可避免但只是 workaround。
 
-修复方向（未实现）：
-1. 产品层：managed presentation 被拒绝时同步隐藏 WebContents/widget，避免“逻辑可见但不呈现”；
-2. Chromium：undrawn/superseded frame 发送 failed presentation feedback，renderer 消费失败
-   回调并加 buffer 上限保护。
-没有通过周期重启页面掩盖。PR：browser-cli #3；证据 `D:\c\logs\hs-*`。
+两条路线都已建立：
+- A1（模型可见性同步）：21 分钟 8 窗口 soak 稳定，但 WinRelease release 矩阵显示 managed 窗口 AI raw input 不落地（RC-A2/A3/A7 clicks=0），**未选**。PR #7 已关闭。
+- A2（presentation feedback 生命周期，patch 036）：不隐藏 WebContents，保留 AI/人类输入语义；修复 WinRelease 缺失 patch 033 接线后，release 矩阵 **14/14 cases、226/226 checks PASS**（含 RC-A1/A5/A8），21 分钟 8 窗口 managed-hidden soak **8/8 alive、model-visible、0 crash、0 FATAL、VERDICT STABLE**。已选为根修，PR #9 已更新审计补丁（`2bab9da`）。
+- 20 分钟 WinRelease+A2 多窗口长稳：0 presentation DCHECK；dynamic/Canvas/WebGL/OOPIF/extension/hidden/minimized/occluded/ownership/SW 场景与资源趋势 PASS。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、t=601s 真实重启，PR #7）。2026-11-02 曾发现 extension service worker 的独立 Blink DCHECK（`SetIdleDelay`）；SW-1 已根因修复（`AddKeepAlive` 持有 `StayAwakeToken`，patch 037，PR #10）。修复后 WinRelease 20 分钟复跑 **0 FATAL / 0 target crash / SW restart PASS**。
+- 没有删除 DCHECK、扩大 buffer、周期 reload/重启页面或额外禁用后台优化。
 
 ### 2.1 20 分钟多窗口稳定性门禁（2026-11-01）
 
@@ -85,8 +85,10 @@ long-run 崩溃未修复。**
 - `disable_fieldtrial_testing_config=true` 同时移除了两个 Windows 安全 study：
   browser ACG（`BrowserDynamicCodeDisabled`）和 network service sandbox
   （`NetworkServiceSandboxWindows`）。browser ACG 不能重新开启，因为 Sogou Xbyak 需要 JIT；
-  network service sandbox 是否显式启用仍是发布安全决策。官方 Chrome 无 seed 的隔离 profile
-  同样两者皆关；server-side variations seed 状态 NOT-TESTED。
+  normal launcher、release 矩阵、Native Messaging client wake path 和 20 分钟 long-run gate
+  均已显式加 `--enable-features=NetworkServiceSandbox`；normal-launch 静态守卫现在要求该
+  flag 存在。实测 network utility 为 Low IL + AppContainer + CIG/ACG。官方 Chrome 无 seed 的
+  隔离 profile 同样两者皆关；server-side variations seed 状态 NOT-TESTED。
 - Patch 034：in-process DComp 初始化、`Intermediate D3D Window`、WGC 彩色、后台截图 PASS；
   `--single-process` 在 `extensions_client.cc:38` FATAL（早于 GPU 初始化，patch 034 未触达）。
 - Patch 035：把 `InitializePlatformOverlaySettings()` 移到 DComp 初始化之后；构建后
@@ -104,26 +106,75 @@ long-run 崩溃未修复。**
   明确 `mayNotSurviveRestart`；target 永远不能自报 `loginVerified`。
 - BrowserPilot：42/42 + 11/11 + 15/15 + 14/14 tests PASS；typecheck/build PASS。
 - browser-cli：v2 contract/reference tests 62/62 + 7/7；native patch
-  `chromium/patches/proposed/036-browser-cli-cookie-import.patch` **proposed only**，未入
-  manifest、未编译、未集成。原生 CookieStore 端点仍未打通，不能宣称产品闭环。
-- PR：BrowserPilot #5（v2）、browser-cli #4（proposed native patch）。
+  `chromium/patches/proposed/037-browser-cli-cookie-import.patch` 已 rebase 到当前 001–036 栈，
+  修复 UI 线程阻塞 I/O/join、expiry 帧 drain、client PID 竞态和 managed-hidden 批准呈现；
+  `cookie_import_unittests` 9/9 PASS。修复后的原始 WinDev 产物完成真实闭环 **9/9 场景 PASS**：
+  approve 写入 2 条 Cookie、`LOGIN_OK`、重启后持久化且 session cookie 丢弃；deny/cancel/
+  host 中断/source 替换/duplicate/cross-profile/DACL/expired ticket 全部 PASS；
+  `authorization={targetUserConfirmed:true, simulated:false, source:target-browser-dialog}`。
+  仍未入 manifest，不能宣称已合并/发布。
+- PR：BrowserPilot #5（v2）、#8（native E2E harness）、browser-cli #4（proposed 037 已更新）。
 
 ## 5. PR / 状态
 
 - browser-cli #1：patch 030–033 + TSF field-trial + gate + docs；Draft。
 - browser-cli #2：patch 034/035 + WGC harness + security/lifecycle；Draft，依赖 #1。
 - browser-cli #3：hidden long-run reproduction；Draft，依赖 #1。
-- browser-cli #4：P1 v2 proposed native patch; Draft，依赖 #1。
+- browser-cli #4：P1 v2 native patch compiled; Draft，依赖 #1；修复后的 037 已推送。
+- browser-cli #5：WinRelease build/config/security; Draft，依赖 #1。
+- browser-cli #6：20-minute long-run gate; Draft，依赖 #1。
+- browser-cli #7：hidden route 1 (not selected); **closed**。
+- browser-cli #8：旧 A2 route 2; **closed, superseded by #9**。
+- browser-cli #9：audited A2 patch 036; Draft，base GPU #2，selected。
+- browser-cli #10：SW-1 service worker keepalive/idle 状态机修复（patch 037）；Draft，依赖 #9。
+- browser-cli #11：最终 001–038 集成 + 统一内部 RC 门禁；Draft，依赖 #10。
 - BrowserPilot #1：K4/K15/latch + A harness + fixture；Draft。
 - BrowserPilot #2：F3 screenshot fallback；Draft，依赖 #1。
 - BrowserPilot #3：normal-mode + IME；Draft，依赖 browser-cli #1。
 - BrowserPilot #4：P1 prototype；Draft。
 - BrowserPilot #5：P1 v2 product flow；Draft，依赖 #4。
 - BrowserPilot #6：release-like E2E matrix；Draft，依赖 #1。
+- BrowserPilot #7：Native Messaging Host restart RC gate；Draft，base #1 branch。
+- BrowserPilot #8：P1 native cookie-import E2E harness；Draft，base P1 product。
 
-## 6. 结论
+## 6. 最终 001–038 集成（2026-11-03）
 
-Release-like E2E 已 PASS（210/210），TSF 和 DComp 普通/in-process 路径均有构建验证；
-hidden 长驻崩溃已复现并定位但**未修复**；20 分钟多窗口门禁在 WinDev 上 **FAIL**
-（4 个 managed 窗口全部崩溃，4 个 normal 窗口稳定）；P1 原生端点仍未实现；安全等价
-未证明。因此仍不能宣称 Windows RC 发布就绪或合并到 main。
+独立集成分支 `agent/rc-integration`（PR #11）依次应用 001–038，P1 已从 037
+重编号为 038。统一 WinRelease 产物：
+
+- `chrome.exe` sha256 `0441080d...67bb1`
+- `chrome.dll` sha256 `a848a1c7...a308d2c`
+
+统一入口 `tests/rc-final/run-final-gate.py` **exit 0 / PASS**（run ID `20261103-160052-7fd1050a`，chrome.exe/chrome.dll SHA-256 前后一致）：
+
+| 阶段 | 结果 |
+| --- | --- |
+| post-host normal（host 长跑后） | PASS，108/108（N1–N6，含 foreground/focus/cleanup） |
+| agent matrix | PASS，143/143（AI 输入、Sogou IME、截图、OOPIF、NetworkServiceSandbox） |
+| P1 native import | PASS，9/9 |
+| SW DevTools-attached 600s | PASS，0 FATAL |
+| SW natural idle/wake | PASS |
+| 1200s host/8-window（先跑） | PASS，1224.7s，31/31，真实 host restart |
+
+没有 BLOCKED。内部 dogfooding 记录见 `D:/work/wt/bc-integration/docs/dogfooding-2026-11-03.md`（登录、长会话、隐藏窗口、并发、Sogou IME、Host 重连、suspend/resume proxy；真实系统 S3/S0 休眠仍待发布工程验证）。内部 RC 可运行（`tools/rc/launch-internal-rc.cmd`），但仍是
+unsigned internal test build，`releasable=false`；正式签名/安装器/更新器未完成。
+
+## 7. 结论
+
+Release-like E2E 已在非 component WinRelease 上 **14/14 cases、226/226 checks PASS**（含
+RC-A1/A5/A8）；A2 的 hidden presentation 路径在 20 分钟 8 窗口 run 中 **0 presentation
+DCHECK**。Native Messaging Host restart 由独立 gate 覆盖并通过（196/196、20 分钟 31/31、
+t=601s 真实重启）。SW-1（service worker `SetIdleDelay` DCHECK）已根因修复：patch 037
+让 `AddKeepAlive` 持有 `StayAwakeToken`；修复后 WinRelease 20 分钟 run **0 FATAL、0 target
+crash、SW restart PASS**，DevTools-attached 600s 对照也 0 FATAL，重复重启压力 13 次/7 个实例
+clean。P1 原生导入在修复后的原始 WinDev 产物上 **9/9 场景 PASS**（真实 CookieManager 写入、
+登录、重启持久化、managed-hidden 批准窗口），P1 已重编号为 038 并进入集成分支。
+NetworkServiceSandbox 已覆盖 normal launcher、release 矩阵、client wake path 和 long-run
+两个 session；release 矩阵与 long-run 的 network utility 均使用 network sandbox。
+
+仍不能宣称 Windows RC 发布就绪：
+- 签名/安装器/更新/发布者身份未完成；WinRelease 仍是 unsigned internal test build，
+  `releasable=false`。
+- unsigned component→WinRelease 安全差异、逐模块签名、server-side seed 未验证。
+- P1 patch 已重编号为 038 并进入内部集成分支。
+所有 PR 继续 Draft。
