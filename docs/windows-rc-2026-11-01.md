@@ -119,15 +119,16 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - `chrome.exe` sha256 `0441080d...67bb1`
 - `chrome.dll` sha256 `a848a1c7...a308d2c`
 
-统一入口 `tests/rc-final/run-final-gate.py` **exit 0 / PASS**：
+统一入口 `tests/rc-final/run-final-gate.py` **exit 0 / PASS**（run ID `20261103-142522-34a76313`，chrome.exe/chrome.dll SHA-256 前后一致）：
 
 | 阶段 | 结果 |
 | --- | --- |
-| release matrix 14 cases | PASS，226/226 |
+| post-host normal（host 长跑后） | PASS，108/108（N1–N6，含 foreground/focus/cleanup） |
+| agent matrix | PASS，143/143（AI 输入、Sogou IME、截图、OOPIF、NetworkServiceSandbox） |
 | P1 native import | PASS，9/9 |
 | SW DevTools-attached 600s | PASS，0 FATAL |
 | SW natural idle/wake | PASS |
-| 1200s host/8-window | PASS，1224.9s，31/31，真实 host restart |
+| 1200s host/8-window（先跑） | PASS，1224.5s，31/31，真实 host restart |
 
 没有 BLOCKED。内部 RC 可运行（`tools/rc/launch-internal-rc.cmd`），但仍是
 unsigned internal test build，`releasable=false`；正式签名/安装器/更新器未完成。
