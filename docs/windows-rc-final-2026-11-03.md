@@ -64,15 +64,16 @@ The unified gate requires all stages PASS and exits 0:
 ## Unified acceptance result (2026-11-03)
 
 `tests/rc-final/run-final-gate.py` on the unified artifact returned **PASS,
-exit 0** (`D:/c/logs/rc-final-20261103d/rc-final-report.json`):
+exit 0** (`D:/c/logs/rc-final/20261103-142522-34a76313/rc-final-report.json`), run ID `20261103-142522-34a76313`, chrome.exe/chrome.dll SHA-256 unchanged before/after:
 
 | stage | result | evidence |
 | --- | --- | --- |
-| release-like 14-case matrix | PASS, 226/226 | AI input, Sogou IME, hidden/occluded screenshots, OOPIF, NetworkServiceSandbox |
+| post-host normal | PASS, 108/108 | N1-N6 after the 1200s host run, including N5/N6 foreground/focus/cleanup |
+| agent matrix | PASS, 143/143 | AI input, Sogou IME, hidden/occluded screenshots, OOPIF, NetworkServiceSandbox |
 | P1 native import | PASS, 9/9 | approval, CookieManager write, restart, expiry, host/source interruption |
 | SW DevTools-attached | PASS | 600s, 0 FATAL, old SW-1 crash path |
 | SW natural idle/wake | PASS | worker terminates and new instance starts |
-| 1200s host/8-window gate | PASS, 1224.9s, 31/31 | real Native Messaging Host restart, 8 windows, screenshots, resources |
+| 1200s host/8-window gate | PASS, 1224.5s, 31/31 | real Native Messaging Host restart, 8 windows, screenshots, resources; run first |
 
 No stage reported BLOCKED. The artifact is internal only; signing/installer/
 updater remain out of scope.
