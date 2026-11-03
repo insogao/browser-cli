@@ -6,8 +6,9 @@ Status: **internal unsigned test build; NOT a public release**. `releasable=fals
 
 - Build: non-component `D:/c/src/out/WinRelease`, unified patches 001-038.
 - Product version: `156.0.8067.0` (Browser CLI internal RC).
-- `chrome.dll` sha256: see the final gate report; this document is updated with
-  the exact hash after the unified run.
+- `chrome.dll` sha256: `a848a1c7a99db7f6b7dc9d8e547c911d71933f50b74cd0cf0dab183a3a308d2c`
+  (unified 001-038 build).
+- `chrome.exe` sha256: `0441080d13dcab32a87b66b3e3ee90d0122db5a64ccf8e6ed9ef04a097067bb1`.
 - Patches: 001-033 (base/Windows), 034-035 (GPU/DComp), 036 (A2 hidden
   presentation), 037 (SW-1 service-worker keepalive), 038 (P1 native cookie
   import, renumbered from proposed 037).
@@ -25,6 +26,15 @@ The launcher uses `%LOCALAPPDATA%\BrowserCLI-RC-Internal` (override with
 `--enable-features=NetworkServiceSandbox`; it does not pass `--no-sandbox`,
 `--headless`, or automation flags. `RC_CHROME` can point at another copy of the
 same artifact.
+
+## Install / run steps (internal)
+
+1. Keep the complete `D:/c/src/out/WinRelease` directory together; the launcher
+   and all DLL/resource files must stay in that directory.
+2. Run `D:\work\wtc-integration	oolsc\launch-internal-rc.cmd`.
+3. First launch creates `%LOCALAPPDATA%\BrowserCLI-RC-Internal`; use
+   `RC_PROFILE` for a separate internal profile.
+4. To validate the artifact, run the unified gate in `## Internal acceptance`.
 
 ## Dependencies
 
