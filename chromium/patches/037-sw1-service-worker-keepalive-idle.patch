@@ -1,0 +1,51 @@
+diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc b/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc
+index ca73be252bc4..692427cec0ed 100644
+--- a/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc
++++ b/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc
+@@ -2529,15 +2529,28 @@ void ServiceWorkerGlobalScope::AddKeepAlive(
+   DCHECK(event_queue_);
+ 
+   observed_keepalive_sequence_number_ = keepalive_sequence_number;
+-  // TODO(richardzh): refactor with RAII pattern, as explained in crbug/1399324
+-  event_queue_->ResetIdleTimeout();
++  // An external keepalive must keep the event queue from going idle. A bare
++  // ResetIdleTimeout() cancels the idle callback without re-arming it, which
++  // breaks ServiceWorkerEventQueue::SetIdleDelay()'s invariant when the
++  // browser later sends an idle delay while the external request is still
++  // outstanding. The token both cancels the pending callback and keeps
++  // HasInflightEvent() true until ClearKeepAlive().
++  if (!keep_alive_token_) {
++    keep_alive_token_ = event_queue_->CreateStayAwakeToken();
++  }
+ }
+ 
+ void ServiceWorkerGlobalScope::ClearKeepAlive() {
+   DCHECK(IsContextThread());
+   DCHECK(event_queue_);
+ 
+-  // TODO(richardzh): refactor with RAII pattern, as explained in crbug/1399324
++  if (keep_alive_token_) {
++    // The token destructor calls OnNoInflightEvent() and re-arms the idle
++    // timer when the last keepalive ends.
++    keep_alive_token_.reset();
++    return;
++  }
++  // Defensive path for a ClearKeepAlive without a matching AddKeepAlive.
+   event_queue_->ResetIdleTimeout();
+   event_queue_->CheckEventQueue();
+ }
+diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.h b/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.h
+index b59ea11d5392..525f35edec0b 100644
+--- a/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.h
++++ b/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.h
+@@ -785,6 +785,10 @@ class MODULES_EXPORT ServiceWorkerGlobalScope final
+   // they are dispatched.
+   std::unique_ptr<ServiceWorkerEventQueue> event_queue_;
+   uint64_t observed_keepalive_sequence_number_ = 0;
++  // Keeps the event queue from going idle while the browser holds an external
++  // keepalive for this worker. Declared after |event_queue_| so the token is
++  // released before the queue is destroyed.
++  std::unique_ptr<ServiceWorkerEventQueue::StayAwakeToken> keep_alive_token_;
+ 
+   // InitializeGlobalScope() pauses the top level script evaluation when this
+   // flag is true.

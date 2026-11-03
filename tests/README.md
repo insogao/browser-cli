@@ -632,6 +632,28 @@ fixture/静态证据；**没有运行时证据，也没有可执行入口**。**
 7. 逐窗口截图：待 Gate C 解除 BLOCKED 后单独验收（本契约不覆盖）；
 8. CPU/GPU/内存与长期运行数据：PROJECT-PROGRESS F 区独立条目，不在本契约内。
 
+## `longrun-stability-gate.py`（20 分钟多窗口长驻门禁；Windows）
+
+Windows-only 运行时门禁，不是 Gate F 的离线 checker。两个隔离 temp profile 并发运行
+8 个窗口：normal 4（dynamic text / 2D canvas / OOPIF / occluded WebGL）+ agent/managed 4
+（extension page / dynamic / minimized canvas / WebGL）；固定时间线覆盖 SW 重启、
+HUMAN/ASSIST/AI 所有权转换、真实 `--browser-cli-user-explicit-show` 呈现与隐藏、
+遮挡/最小化/长期 hidden，并每 15s 采样进程树内存/handles/CPU/GPU、CDP target crash、
+renderer/GPU/network PID 消失和 Chromium DCHECK。managed 窗口不做周期截图，防止
+presentation feedback 被 drain 而掩盖 `layer_tree_view.cc:554`。
+
+```sh
+python tests/tools/longrun-stability-gate.py --self-test
+python tests/tools/longrun-stability-gate.py --dry-run
+python tests/tools/longrun-stability-gate.py \
+  --chrome D:/c/src/out/WinRelease/chrome.exe \
+  --evidence-dir D:/c/logs/longrun-2026-11-01 --duration 1200 --sample-interval 15
+python tests/tools/longrun-stability-gate.py --check DIR
+```
+
+详细设计、判定与 2026-11-01 WinDev baseline（FAIL）结果见
+`docs/windows-longrun-stability-gate-2026-11-01.md`。
+
 ## `check-browser-launch-hygiene.sh`（静态门禁，强制）
 
 扫描 `tests/ scripts/ cli/ launcher/ browserpilot-integration/` 下所有会启动
