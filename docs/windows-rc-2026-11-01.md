@@ -111,7 +111,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 - BrowserPilot #7：Native Messaging Host restart RC gate；Draft，base #1 branch。
 - BrowserPilot #8：P1 native cookie-import E2E harness；Draft，base P1 product。
 
-## 7. 最终 001–038 集成（2026-11-03）
+## 6. 最终 001–038 集成（2026-11-03）
 
 独立集成分支 `agent/rc-integration`（PR #11）依次应用 001–038，P1 已从 037
 重编号为 038。统一 WinRelease 产物：
@@ -132,7 +132,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 没有 BLOCKED。内部 RC 可运行（`tools/rc/launch-internal-rc.cmd`），但仍是
 unsigned internal test build，`releasable=false`；正式签名/安装器/更新器未完成。
 
-## 6. 结论
+## 7. 结论
 
 Release-like E2E 已在非 component WinRelease 上 **14/14 cases、226/226 checks PASS**（含
 RC-A1/A5/A8）；A2 的 hidden presentation 路径在 20 分钟 8 窗口 run 中 **0 presentation
