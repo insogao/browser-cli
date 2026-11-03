@@ -17,6 +17,7 @@ Run ID: `20261103-142522-34a76313`
 | Real Chinese input | **PASS** | Sogou TSF compositionstart + CJK in input/textarea/contenteditable; HUMAN/ASSIST arbitration |
 | Host reconnect | **PASS** | real Native Messaging Host restart at t=600s; old connections/authorizations invalid; commands recover |
 | Foreground/cleanup after long run | **PASS** | post-host normal 108/108 (N1-N6, including N5/N6 foreground); foreground restored to 590308; no residual host/session |
+| Internal launcher | **PASS** | `tools/rc/launch-internal-rc.cmd` started the unified artifact with an isolated temp profile and `NetworkServiceSandbox`; test process tree stopped by verified PID |
 | Suspend/resume proxy | **PASS** | `D:/c/logs/rc-dogfood-20261103d/dogfood-suspend-resume.json`; test tree suspended 8s, resumed; page/counter/screenshot/browser alive |
 
 ## Sleep/wake limitation
