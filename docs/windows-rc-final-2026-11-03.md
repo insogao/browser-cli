@@ -68,14 +68,12 @@ exit 0** (`D:/c/logs/rc-final/20261103-142522-34a76313/rc-final-report.json`), r
 
 | stage | result | evidence |
 | --- | --- | --- |
-| post-host normal | PASS, 108/108 | N1-N6 after the 1200s host run, including N5/N6 foreground/focus/cleanup |
+| 1200s host/8-window gate | PASS, 1224.5s, 31/31 | run first; real Native Messaging Host restart, 8 windows, screenshots, resources |
+| post-host normal | PASS, 108/108 | N1-N6 after host; N5/N6 foreground/focus/cleanup; foreground restored to 590308 |
 | agent matrix | PASS, 143/143 | AI input, Sogou IME, hidden/occluded screenshots, OOPIF, NetworkServiceSandbox |
 | P1 native import | PASS, 9/9 | approval, CookieManager write, restart, expiry, host/source interruption |
 | SW DevTools-attached | PASS | 600s, 0 FATAL, old SW-1 crash path |
 | SW natural idle/wake | PASS | worker terminates and new instance starts |
-| 1200s host/8-window gate | PASS, 1224.5s, 31/31 | real Native Messaging Host restart, 8 windows, screenshots, resources; run first |
-| post-host normal | PASS, 108/108 | N1-N6 after host; foreground restored to 590308 |
-| agent matrix | PASS, 143/143 | AI/IME/hidden/OOPIF/network sandbox |
 
 No stage reported BLOCKED. All stage reports are bound to run ID
 `20261103-142522-34a76313`; chrome.exe/chrome.dll SHA-256 were identical before
