@@ -130,7 +130,7 @@ viz 对 undrawn frame 节流到约 1 Hz，因此约 60s 爆掉。
 | SW natural idle/wake | PASS |
 | 1200s host/8-window（先跑） | PASS，1224.5s，31/31，真实 host restart |
 
-没有 BLOCKED。内部 RC 可运行（`tools/rc/launch-internal-rc.cmd`），但仍是
+没有 BLOCKED。内部 dogfooding 记录见 `D:/work/wt/bc-integration/docs/dogfooding-2026-11-03.md`（登录、长会话、隐藏窗口、并发、Sogou IME、Host 重连、suspend/resume proxy；真实系统 S3/S0 休眠仍待发布工程验证）。内部 RC 可运行（`tools/rc/launch-internal-rc.cmd`），但仍是
 unsigned internal test build，`releasable=false`；正式签名/安装器/更新器未完成。
 
 ## 7. 结论
