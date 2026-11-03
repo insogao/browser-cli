@@ -1,3 +1,0 @@
-generate-icons --dry-run plan
-quoted paths do not round-trip to the exact argv
-resume on tip-like checkout rejected
