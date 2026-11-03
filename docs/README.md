@@ -10,5 +10,7 @@
 | [`windows-environment-2026-10-22.md`](windows-environment-2026-10-22.md) | Windows 工具链安装与验证、构建并行度/OOM、Sogou IME 导致的 exit 3 根因（含栈）与 patch 023 的 TSF 跳过决策。 |
 | [`windows-m1-gateway-2026-10-23.md`](windows-m1-gateway-2026-10-23.md) | Windows M1–M4 主线记录：各切片、可见桌面验收、M2 后台能力、M4 品牌/图标/安装器、上游 `views_unittests` 回归。 |
 | [`phase7-browser-cli-capability-2026-10-28.md`](phase7-browser-cli-capability-2026-10-28.md) | Phase 7 能力查询接口 `chrome.browserCli.getCapabilities()`：patch 026、allowlist 哈希机制、两个实测陷阱（SW 无裸 `chrome`、API 注入 0.5s 竞态）、三项端到端验收与已知限制。 |
+| [`windows-release-build-2026-10-28.md`](windows-release-build-2026-10-28.md) | Windows non-component `out/WinRelease` release-shape 构建：真实 5h29m 构建、逐字段进程缓解/模块面/启动前 CIG/启动对照（WinDev、官方 Chrome）、NetworkServiceSandbox 启用与边界、真实 Sogou TSF smoke、release blocker；随附 [`windows-release-evidence-2026-11-01.json`](windows-release-evidence-2026-11-01.json)。 |
+| [`windows-release-packaging-preflight-2026-10-28.md`](windows-release-packaging-preflight-2026-10-28.md) | 打包/签名/更新 preflight 设计：internal-unsigned-test-build 与 public-signed-artifact 两类、只读检查项、正式签名/更新契约要求、本轮实测结果；`scripts/preflight-windows-release.sh`。 |
 
 相关但不入库的现场记录：`~/work/browser/BROWSER-CLI-ENV-STATUS.md`（环境状态）、`~/work/browser/BROWSER-CLI-LOCAL-REPO-STATUS.md`（本仓库的建立与验收记录）。

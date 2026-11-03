@@ -23,7 +23,7 @@ Windows-only GN configure for the Chromium checkout:
   5. assert Visual Studio BuildTools 2026 (VC/Tools/MSVC + a toolset version)
   6. assert Windows SDK 10.0.28000.0 (Include/10.0.28000.0)
   7. assert Debugging Tools (Debuggers/x64/dbghelp.dll)
-  8. copy chromium/args-windows.gn to <out>/args.gn
+  8. copy <args source> to <out>/args.gn
   9. run `gn gen <out>` with the required Windows toolchain environment
 
 Options:
@@ -31,6 +31,11 @@ Options:
                    is set), e.g. D:/c/src. The checkout lives outside this repo.
   --out PATH       output dir, relative to the checkout or absolute
                    (default: out/WinDev)
+  --args-source PATH
+                   GN args file to materialize (default:
+                   chromium/args-windows.gn for out/WinDev). Never point this
+                   at another worktree's file; the release shape uses
+                   chromium/args-windows-release.gn.
   --dry-run        print the exact commands and write nothing
   --help           this message
 
@@ -60,6 +65,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --checkout) shift; [ $# -gt 0 ] || die "--checkout needs a value (the Chromium src dir, e.g. D:/c/src)"; CHECKOUT="$1" ;;
     --out) shift; [ $# -gt 0 ] || die "--out needs a value (default: out/WinDev)"; OUT_ARG="$1" ;;
+    --args-source) shift; [ $# -gt 0 ] || die "--args-source needs a value (default: chromium/args-windows.gn)"; ARGS_SRC="$1" ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
   shift
@@ -99,9 +105,9 @@ if [ "$DRY_RUN" = "1" ]; then
   5. assert VS BuildTools: \${vs2026_install:-%ProgramFiles(x86)%/Microsoft Visual Studio/18/BuildTools}/VC/Tools/MSVC
   6. assert Windows SDK $WINDOWS_SDK_VERSION at <sdk root>/Include/$WINDOWS_SDK_VERSION
   7. assert <sdk root>/Debuggers/x64/dbghelp.dll
-  8. copy chromium/args-windows.gn to <out>/args.gn
+  8. copy ${ARGS_SRC##*/} to <out>/args.gn
   9. generate the Windows .ico assets into the checkout (using the first of
-     \$PYTHON_BIN / python / python3 / py -3 that can `import PIL`)
+     \$PYTHON_BIN / python / python3 / py -3 that can \`import PIL\`)
  10. run gn gen
 [dry-run] checkout: $CHECKOUT_DISPLAY
 [dry-run] export DEPOT_TOOLS_WIN_TOOLCHAIN=0
@@ -129,7 +135,7 @@ export vs2026_install="$VS_INSTALL"
 
 run mkdir -p "$OUT_ABS"
 if [ -f "$OUT_ABS/args.gn" ] && ! diff -q "$ARGS_SRC" "$OUT_ABS/args.gn" >/dev/null 2>&1; then
-  warn "replacing $OUT_ABS/args.gn with chromium/args-windows.gn (the previous file differed)"
+  warn "replacing $OUT_ABS/args.gn with ${ARGS_SRC##*/} (the previous file differed)"
 fi
 run cp "$ARGS_SRC" "$OUT_ABS/args.gn"
 
@@ -170,7 +176,7 @@ else
     || die "icon generation failed (interpreter: $ICON_PY); install Pillow (pip install Pillow) or check assets/branding/browser-cli-logo-source.png"
 fi
 
-log "args-windows.gn:"
+log "${ARGS_SRC##*/}:"
 sed 's/^/  /' "$ARGS_SRC"
 
 log "DEPOT_TOOLS_WIN_TOOLCHAIN=$DEPOT_TOOLS_WIN_TOOLCHAIN vs2026_install=$vs2026_install"

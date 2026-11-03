@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Browser CLI TSF probe</title>
+<style>
+  body { font: 16px/1.6 "Microsoft YaHei", sans-serif; margin: 24px; }
+  label { display: block; margin-top: 16px; font-weight: 600; }
+  input, textarea, .editable {
+    width: 560px; padding: 8px; font-size: 18px;
+    border: 1px solid #888; border-radius: 4px; display: block;
+    font-family: "Microsoft YaHei", sans-serif;
+  }
+  textarea { height: 90px; }
+  .editable { min-height: 60px; border: 1px solid #888; border-radius: 4px; padding: 8px; }
+  #log { margin-top: 18px; padding: 10px; background: #f2f2f2; white-space: pre-wrap;
+         font-family: Consolas, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>Browser CLI TSF probe</h1>
+  <p>Real TSF/IME input only. This page instruments composition events so a
+     passing run can prove the IME participated (no insertText/paste).</p>
+
+  <label for="single">input type=text</label>
+  <input id="single" type="text" autocomplete="off" spellcheck="false">
+
+  <label for="multi">textarea</label>
+  <textarea id="multi" spellcheck="false"></textarea>
+
+  <label>contenteditable</label>
+  <div id="ce" class="editable" contenteditable="true"></div>
+
+  <div id="log"></div>
+
+<script>
+  const state = {
+    composition: 0,
+    compositionUpdates: 0,
+    compositionData: [],
+    compositionEndData: [],
+    keys: [],
+    inputs: [],
+    keydown: 0,
+    keyup: 0,
+    startedAt: Date.now(),
+  };
+  const log = document.getElementById('log');
+
+  function render() {
+    log.textContent =
+      'composition=' + state.composition +
+      ' updates=' + state.compositionUpdates +
+      ' keydown=' + state.keydown +
+      ' keyup=' + state.keyup +
+      '\nkeys=' + JSON.stringify(state.keys.slice(-24)) +
+      '\ncompositionData=' + JSON.stringify(state.compositionData.slice(-8)) +
+      '\ncompositionEndData=' + JSON.stringify(state.compositionEndData.slice(-4)) +
+      '\nvalues=' + JSON.stringify(values());
+  }
+  function values() {
+    return {
+      single: document.getElementById('single').value,
+      multi: document.getElementById('multi').value,
+      ce: document.getElementById('ce').textContent,
+    };
+  }
+  function active() {
+    const el = document.activeElement;
+    return el ? (el.id || el.tagName) : null;
+  }
+
+  for (const id of ['single', 'multi', 'ce']) {
+    const el = document.getElementById(id);
+    el.addEventListener('compositionstart', () => { state.composition++; render(); });
+    el.addEventListener('compositionupdate', (e) => {
+      state.compositionUpdates++;
+      state.compositionData.push(String(e.data || ''));
+      render();
+    });
+    el.addEventListener('compositionend', (e) => {
+      state.compositionEndData.push(String(e.data || ''));
+      render();
+    });
+    el.addEventListener('input', (e) => {
+      state.inputs.push({ inputType: e.inputType, data: e.data, value: el.value !== undefined ? el.value : el.textContent });
+      render();
+    });
+    el.addEventListener('keydown', (e) => { state.keydown++; state.keys.push('down:' + e.key); render(); });
+    el.addEventListener('keyup', (e) => { state.keyup++; state.keys.push('up:' + e.key); render(); });
+  }
+
+  window.__tsf = () => ({
+    composition: state.composition,
+    compositionUpdates: state.compositionUpdates,
+    compositionData: state.compositionData.slice(-8),
+    compositionEndData: state.compositionEndData.slice(-4),
+    keydown: state.keydown,
+    keyup: state.keyup,
+    keys: state.keys.slice(-24),
+    inputs: state.inputs.slice(-8),
+    values: values(),
+    active: active(),
+    focus: document.hasFocus(),
+    visibility: document.visibilityState,
+    title: document.title,
+  });
+  window.__ready = true;
+  render();
+</script>
+</body>
+</html>
