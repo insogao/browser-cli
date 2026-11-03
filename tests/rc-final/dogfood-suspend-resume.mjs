@@ -141,9 +141,13 @@ async function main() {
     }
     if (!info) throw new Error("page target missing");
     page = await CdpPage.connect(info.webSocketDebuggerUrl);
-    await sleep(1000);
-    const before = await page.call("Runtime.evaluate", { expression: "document.title" });
-    check("初始页面可评估且计数器在运行", /^n=\d+/.test(String(before.result?.value || "")), JSON.stringify(before));
+    let before = null;
+    for (let i = 0; i < 50; i++) {
+      before = await page.call("Runtime.evaluate", { expression: "document.title" });
+      if (/^n=\d+/.test(String(before.result?.value || ""))) break;
+      await sleep(100);
+    }
+    check("初始页面可评估且计数器在运行", /^n=\d+/.test(String(before?.result?.value || "")), JSON.stringify(before));
 
     const suspend = suspendTree(child.pid, true);
     report.suspend = suspend;
@@ -171,13 +175,13 @@ async function main() {
       `if (Get-Process -Id ${child.pid} -ErrorAction SilentlyContinue) { 'alive' } else { 'dead' }`],
       { encoding: "utf8" });
     check("浏览器主进程存活", (alive.stdout || "").trim() === "alive", (alive.stdout || "").trim());
-    report.verdict = "PASS";
   } finally {
     try { page?.close(); } catch {}
     try { server.close(); } catch {}
     try { spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
     try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
   }
+  report.verdict = report.checks.length > 0 && report.checks.every((c) => c.ok) ? "PASS" : "FAIL";
   fs.writeFileSync(path.join(EVIDENCE, "dogfood-suspend-resume.json"),
                    JSON.stringify(report, null, 2) + "\n");
   console.log("verdict: " + report.verdict);
