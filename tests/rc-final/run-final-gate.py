@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """RC final integration gate for the unified 001-038 WinRelease artifact.
 
-This is the single acceptance entry point for the internal RC build. It runs
-the independent RC matrices against the SAME chrome.exe and writes one final
-PASS/FAIL report.
+Single acceptance entry point for the internal RC build. It runs the independent
+RC matrices against the SAME chrome.exe and writes one final PASS/FAIL report.
 
 Hardening contract:
-  * host 1200s runs FIRST; the post-host normal regression then re-checks
-    foreground/focus/input/cleanup after the long-run, so a matrix reorder
-    cannot hide the N5/N6 foreground bug;
-  * every stage report path is captured from THIS run (stdout/exact evidence
-    path), never by scanning for the newest historical report;
-  * chrome.exe and chrome.dll SHA-256 are recorded before and after; a mismatch
-    fails the gate;
-  * a stage timeout or missing/mismatched report writes an explicit FAIL
-    report and exits non-zero.
+  * host 1200s runs FIRST; before any foreground restore, the host stage records
+    the foreground/focus HWND and PID and classifies whether the change is
+    test-owned cleanup or an unexpected user-window intrusion;
+  * foreground restore uses a scoped thread-attach retry, never the global
+    AllowSetForegroundWindow(ASFW_ANY) authorization;
+  * post-host normal must be exactly N1-N6 / 108 passed; agent must be exactly
+    A1-A8 / 143 passed; missing/extra cases or counts fail;
+  * every stage report is captured from THIS run (stdout/exact path) and gets a
+    run-id + build-hash + stage binding sidecar;
+  * chrome.exe/chrome.dll SHA-256 are checked before and after;
+  * a stage timeout, missing report, stale report or hash change writes an
+    explicit FAIL report and exits non-zero.
 
-Exit: 0 only when every stage passes and the artifact hashes are unchanged.
+Exit: 0 only when every stage and every binding passes.
 """
 import ctypes
 import hashlib
@@ -36,47 +38,102 @@ RUN_ID = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
 ROOT = BASE_ROOT / RUN_ID
 ROOT.mkdir(parents=True, exist_ok=True)
 LOGS = ROOT / "logs"
+BINDINGS = ROOT / "bindings"
 LOGS.mkdir(exist_ok=True)
+BINDINGS.mkdir(exist_ok=True)
 stages = []
+before = {}
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("hwndActive", ctypes.c_void_p),
+        ("hwndFocus", ctypes.c_void_p),
+        ("hwndCapture", ctypes.c_void_p),
+        ("hwndMenuOwner", ctypes.c_void_p),
+        ("hwndMoveSize", ctypes.c_void_p),
+        ("hwndCaret", ctypes.c_void_p),
+        ("rcCaret", ctypes.c_long * 4),
+    ]
 
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def foreground_hwnd():
-    try:
-        return int(ctypes.windll.user32.GetForegroundWindow())
-    except Exception:
-        return 0
-
-
-def restore_foreground(hwnd):
+def foreground_info():
+    user32 = ctypes.windll.user32
+    hwnd = int(user32.GetForegroundWindow())
+    info = {"hwnd": hwnd, "pid": 0, "title": "", "focus_hwnd": 0, "focus_pid": 0}
     if not hwnd:
-        return False
-    try:
-        user32 = ctypes.windll.user32
-        user32.AllowSetForegroundWindow(-1)  # ASFW_ANY; test process only
-        return bool(user32.SetForegroundWindow(int(hwnd)))
-    except Exception:
-        return False
+        return info
+    pid = ctypes.c_ulong()
+    thread = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    info["pid"] = int(pid.value)
+    buf = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(hwnd, buf, 512)
+    info["title"] = buf.value
+    gti = GUITHREADINFO()
+    gti.cbSize = ctypes.sizeof(GUITHREADINFO)
+    if thread and user32.GetGUIThreadInfo(thread, ctypes.byref(gti)) and gti.hwndFocus:
+        fhwnd = int(gti.hwndFocus)
+        fpid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(fhwnd, ctypes.byref(fpid))
+        info["focus_hwnd"] = fhwnd
+        info["focus_pid"] = int(fpid.value)
+    return info
+
+
+def restore_foreground(target_hwnd):
+    """Restore a test-owned foreground without ASFW_ANY global authorization."""
+    if not target_hwnd:
+        return {"ok": False, "reason": "no-target"}
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    current = int(user32.GetForegroundWindow())
+    if current == int(target_hwnd):
+        return {"ok": True, "actual": current, "method": "already"}
+    ok = bool(user32.SetForegroundWindow(int(target_hwnd)))
+    if not ok:
+        # Scoped thread-attach retry. Do not grant ASFW_ANY to the desktop.
+        cur_thread = kernel32.GetCurrentThreadId()
+        target_thread = user32.GetWindowThreadProcessId(int(target_hwnd), None)
+        attached = False
+        if target_thread and target_thread != cur_thread:
+            attached = bool(user32.AttachThreadInput(cur_thread, target_thread, True))
+        try:
+            ok = bool(user32.SetForegroundWindow(int(target_hwnd)))
+        finally:
+            if attached:
+                user32.AttachThreadInput(cur_thread, target_thread, False)
+    actual = int(user32.GetForegroundWindow())
+    return {"ok": bool(ok) and actual == int(target_hwnd), "actual": actual,
+            "method": "set-foreground" if ok else "failed"}
 
 
 def run(name, cwd, argv, env=None, timeout=2400):
     started = time.time()
     log = LOGS / (name + ".log")
     print("=== [%s] %s" % (name, " ".join(argv)), flush=True)
+    proc = subprocess.Popen(argv, cwd=cwd, env={**os.environ, **(env or {})},
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    error = None
     try:
-        proc = subprocess.run(argv, cwd=cwd, env={**os.environ, **(env or {})},
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              timeout=timeout)
-        output = (proc.stdout or b"").decode("utf-8", "replace")
+        out, _ = proc.communicate(timeout=timeout)
         exit_code = proc.returncode
-        error = None
-    except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or b"").decode("utf-8", "replace") if exc.stdout else ""
-        exit_code = None
+    except subprocess.TimeoutExpired:
         error = "timeout after %ss" % timeout
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30)
+        except Exception:
+            pass
+        out, _ = proc.communicate()
+        exit_code = None
+    output = (out or b"").decode("utf-8", "replace")
     log.write_text(output, encoding="utf-8")
     print("\n".join(output.splitlines()[-12:]), flush=True)
     stage = {"name": name, "exit": exit_code,
@@ -115,6 +172,34 @@ def load_report(stage, path):
     return data
 
 
+def bind_stage(stage, report_path, *, verdict=None, checks=None, cases=None,
+               host_verdict=None, host_restart=None):
+    if not stage.get("report"):
+        stage["pass"] = False
+        stage["error"] = "cannot bind: report path missing"
+        return
+    path = Path(stage["report"])
+    binding = {
+        "run_id": RUN_ID,
+        "stage": stage["name"],
+        "artifact": CHROME,
+        "artifact_sha256": before.get(CHROME),
+        "chrome_dll_sha256": before.get(CHROME_DLL),
+        "report": str(path),
+        "report_sha256": sha256(path),
+        "verdict": verdict,
+        "checks": checks,
+        "cases": cases,
+        "host_verdict": host_verdict,
+        "host_restart": host_restart,
+    }
+    out = BINDINGS / (stage["name"] + ".json")
+    out.write_text(json.dumps(binding, indent=2, ensure_ascii=False) + "\n",
+                   encoding="utf-8")
+    stage["binding"] = str(out)
+    stage["bound_run_id"] = RUN_ID
+
+
 def parse_report_line(output, marker):
     for line in reversed(output.splitlines()):
         if marker in line:
@@ -122,7 +207,7 @@ def parse_report_line(output, marker):
     return None
 
 
-def stage_host():
+def stage_host(foreground_before):
     stage, output = run("host-longrun", r"D:/work/wt/bp-host-restart",
                         ["node", "scripts/test-native-host-restart-e2e.mjs",
                          "--longrun", "--no-build", "--duration=1200",
@@ -138,18 +223,51 @@ def stage_host():
     data = load_report(stage, Path(artifacts) / "longrun-report.json")
     if not data:
         return stage
-    stage["host_verdict"] = data.get("verdict")
-    stage["host_restart"] = (data.get("hostRestart") or {}).get("status")
-    stage["pass"] = (stage["host_verdict"] == "PASS" and
-                     stage["host_restart"] == "PASS")
+    host_verdict = data.get("verdict")
+    host_restart = (data.get("hostRestart") or {}).get("status")
+    stage["host_verdict"] = host_verdict
+    stage["host_restart"] = host_restart
+    stage["pass"] = host_verdict == "PASS" and host_restart == "PASS"
+
+    # Record foreground/focus BEFORE any cleanup restore and decide whether the
+    # change is test-owned or an unexpected user-window intrusion.
+    after = foreground_info()
+    test_pids = set()
+    for session in data.get("sessions") or []:
+        for key in ("browserPid", "hostPid"):
+            if isinstance(session.get(key), int):
+                test_pids.add(session[key])
+    changed = after["hwnd"] != foreground_before.get("hwnd")
+    owner = "test" if after.get("pid") in test_pids else (
+        "none" if not changed else "unexpected-user")
+    audit = {
+        "before": foreground_before,
+        "after_host": after,
+        "changed": changed,
+        "after_owner": owner,
+        "test_pids": sorted(test_pids),
+        "restore": None,
+    }
+    stage["foreground_audit"] = audit
+    if owner == "unexpected-user":
+        stage["pass"] = False
+        stage["error"] = "unexpected user foreground change during host longrun"
+        return stage
+    if changed and owner == "test":
+        # Cleanup only; this is recorded, not used to hide a user regression.
+        audit["restore"] = restore_foreground(foreground_before.get("hwnd"))
+        time.sleep(1)
+    bind_stage(stage, stage["report"], verdict=host_verdict,
+               checks=None, cases=None, host_verdict=host_verdict,
+               host_restart=host_restart)
     return stage
 
 
-def stage_matrix(name, mode, cases):
+def stage_matrix(name, mode, expected_cases, expected_passed):
     stage, output = run(name, r"D:/work/wt/bp-rc-e2e",
                         ["node", "scripts/test-release-candidate-e2e.mjs",
                          "--no-build", "--fresh-profile", "--mode=" + mode,
-                         "--case=" + ",".join(cases)],
+                         "--case=" + ",".join(expected_cases)],
                         {"BROWSERPILOT_PATCHED_CHROME": CHROME}, timeout=1800)
     if not stage["pass"]:
         return stage
@@ -162,12 +280,21 @@ def stage_matrix(name, mode, cases):
     if not data:
         return stage
     checks = data.get("checks") or {}
+    actual_cases = [c.get("id") for c in (data.get("cases") or [])]
+    statuses = {c.get("id"): c.get("status") for c in (data.get("cases") or [])}
     stage["verdict"] = data.get("verdict")
     stage["checks"] = checks.get("passed")
     stage["failed_checks"] = checks.get("failed")
+    stage["cases"] = actual_cases
+    stage["case_statuses"] = statuses
+    stage["case_set_ok"] = sorted(actual_cases) == sorted(expected_cases)
     stage["pass"] = (data.get("verdict") == "PASS" and
                      stage["failed_checks"] == 0 and
-                     stage["checks"] and stage["checks"] > 0)
+                     stage["checks"] == expected_passed and
+                     stage["case_set_ok"] and
+                     all(statuses.get(c) == "PASS" for c in expected_cases))
+    bind_stage(stage, stage["report"], verdict=stage.get("verdict"),
+               checks=stage.get("checks"), cases=actual_cases)
     return stage
 
 
@@ -187,6 +314,8 @@ def stage_p1():
     stage["pass"] = (len(scenarios) == 9 and
                      all(s.get("verdict") == "PASS" for s in scenarios) and
                      not data.get("secretLeaks"))
+    bind_stage(stage, stage["report"], verdict="PASS" if stage["pass"] else "FAIL",
+               checks=None, cases=[s.get("scenario") for s in scenarios])
     return stage
 
 
@@ -202,6 +331,8 @@ def stage_sw(name, scenario, duration, extra=None):
     if not data:
         return stage
     stage["pass"] = data.get("verdict") == "clean" and not data.get("fatal")
+    bind_stage(stage, stage["report"], verdict=data.get("verdict"),
+               checks=None, cases=[scenario])
     return stage
 
 
@@ -242,33 +373,28 @@ def finish():
 
 
 def main():
-    global before
     if not os.path.isfile(CHROME) or not os.path.isfile(CHROME_DLL):
         print("FATAL: artifact missing: " + CHROME)
         return 2
-    before = {CHROME: sha256(CHROME), CHROME_DLL: sha256(CHROME_DLL)}
+    before[CHROME] = sha256(CHROME)
+    before[CHROME_DLL] = sha256(CHROME_DLL)
     print("run_id=" + RUN_ID)
     print("chrome=" + CHROME)
     print("evidence=" + str(ROOT))
     print("sha256_before=" + json.dumps(before))
 
-    original_foreground = foreground_hwnd()
-    if not stage_host().get("pass"):
+    foreground_before = foreground_info()
+    print("foreground_before=" + json.dumps(foreground_before))
+    if not stage_host(foreground_before).get("pass"):
         return finish()
-    restored = restore_foreground(original_foreground)
-    time.sleep(2)
-    stages[-1]["foreground_restore"] = {
-        "requested": original_foreground,
-        "ok": restored,
-        "actual": foreground_hwnd(),
-    }
-
-    if not stage_matrix("post-host-normal", "normal",
-                        ["RC-N1", "RC-N2", "RC-N3", "RC-N4", "RC-N5", "RC-N6"]).get("pass"):
+    if not stage_matrix(
+            "post-host-normal", "normal",
+            ["RC-N1", "RC-N2", "RC-N3", "RC-N4", "RC-N5", "RC-N6"], 108).get("pass"):
         return finish()
-    if not stage_matrix("agent-matrix", "agent",
-                        ["RC-A1", "RC-A2", "RC-A3", "RC-A4", "RC-A5", "RC-A6",
-                         "RC-A7", "RC-A8"]).get("pass"):
+    if not stage_matrix(
+            "agent-matrix", "agent",
+            ["RC-A1", "RC-A2", "RC-A3", "RC-A4", "RC-A5", "RC-A6", "RC-A7",
+             "RC-A8"], 143).get("pass"):
         return finish()
     if not stage_p1().get("pass"):
         return finish()
