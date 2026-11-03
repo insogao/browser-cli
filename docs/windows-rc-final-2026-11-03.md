@@ -1,0 +1,71 @@
+# Browser CLI Windows internal RC (001-038)
+
+Status: **internal unsigned test build; NOT a public release**. `releasable=false`.
+
+## Artifact
+
+- Build: non-component `D:/c/src/out/WinRelease`, unified patches 001-038.
+- Product version: `156.0.8067.0` (Browser CLI internal RC).
+- `chrome.dll` sha256: see the final gate report; this document is updated with
+  the exact hash after the unified run.
+- Patches: 001-033 (base/Windows), 034-035 (GPU/DComp), 036 (A2 hidden
+  presentation), 037 (SW-1 service-worker keepalive), 038 (P1 native cookie
+  import, renumbered from proposed 037).
+- `chrome.exe` and `chrome.dll` are **unsigned**. Do not distribute outside the
+  internal test group.
+
+## Run (internal)
+
+```bat
+D:\work\wt\bc-integration\tools\rc\launch-internal-rc.cmd
+```
+
+The launcher uses `%LOCALAPPDATA%\BrowserCLI-RC-Internal` (override with
+`RC_PROFILE`), never the user's normal Chrome/Browser CLI profile. It passes
+`--enable-features=NetworkServiceSandbox`; it does not pass `--no-sandbox`,
+`--headless`, or automation flags. `RC_CHROME` can point at another copy of the
+same artifact.
+
+## Dependencies
+
+- Windows 10/11 x64.
+- The `out/WinRelease` directory's DLL/resource set must stay together; do not
+  copy `chrome.exe` alone.
+- GPU: default out-of-process GPU; GPU driver as required by Chromium 156.
+- Optional: Sogou TSF IME for Chinese input; P1 import source uses the
+  BrowserPilot extension + Native Messaging host.
+
+## Internal acceptance
+
+```powershell
+$env:RC_FINAL_CHROME='D:\c\src\out\WinRelease\chrome.exe'
+python D:\work\wt\bc-integration\tests\rc-final\run-final-gate.py
+```
+
+The unified gate requires all stages PASS and exits 0:
+1. 1200s host/8-window stability with a real Native Messaging Host restart.
+2. Release-like 14-case matrix (AI input, Sogou IME, hidden screenshots/OOPIF,
+   NetworkServiceSandbox).
+3. P1 native approval + CookieManager write + restart.
+4. SW DevTools-attached stress (SW-1 path).
+5. Natural SW idle termination/wake.
+
+## Known limitations / not public release
+
+- No Authenticode signing, installer, updater, or Windows publisher identity.
+- `is_official_build=false`, no PGO/ThinLTO/orderfile; DCHECKs are on.
+- P1 patch 038 remains proposed (not merged); internal artifact only.
+- SW-1 DevTools-attached state-machine fix is included, but the DevTools watch
+  mode remains an upstream regression monitor.
+- No smart-screen reputation, per-module signing, EDR/AppLocker validation, or
+  server-side variations-seed verification.
+- Not a replacement for the formal Phase 9 signing/installer/updater work.
+
+## Internal vs public
+
+| | Internal RC | Public release |
+| --- | --- | --- |
+| artifact | unsigned `out/WinRelease` | signed, packaged, versioned installer |
+| update | none | updater + metadata |
+| support | internal test group | end users |
+| `releasable` | false | only after Phase 9 gates |
