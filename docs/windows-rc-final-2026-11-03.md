@@ -88,6 +88,15 @@ updater remain out of scope.
   server-side variations-seed verification.
 - Not a replacement for the formal Phase 9 signing/installer/updater work.
 
+## Internal release preflight
+
+`scripts/preflight-windows-release.sh --mode internal` on the unified artifact:
+`artifact class: internal-unsigned-test-build`, `releasable: False`.
+Report: `D:/c/logs/rc-final-preflight-20261103.json`.
+Blockers: not Authenticode-signed; `is_official_build` false (no PGO/ThinLTO);
+no update-metadata/updater; no Windows publisher identity; per-module signing
+and SmartScreen/AppLocker/EDR behavior not verified.
+
 ## Internal vs public
 
 | | Internal RC | Public release |
