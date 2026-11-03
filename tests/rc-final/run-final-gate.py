@@ -66,8 +66,11 @@ def stage_release_matrix():
     rc = load(candidates[0])
     stage["report"] = str(candidates[0])
     stage["verdict"] = rc.get("verdict")
-    stage["checks"] = len(rc.get("checks") or [])
-    stage["pass"] = rc.get("verdict") == "PASS" and stage["checks"] >= 226
+    checks = rc.get("checks") or {}
+    stage["checks"] = checks.get("passed")
+    stage["failed_checks"] = checks.get("failed")
+    stage["pass"] = (rc.get("verdict") == "PASS" and
+                     stage["checks"] >= 226 and stage["failed_checks"] == 0)
     return stage
 
 
