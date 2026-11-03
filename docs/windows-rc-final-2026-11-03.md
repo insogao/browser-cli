@@ -64,11 +64,11 @@ The unified gate requires all stages PASS and exits 0:
 ## Unified acceptance result (2026-11-03)
 
 `tests/rc-final/run-final-gate.py` on the unified artifact returned **PASS,
-exit 0** (`D:/c/logs/rc-final/20261103-142522-34a76313/rc-final-report.json`), run ID `20261103-142522-34a76313`, chrome.exe/chrome.dll SHA-256 unchanged before/after:
+exit 0** (`D:/c/logs/rc-final/20261103-160052-7fd1050a/rc-final-report.json`), run ID `20261103-160052-7fd1050a`, chrome.exe/chrome.dll SHA-256 unchanged before/after:
 
 | stage | result | evidence |
 | --- | --- | --- |
-| 1200s host/8-window gate | PASS, 1224.5s, 31/31 | run first; real Native Messaging Host restart, 8 windows, screenshots, resources |
+| 1200s host/8-window gate | PASS, 1224.7s, 31/31 | run first; real Native Messaging Host restart; foreground stayed ZCode 590308 (no user-window disturbance) |
 | post-host normal | PASS, 108/108 | N1-N6 after host; N5/N6 foreground/focus/cleanup; foreground restored to 590308 |
 | agent matrix | PASS, 143/143 | AI input, Sogou IME, hidden/occluded screenshots, OOPIF, NetworkServiceSandbox |
 | P1 native import | PASS, 9/9 | approval, CookieManager write, restart, expiry, host/source interruption |
@@ -76,7 +76,7 @@ exit 0** (`D:/c/logs/rc-final/20261103-142522-34a76313/rc-final-report.json`), r
 | SW natural idle/wake | PASS | worker terminates and new instance starts |
 
 No stage reported BLOCKED. All stage reports are bound to run ID
-`20261103-142522-34a76313`; chrome.exe/chrome.dll SHA-256 were identical before
+`20261103-160052-7fd1050a`; chrome.exe/chrome.dll SHA-256 were identical before
 and after. Dogfooding (including suspend/resume proxy) is recorded in
 `docs/dogfooding-2026-11-03.md`. The artifact is internal only; signing/installer/
 updater remain out of scope.
