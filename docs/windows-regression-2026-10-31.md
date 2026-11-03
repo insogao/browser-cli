@@ -100,3 +100,20 @@ Test-only harness（BrowserPilot PR #1，提交 `89531ea`）：
 R2 阻断、TSF 根因、DComp 普通路径与 in-process 根因均已定位；A/C 修复已构建验证，
 B 的 patch 034 已构建验证。仍不能宣称 Windows 正式发布就绪：S5 按设计未跑、patch 034
 的复用路径/overlay 顺序待回归、P1 原生端点未实现、macOS release-preflight 未建。
+
+## 6. 2026-11-01 补测：R2 popup 根因复现（长驻 hidden stability）
+
+后续独立 harness（`tests/tools/hidden-stability-cdp-check.py`）在真实
+`D:\work\wt\bp-a-r1r2\dist` popup 上复现了 R2 首故障，且证明它不是“managed-hidden 窗口”
+的偶发问题，而是“模型可见 + 原生不呈现”的结构性问题：
+
+- 真实 popup（extension ID `nnollghpaggbcdkkgoieneffnlijinio`）在 managed-default 窗口
+  1 Hz 刷新，**59.842 s** 触发 `layer_tree_view.cc:554` 61>60 FATAL；renderer 死亡，
+  browser/CDP 仍存活。
+- 对从未 show 的 managed 窗口调用 `SW_HIDE`/`SW_MINIMIZE` **不会改变模型可见性**，仍复现；
+  真正模型隐藏（先 show 再 hide）90 s/180 s 稳定，且 180 s 后截图仍 fresh。
+- `text/raf/canvas/webgl/extension/iframe(OOPIF)` 六类动态内容均可独立触发；`static` 与
+  “定时器不产生绘制”（`no-paint`）稳定；8 窗口压力下 6 个动态窗口全部命中，浏览器存活。
+- 结论与修复提案（产品层 visibility 对齐 + Chromium failed-feedback 硬化）见
+  [windows-hidden-presentation-stability-2026-11-01.md](windows-hidden-presentation-stability-2026-11-01.md)。
+  **未修改/构建 Chromium，未宣称 solved**；`ensurePopup()` 回收仍是 workaround，不是根修。

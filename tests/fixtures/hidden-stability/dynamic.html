@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hs-init</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #f4f6f8; color: #111;
+               font: 14px/1.4 Consolas, monospace; }
+  #wrap { padding: 12px; }
+  #line { margin-bottom: 6px; white-space: pre-wrap; }
+  #marker { width: 24px; height: 24px; display: block; margin: 4px 0 8px; }
+  canvas { border: 1px solid #888; display: block; margin: 6px 0; }
+  #frame { width: 360px; height: 160px; border: 1px solid #888; display: none; }
+  #childline { margin-top: 6px; color: #555; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="line">id=?</div>
+  <div id="marker"></div>
+  <canvas id="c2d" width="320" height="120"></canvas>
+  <canvas id="gl" width="320" height="120"></canvas>
+  <iframe id="frame" title="child"></iframe>
+  <div id="childline">child=?</div>
+</div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const id = q.get('id') || 'x';
+  const mode = q.get('mode') || 'text';
+  const tickMs = Math.max(50, Number(q.get('tick') || 1000));
+  const childUrl = q.get('child') || '';
+
+  const line = document.getElementById('line');
+  const marker = document.getElementById('marker');
+  const c2d = document.getElementById('c2d');
+  const ctx = c2d.getContext('2d');
+  const glCanvas = document.getElementById('gl');
+  const frame = document.getElementById('frame');
+  const childline = document.getElementById('childline');
+
+  let paintCount = 0;
+  let rafCount = 0;
+  let tickCount = 0;
+  let noPaintCount = 0;
+  let lastPaintAt = 0;
+  let lastTickAt = 0;
+  let childState = null;
+  let childMessages = 0;
+
+  // ---- WebGL -------------------------------------------------------------
+  const gl = (() => {
+    if (mode !== 'webgl') return null;
+    const g = glCanvas.getContext('webgl2') || glCanvas.getContext('webgl');
+    if (!g) return null;
+    const vs = g.createShader(g.VERTEX_SHADER);
+    g.shaderSource(vs, 'attribute vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }');
+    g.compileShader(vs);
+    const fs = g.createShader(g.FRAGMENT_SHADER);
+    g.shaderSource(fs, 'precision mediump float; uniform vec3 u; void main(){ gl_FragColor = vec4(u,1.); }');
+    g.compileShader(fs);
+    const prog = g.createProgram();
+    g.attachShader(prog, vs); g.attachShader(prog, fs); g.linkProgram(prog);
+    g.useProgram(prog);
+    const buf = g.createBuffer();
+    g.bindBuffer(g.ARRAY_BUFFER, buf);
+    g.bufferData(g.ARRAY_BUFFER, new Float32Array([-0.9,-0.9, 0.9,-0.9, 0.0, 0.9]), g.STATIC_DRAW);
+    const loc = g.getAttribLocation(prog, 'p');
+    g.enableVertexAttribArray(loc);
+    g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
+    return { g, u: g.getUniformLocation(prog, 'u') };
+  })();
+
+  function markerColour(n) {
+    return [n & 0xff, (n >> 8) & 0xff, 255];
+  }
+
+  function draw2d() {
+    const [r, g, b] = markerColour(paintCount);
+    ctx.fillStyle = '#f4f6f8';
+    ctx.fillRect(0, 0, 320, 120);
+    ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+    ctx.fillRect(0, 0, 320, 24);
+    ctx.fillStyle = '#2f6fdf';
+    ctx.fillRect(0, 40, (paintCount * 7) % 320, 40);
+    ctx.fillStyle = '#111';
+    ctx.font = '20px monospace';
+    ctx.fillText(String(paintCount), 8, 105);
+  }
+
+  function drawGl() {
+    if (!gl) return;
+    const [r, g, b] = markerColour(paintCount);
+    gl.g.viewport(0, 0, 320, 120);
+    gl.g.clearColor(r / 255, g / 255, 1.0, 1.0);
+    gl.g.clear(gl.g.COLOR_BUFFER_BIT);
+    gl.g.uniform3f(gl.u, r / 255, g / 255, 1.0);
+    gl.g.drawArrays(gl.g.TRIANGLES, 0, 3);
+  }
+
+  function paint(reason) {
+    paintCount += 1;
+    lastPaintAt = Date.now();
+    const [r, g, b] = markerColour(paintCount);
+    marker.style.background = 'rgb(' + r + ',' + g + ',' + b + ')';
+    line.textContent = 'id=' + id + ' mode=' + mode + ' paint=' + paintCount +
+      ' raf=' + rafCount + ' tick=' + tickCount +
+      ' vis=' + document.visibilityState + ' focus=' + document.hasFocus() +
+      ' reason=' + (reason || '');
+    if (mode === 'canvas' || mode === 'raf') draw2d();
+    if (mode === 'webgl') drawGl();
+  }
+
+  function childPaintHint() {
+    // Parent stays static; only the OOPIF child repaints. This keeps parent
+    // presentation-callback accumulation separate from the child renderer.
+    childline.textContent = 'child=' + (childState ? JSON.stringify(childState) : 'none');
+  }
+
+  if (mode === 'iframe' && childUrl) {
+    frame.style.display = 'block';
+    frame.src = childUrl;
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+      if (!data || data.hs !== 'child') return;
+      childMessages += 1;
+      childState = data;
+      // Intentionally no DOM update here: isolate the child renderer.
+    });
+  } else {
+    frame.style.display = 'none';
+  }
+
+  if (mode === 'raf' || mode === 'canvas' || mode === 'webgl') {
+    const loop = () => {
+      rafCount += 1;
+      paint('raf');
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+
+  if (mode === 'text' || mode === 'iframe') {
+    setInterval(() => { tickCount += 1; lastTickAt = Date.now(); paint('timer'); }, tickMs);
+  } else if (mode === 'no-paint') {
+    // Control: timers fire, but nothing visible is invalidated.
+    setInterval(() => { noPaintCount += 1; lastTickAt = Date.now(); }, tickMs);
+  } else if (mode === 'static') {
+    // Control: one initial paint, then no updates at all.
+  }
+
+  document.addEventListener('visibilitychange', () => paint('visibilitychange'));
+
+  window.__hsProbe = () => {
+    const mr = marker.getBoundingClientRect();
+    const cr = c2d.getBoundingClientRect();
+    let canvasMarker = null;
+    try { canvasMarker = Array.from(ctx.getImageData(2, 3, 1, 1).data); } catch (e) {}
+    let webglPixel = null;
+    if (gl) {
+      try {
+        const b = new Uint8Array(4);
+        gl.g.readPixels(2, 117, 1, 1, gl.g.RGBA, gl.g.UNSIGNED_BYTE, b);
+        webglPixel = Array.from(b);
+      } catch (e) {}
+    }
+    return {
+      id, mode,
+      paintCount, rafCount, tickCount, noPaintCount,
+      childMessages, child: childState,
+      lastPaintAt, lastTickAt,
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      markerRect: { x: mr.x, y: mr.y, w: mr.width, h: mr.height },
+      canvasRect: { x: cr.x, y: cr.y, w: cr.width, h: cr.height },
+      dpr: window.devicePixelRatio || 1,
+      canvasMarker, webglPixel,
+      webgl: !!gl,
+      title: document.title,
+    };
+  };
+
+  // Force a visible update from JS, independent of rAF, so a caller can test
+  // "explicit repaint -> fresh capture" separately from animation.
+  window.__hsBump = (n = 1) => {
+    paintCount += Math.max(0, Number(n) || 1) - 1;
+    paint('bump');
+    return paintCount;
+  };
+
+  document.title = 'hs-' + id + '-' + mode;
+  paint('initial');
+})();
+</script>
+</body>
+</html>

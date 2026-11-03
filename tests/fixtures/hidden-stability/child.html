@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hs-child</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #eef7ee; color: #111;
+               font: 14px/1.4 Consolas, monospace; }
+  #wrap { padding: 8px; }
+  #marker { width: 24px; height: 24px; display: block; margin: 4px 0 6px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="line">child</div>
+  <div id="marker"></div>
+</div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const id = q.get('id') || 'child';
+  const tickMs = Math.max(50, Number(q.get('tick') || 1000));
+  const line = document.getElementById('line');
+  const marker = document.getElementById('marker');
+
+  let paintCount = 0;
+  let rafCount = 0;
+  let tickCount = 0;
+  let lastPaintAt = 0;
+
+  function markerColour(n) {
+    return [n & 0xff, (n >> 8) & 0xff, 255];
+  }
+
+  function paint(reason) {
+    paintCount += 1;
+    lastPaintAt = Date.now();
+    const [r, g, b] = markerColour(paintCount);
+    marker.style.background = 'rgb(' + r + ',' + g + ',' + b + ')';
+    line.textContent = 'child id=' + id + ' paint=' + paintCount +
+      ' raf=' + rafCount + ' tick=' + tickCount +
+      ' vis=' + document.visibilityState + ' reason=' + (reason || '');
+    try {
+      parent.postMessage({
+        hs: 'child', id, paintCount, rafCount, tickCount,
+        visibilityState: document.visibilityState,
+        lastPaintAt, at: Date.now(),
+      }, '*');
+    } catch (e) {}
+  }
+
+  setInterval(() => { tickCount += 1; paint('timer'); }, tickMs);
+  const loop = () => { rafCount += 1; paint('raf'); requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+
+  window.__hsProbe = () => {
+    const mr = marker.getBoundingClientRect();
+    return {
+      id, paintCount, rafCount, tickCount, lastPaintAt,
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      markerRect: { x: mr.x, y: mr.y, w: mr.width, h: mr.height },
+      dpr: window.devicePixelRatio || 1,
+      title: document.title,
+    };
+  };
+  window.__hsBump = (n = 1) => {
+    paintCount += Math.max(0, Number(n) || 1) - 1;
+    paint('bump');
+    return paintCount;
+  };
+
+  document.title = 'hs-' + id + '-child';
+  paint('initial');
+})();
+</script>
+</body>
+</html>

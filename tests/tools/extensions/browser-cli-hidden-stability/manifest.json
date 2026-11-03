@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Browser CLI Hidden Stability Probe",
+  "version": "1.0.0",
+  "description": "Test-only MV3 extension page that repaints on a 1 Hz timer, mimicking long-lived extension popups.",
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "action": {
+    "default_title": "hidden-stability-probe"
+  }
+}
