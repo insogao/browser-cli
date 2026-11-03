@@ -69,7 +69,7 @@ exit 0** (`D:/c/logs/rc-final/20261103-160052-7fd1050a/rc-final-report.json`), r
 | stage | result | evidence |
 | --- | --- | --- |
 | 1200s host/8-window gate | PASS, 1224.7s, 31/31 | run first; real Native Messaging Host restart; foreground stayed ZCode 590308 (no user-window disturbance) |
-| post-host normal | PASS, 108/108 | N1-N6 after host; N5/N6 foreground/focus/cleanup; foreground restored to 590308 |
+| post-host normal | PASS, 108/108 | N1-N6 after host; N5/N6 foreground/focus/cleanup; foreground stayed ZCode 590308, no restore needed |
 | agent matrix | PASS, 143/143 | AI input, Sogou IME, hidden/occluded screenshots, OOPIF, NetworkServiceSandbox |
 | P1 native import | PASS, 9/9 | approval, CookieManager write, restart, expiry, host/source interruption |
 | SW DevTools-attached | PASS | 600s, 0 FATAL, old SW-1 crash path |
