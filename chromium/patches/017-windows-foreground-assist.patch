@@ -1,0 +1,556 @@
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 74c47211..9d7b1f00 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1601,7 +1601,10 @@ source_set("core") {
+   }
+ 
+   if (is_win) {
+-    deps += [ "//chrome/browser/browser_cli:user_explicit_presentation_win" ]
++    deps += [
++      "//chrome/browser/browser_cli:foreground_assist_presentation_win",
++      "//chrome/browser/browser_cli:user_explicit_presentation_win",
++    ]
+   }
+ 
+   if (!is_win && !is_android) {
+diff --git a/chrome/browser/browser_cli/BUILD.gn b/chrome/browser/browser_cli/BUILD.gn
+index a156970e..0a42070f 100644
+--- a/chrome/browser/browser_cli/BUILD.gn
++++ b/chrome/browser/browser_cli/BUILD.gn
+@@ -148,4 +148,20 @@ if (is_win) {
+       "//ui/views",
+     ]
+   }
++
++  source_set("foreground_assist_presentation_win") {
++    sources = [
++      "foreground_assist_presentation.h",
++      "foreground_assist_presentation_win.cc",
++    ]
++    deps = [
++      ":foreground_assist",
++      ":foreground_assist_controller",
++      "//base",
++      "//chrome/browser/ui/browser_window",
++      "//ui/aura",
++      "//ui/base",
++      "//ui/views",
++    ]
++  }
+ }
+diff --git a/chrome/browser/browser_cli/foreground_assist_presentation_win.cc b/chrome/browser/browser_cli/foreground_assist_presentation_win.cc
+new file mode 100644
+index 00000000..865d0a74
+--- /dev/null
++++ b/chrome/browser/browser_cli/foreground_assist_presentation_win.cc
+@@ -0,0 +1,293 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/browser_cli/foreground_assist_presentation.h"
++
++#include <stdint.h>
++
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/notreached.h"
++#include "chrome/browser/browser_cli/foreground_assist.h"
++#include "chrome/browser/browser_cli/foreground_assist_controller.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/base/base_window.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
++#include "ui/views/widget/browser_cli_presentation_win.h"
++#include "ui/views/widget/widget.h"
++
++namespace browser_cli {
++namespace {
++
++// Structured producer log, same vocabulary as the macOS producer. `result` is
++// handled / denied / failed / noop and `reason` is the stable machine-readable
++// outcome; the shared policy and the Windows host add their own
++// BROWSER_CLI_PRESENTATION logs for every actual request, so a producer outcome
++// can always be correlated with a grant / deny / busy / timeout / release
++// decision.
++void LogProducerOutcome(const char* result,
++                        const char* reason,
++                        bool managed_mode,
++                        uint64_t window_id,
++                        const char* lease_reason) {
++  LOG(INFO) << "BROWSER_CLI_FOREGROUND_ASSIST stage=producer"
++            << " result=" << result << " reason=" << reason
++            << " window_id=" << window_id << " lease_reason=" << lease_reason
++            << " managed=" << (managed_mode ? "yes" : "no")
++            << " native=win-hwnd";
++}
++
++// Resolves the top-level views widget of the BrowserWindow identified by
++// `window_id` (the HWND-derived policy key). Only windows that belong to a
++// real BrowserWindow are considered, so child widgets, bubbles, menus and
++// non-browser top-level windows (for example dialogs) never resolve.
++views::Widget* FindWidgetForWindowId(uint64_t window_id) {
++  if (window_id == 0) {
++    return nullptr;
++  }
++  GlobalBrowserCollection* collection = GlobalBrowserCollection::GetInstance();
++  if (!collection) {
++    return nullptr;
++  }
++  views::Widget* found = nullptr;
++  collection->ForEach([&found, window_id](BrowserWindowInterface* browser) {
++    ui::BaseWindow* base_window = browser ? browser->GetWindow() : nullptr;
++    if (!base_window) {
++      return true;
++    }
++    views::Widget* widget = views::Widget::GetWidgetForNativeWindow(
++        base_window->GetNativeWindow());
++    if (!widget) {
++      return true;
++    }
++    aura::Window* native_window = widget->GetNativeWindow();
++    aura::WindowTreeHost* host =
++        native_window ? native_window->GetHost() : nullptr;
++    if (!host ||
++        views::BrowserCliWindowIdForHwnd(host->GetAcceleratedWidget()) !=
++            window_id) {
++      return true;
++    }
++    found = widget;
++    return false;
++  });
++  return found;
++}
++
++// Routes the controller's effects to the single Windows presentation gateway.
++// Every call re-resolves the window by id, so a destroyed window can never be
++// touched and a recycled HWND cannot inherit the lease (the policy releases the
++// lease on destruction). Generation-aware: each call names the lease generation
++// it acts on, and the policy/gateway re-verify it, so a stale timer or release
++// can never kill a newer lease of the same window.
++class BrowserWindowForegroundAssistDelegate
++    : public ForegroundAssistController::Delegate {
++ public:
++  bool WindowExists(uint64_t window_id) override {
++    return FindWidgetForWindowId(window_id) != nullptr;
++  }
++
++  bool WindowIsUserOwned(uint64_t window_id) override {
++    return views::BrowserCliPresentationPolicy::Get()->IsUserExplicitOwned(
++        window_id);
++  }
++
++  uint64_t CurrentLeaseGeneration(uint64_t window_id) override {
++    return views::BrowserCliPresentationPolicy::Get()
++        ->GetForegroundAssistLeaseGeneration(window_id);
++  }
++
++  bool ReleaseLeaseForTimeout(uint64_t window_id,
++                              uint64_t generation) override {
++    return views::BrowserCliPresentationPolicy::Get()->ReleaseForegroundAssist(
++        window_id, views::ForegroundAssistReleaseReason::kTimeout, generation);
++  }
++
++  void ReturnWindowToBackground(uint64_t window_id,
++                                uint64_t generation) override {
++    views::Widget* widget = FindWidgetForWindowId(window_id);
++    if (widget) {
++      views::BrowserCliHideForForegroundAssistRelease(widget, generation);
++    }
++  }
++};
++
++ForegroundAssistController* GetController() {
++  static base::NoDestructor<BrowserWindowForegroundAssistDelegate> delegate;
++  static base::NoDestructor<ForegroundAssistController> controller(
++      delegate.get(), views::kDefaultForegroundAssistLeaseTtl);
++  return controller.get();
++}
++
++// Whether `widget` is a top-level widget that belongs to a real BrowserWindow.
++// The eligibility check rejects child widgets / bubbles / menus; the collection
++// lookup rejects top-level widgets that are not browser windows (for example
++// dialogs).
++bool IsTopLevelBrowserWindow(views::Widget* widget) {
++  if (!views::BrowserCliIsEligibleForegroundAssistTarget(widget)) {
++    return false;
++  }
++  GlobalBrowserCollection* collection = GlobalBrowserCollection::GetInstance();
++  return collection &&
++         collection->FindBrowserWithWindow(widget->GetNativeWindow()) !=
++             nullptr;
++}
++
++}  // namespace
++
++ForegroundAssistController* GetForegroundAssistController() {
++  return GetController();
++}
++
++bool HandleForegroundAssistRequest(const base::CommandLine& command_line) {
++  ForegroundAssistRequest request;
++  const ForegroundAssistRequestClass request_class =
++      ClassifyForegroundAssistRequest(command_line, &request);
++  if (!ForegroundAssistRequestClassConsumesCommandLine(request_class)) {
++    // No assist switch: ordinary command-line processing continues.
++    return false;
++  }
++
++  views::BrowserCliPresentationPolicy* policy =
++      views::BrowserCliPresentationPolicy::Get();
++  const bool managed_mode = policy->IsManagedModeEnabled();
++  const char* lease_reason =
++      views::ForegroundAssistReasonToString(request.reason);
++
++  switch (request_class) {
++    case ForegroundAssistRequestClass::kBlockedByLaunchArguments:
++      // An assist invocation must never act as an ordinary URL / app /
++      // incognito / automation / headless launch: it is consumed here so the
++      // caller cannot fall through to normal command-line processing that might
++      // change a HUMAN-owned window or create a visible window.
++      LogProducerOutcome("denied", "launch-arguments-not-agent-assist",
++                         managed_mode, request.target_window, lease_reason);
++      return true;
++    case ForegroundAssistRequestClass::kBlockedByUnsupportedTabTarget:
++      // Tab-level targeting is not implemented; reject instead of pretending
++      // the named tab was granted.
++      LogProducerOutcome("denied", "unsupported-tab-target", managed_mode,
++                         request.target_window, lease_reason);
++      return true;
++    case ForegroundAssistRequestClass::kBlockedByConflictingSwitches:
++      LogProducerOutcome("denied", "conflicting-producer-switches",
++                         managed_mode, request.target_window, lease_reason);
++      return true;
++    case ForegroundAssistRequestClass::kBlockedByInvalidReason:
++      LogProducerOutcome("denied", "invalid-reason", managed_mode,
++                         request.target_window, lease_reason);
++      return true;
++    case ForegroundAssistRequestClass::kBlockedByInvalidTarget:
++      LogProducerOutcome("denied", "invalid-target", managed_mode,
++                         request.target_window, lease_reason);
++      return true;
++    case ForegroundAssistRequestClass::kNotRequested:
++      return false;
++    case ForegroundAssistRequestClass::kRequestLease:
++    case ForegroundAssistRequestClass::kReleaseLease:
++      break;
++  }
++
++  if (!managed_mode) {
++    // Stock Chromium has no assist: fail closed, present nothing.
++    LogProducerOutcome("noop", "unmanaged-stock-behavior", managed_mode,
++                       request.target_window, lease_reason);
++    return true;
++  }
++
++  views::Widget* widget = FindWidgetForWindowId(request.target_window);
++  if (!widget) {
++    LogProducerOutcome("denied", "target-window-not-found", managed_mode,
++                       request.target_window, lease_reason);
++    return true;
++  }
++  // Only a top-level BrowserWindow may be named: child widgets, bubbles, menus
++  // and non-browser top-level windows (for example dialogs) fail closed.
++  if (!IsTopLevelBrowserWindow(widget)) {
++    LogProducerOutcome("denied", "target-not-top-level-browser-window",
++                       managed_mode, request.target_window, lease_reason);
++    return true;
++  }
++
++  const uint64_t window_id = request.target_window;
++  if (request_class == ForegroundAssistRequestClass::kRequestLease) {
++    // Invariant 5.3: a window the user owns is never a valid assist target.
++    if (policy->IsUserExplicitOwned(window_id)) {
++      LogProducerOutcome("denied", "target-human-owned", managed_mode,
++                         window_id, lease_reason);
++      return true;
++    }
++    switch (policy->RequestForegroundAssist(
++        views::ForegroundOrigin::kAgentAssist, window_id, request.target_tab,
++        request.reason)) {
++      case views::ForegroundAssistRequestResult::kGranted: {
++        // Only a granted lease may present the window, through the single
++        // Windows visibility gateway (kAgentAssist is checked by the shared
++        // policy again).
++        const uint64_t generation =
++            policy->GetForegroundAssistLeaseGeneration(window_id);
++        if (!views::BrowserCliPresentForAgentAssistAction(widget)) {
++          // A lease must not outlive a failed presentation: release exactly the
++          // generation that was just granted.
++          policy->ReleaseForegroundAssist(
++              window_id, views::ForegroundAssistReleaseReason::kAgentRelease,
++              generation);
++          LogProducerOutcome("failed", "presentation-denied", managed_mode,
++                             window_id, lease_reason);
++          return true;
++        }
++        // Hand the controller the generation the policy actually minted, so its
++        // timer tracks the lease and not just the window id. A re-request for
++        // the same live lease reports the unchanged generation, which keeps the
++        // original deadline; a regrant reports the new one, which replaces the
++        // timer (P0 ABA fix).
++        GetController()->OnLeaseGranted(window_id, generation);
++        LogProducerOutcome("handled", "lease-granted-and-presented",
++                           managed_mode, window_id, lease_reason);
++        return true;
++      }
++      case views::ForegroundAssistRequestResult::kDenied:
++        LogProducerOutcome("denied", "lease-denied", managed_mode, window_id,
++                           lease_reason);
++        return true;
++      case views::ForegroundAssistRequestResult::kBusy:
++        LogProducerOutcome("denied", "lease-busy", managed_mode, window_id,
++                           lease_reason);
++        return true;
++      case views::ForegroundAssistRequestResult::kInvalidTarget:
++        LogProducerOutcome("denied", "invalid-target", managed_mode, window_id,
++                           lease_reason);
++        return true;
++    }
++    NOTREACHED();
++  }
++
++  // Release path: only the requested window's current lease is touched.
++  // Capture its generation first so every step below (policy release, tracking
++  // cancel, hide) names exactly that generation and a newer one can never be
++  // killed by a stale release request.
++  const uint64_t generation =
++      policy->GetForegroundAssistLeaseGeneration(window_id);
++  if (generation == 0) {
++    LogProducerOutcome("denied", "no-matching-lease", managed_mode, window_id,
++                       lease_reason);
++    return true;
++  }
++  policy->ReleaseForegroundAssist(window_id,
++                                  views::ForegroundAssistReleaseReason::
++                                      kAgentRelease,
++                                  generation);
++  GetController()->OnLeaseReleasedByAgent(window_id, generation);
++  // Never hide a window the user has taken over: the gateway re-verifies the
++  // HUMAN ownership and the lease generation before issuing Hide.
++  views::BrowserCliHideForForegroundAssistRelease(widget, generation);
++  LogProducerOutcome("handled", "lease-released", managed_mode, window_id,
++                     lease_reason);
++  return true;
++}
++
++}  // namespace browser_cli
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index 01951d04..197f96cb 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -222,13 +222,13 @@
+ #include "base/logging.h"
+ 
+ #include "chrome/browser/browser_cli/foreground_assist.h"
++#include "chrome/browser/browser_cli/foreground_assist_presentation.h"
+ #include "chrome/browser/browser_cli/user_explicit_presentation.h"
+ #endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include <Security/Security.h>
+ 
+-#include "chrome/browser/browser_cli/foreground_assist_presentation.h"
+ #include "chrome/browser/infobars/browser_infobar_manager.h"
+ #include "chrome/browser/infobars/infobar_features.h"
+ #include "chrome/browser/mac/chrome_browser_main_extra_parts_mac.h"
+@@ -571,23 +571,12 @@ void ProcessSingletonNotificationCallbackImpl(
+   // logged by the assist producer (conflicting-producer-switches) and never
+   // reaches the USER_EXPLICIT show producer or its presentation gateway. A
+   // pure show request keeps the existing presentation path, and a command line
+-  // without either intent falls through to stock handling. Windows has no
+-  // assist presentation yet (patch 017), so an assist intent is consumed
+-  // there without presenting anything.
++  // without either intent falls through to stock handling. The assist intent is
++  // always consumed (fail closed): it must never act as an ordinary URL / app
++  // launch that could change a HUMAN-owned window or create a visible window.
+   switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(command_line)) {
+     case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
+-#if BUILDFLAG(IS_MAC)
+-      // An assist intent is always consumed (fail closed): it must never act
+-      // as an ordinary URL / app launch that could change a HUMAN-owned window
+-      // or create a visible window.
+       browser_cli::HandleForegroundAssistRequest(command_line);
+-#else
+-      // Fail closed: consume the intent so it can never fall through to
+-      // ordinary command-line processing as a URL / app launch.
+-      LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=producer"
+-                << " result=denied reason=windows-gateway-not-implemented"
+-                << " native=win-hwnd";
+-#endif
+       return;
+     case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
+       if (browser_cli::HandleUserExplicitShowRequest(command_line,
+@@ -2192,19 +2181,11 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
+     // exactly one window: the startup path has already created its window
+     // (its native show was denied by the background policy), and with
+     // --no-startup-window the producer creates one for the resolved profile.
+-    // On Windows no assist or native presentation path exists yet (patch 017),
+-    // so an assist intent is consumed without presenting anything.
+     switch (browser_cli::ArbitrateBrowserCliCommandLineIntent(
+         *base::CommandLine::ForCurrentProcess())) {
+       case browser_cli::BrowserCliCommandLineIntent::kForegroundAssist:
+-#if BUILDFLAG(IS_MAC)
+         browser_cli::HandleForegroundAssistRequest(
+             *base::CommandLine::ForCurrentProcess());
+-#else
+-        LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=producer"
+-                  << " result=denied reason=windows-gateway-not-implemented"
+-                  << " native=win-hwnd";
+-#endif
+         break;
+       case browser_cli::BrowserCliCommandLineIntent::kUserExplicitShow:
+         browser_cli::HandleUserExplicitShowRequest(
+diff --git a/ui/views/widget/browser_cli_presentation_win.cc b/ui/views/widget/browser_cli_presentation_win.cc
+index 5373b09c..e91a94e0 100644
+--- a/ui/views/widget/browser_cli_presentation_win.cc
++++ b/ui/views/widget/browser_cli_presentation_win.cc
+@@ -69,6 +69,71 @@ bool BrowserCliShouldSuppressWindowPosChange(HWND hwnd) {
+       BrowserCliPresentationAction::kShowAndActivate, window_id);
+ }
+ 
++bool BrowserCliPresentForAgentAssistAction(Widget* widget) {
++  if (!widget) {
++    return false;
++  }
++  // Only reachable after the policy granted the lease for this window. The
++  // scoped origin makes the host gates (DesktopWindowTreeHostWin::Show /
++  // Activate) re-check the same shared policy for kAgentAssist, so this never
++  // bypasses the gateway. A denial leaves the HWND untouched: no show-then-hide.
++  ScopedForegroundOrigin agent_scope(ForegroundOrigin::kAgentAssist);
++  widget->Show();
++  widget->Activate();
++  const bool visible = widget->IsVisible();
++  if (visible) {
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=assist-window-visible"
++              << " window_id=" << WindowIdForWidget(widget)
++              << " reason=agent-assist-lease-granted native=win-hwnd";
++  }
++  return visible;
++}
++
++bool BrowserCliHideForForegroundAssistRelease(Widget* widget,
++                                              uint64_t generation) {
++  const uint64_t window_id = WindowIdForWidget(widget);
++  if (window_id == 0) {
++    // Fail closed: an unresolvable window must not be hidden.
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=assist-window-background decision=refused"
++              << " window_id=0 reason=unresolvable-window native=win-hwnd";
++    return false;
++  }
++  BrowserCliPresentationPolicy* policy = BrowserCliPresentationPolicy::Get();
++  // Defense in depth: the timeout and release owners already check this, but
++  // the gateway itself must never hide a window the user owns (invariant 5.3).
++  if (policy->IsUserExplicitOwned(window_id)) {
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=assist-window-background decision=refused"
++              << " window_id=" << window_id
++              << " reason=human-owned-window native=win-hwnd";
++    return false;
++  }
++  // ABA guard: when a live lease (necessarily a newer generation than the one
++  // the caller released) covers the window again, a stale release must not
++  // hide it.
++  if (policy->IsForegroundAssistLeased(window_id) &&
++      policy->GetForegroundAssistLeaseGeneration(window_id) != generation) {
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=assist-window-background decision=refused"
++              << " window_id=" << window_id
++              << " reason=newer-lease-generation-active native=win-hwnd";
++    return false;
++  }
++  ScopedForegroundOrigin agent_scope(ForegroundOrigin::kAgentAssist);
++  widget->Hide();
++  LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++            << " transition=assist-window-background"
++            << " window_id=" << window_id
++            << " reason=assist-lease-released native=win-hwnd";
++  return true;
++}
++
++bool BrowserCliIsEligibleForegroundAssistTarget(Widget* widget) {
++  return widget && widget->is_top_level();
++}
++
+ void BrowserCliReleaseWindowState(HWND hwnd) {
+   const uint64_t window_id = BrowserCliWindowIdForHwnd(hwnd);
+   BrowserCliPresentationPolicy* policy = BrowserCliPresentationPolicy::Get();
+diff --git a/ui/views/widget/browser_cli_presentation_win.h b/ui/views/widget/browser_cli_presentation_win.h
+index 40de2ecb..cea1f882 100644
+--- a/ui/views/widget/browser_cli_presentation_win.h
++++ b/ui/views/widget/browser_cli_presentation_win.h
+@@ -39,6 +39,21 @@ VIEWS_EXPORT bool BrowserCliAllowsPresentation(
+ // closed).
+ VIEWS_EXPORT bool BrowserCliShouldSuppressWindowPosChange(HWND hwnd);
+ 
++// Presents `widget` for an already-granted assist lease. Scopes kAgentAssist
++// and issues Show()+Activate(); the host gates re-check the shared policy.
++// Returns whether the window ended up visible.
++VIEWS_EXPORT bool BrowserCliPresentForAgentAssistAction(Widget* widget);
++
++// Hides `widget` after its assist lease ended. Re-verifies that the window is
++// not HUMAN-owned and that no newer live lease covers it. Returns whether Hide
++// was issued.
++VIEWS_EXPORT bool BrowserCliHideForForegroundAssistRelease(Widget* widget,
++                                                           uint64_t generation);
++
++// True for a top-level widget that can be an assist target. The chrome layer
++// additionally requires it to belong to a BrowserWindow.
++VIEWS_EXPORT bool BrowserCliIsEligibleForegroundAssistTarget(Widget* widget);
++
+ // Releases the per-window USER_EXPLICIT/HUMAN ownership and any foreground
+ // assist lease when the HWND is destroyed, so a recycled HWND can never
+ // inherit the previous window's state. Mirrors the macOS host destructor at
+diff --git a/ui/views/widget/browser_cli_presentation_win_unittest.cc b/ui/views/widget/browser_cli_presentation_win_unittest.cc
+index 4702e560..98d413e0 100644
+--- a/ui/views/widget/browser_cli_presentation_win_unittest.cc
++++ b/ui/views/widget/browser_cli_presentation_win_unittest.cc
+@@ -119,6 +119,43 @@ TEST_F(BrowserCliPresentationWinTest, ExternalWindowPosShowIsSuppressed) {
+   EXPECT_FALSE(::IsWindowVisible(hwnd));
+ }
+ 
++TEST_F(BrowserCliPresentationWinTest,
++       HideForForegroundAssistReleaseRefusesHumanOwnedWindow) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++  const uint64_t window_id = WindowIdForWidget(widget.get());
++  ASSERT_NE(window_id, 0u);
++  ASSERT_TRUE(BrowserCliPresentationPolicy::Get()->AllowPresentation(
++      ForegroundOrigin::kUserExplicit,
++      BrowserCliPresentationAction::kShowAndActivate, window_id));
++  ASSERT_TRUE(
++      BrowserCliPresentationPolicy::Get()->IsUserExplicitOwned(window_id));
++
++  // A HUMAN-owned window is never hidden by an assist release, even with a
++  // matching (here: zero) generation.
++  EXPECT_FALSE(BrowserCliHideForForegroundAssistRelease(widget.get(), 0));
++}
++
++TEST_F(BrowserCliPresentationWinTest,
++       HideForForegroundAssistReleaseRefusesNewerLeaseGeneration) {
++  std::unique_ptr<Widget> widget = CreateWidget();
++  const uint64_t window_id = WindowIdForWidget(widget.get());
++  ASSERT_NE(window_id, 0u);
++  ASSERT_EQ(ForegroundAssistRequestResult::kGranted,
++            BrowserCliPresentationPolicy::Get()->RequestForegroundAssist(
++                ForegroundOrigin::kAgentAssist, window_id, 0,
++                ForegroundAssistReason::kOther));
++  const uint64_t generation =
++      BrowserCliPresentationPolicy::Get()->GetForegroundAssistLeaseGeneration(
++          window_id);
++  ASSERT_NE(generation, 0u);
++
++  // An older release (a different or zero generation) must never hide a
++  // window that is covered by a newer live lease.
++  EXPECT_FALSE(
++      BrowserCliHideForForegroundAssistRelease(widget.get(), generation - 1));
++  EXPECT_FALSE(BrowserCliHideForForegroundAssistRelease(widget.get(), 0));
++}
++
+ TEST_F(BrowserCliPresentationWinTest,
+        ActivateMessageDoesNotCreateUserExplicitOwnership) {
+   std::unique_ptr<Widget> widget = CreateWidget();

@@ -1,0 +1,17 @@
+# Patch files must stay byte-for-byte LF: they are hashed, replayed with
+# `git apply`, and recorded in chromium/patch-manifest.json. Never let Git
+# rewrite their line endings on checkout.
+chromium/patches/*.patch -text
+
+# Tooling and build metadata are stored as LF so the same bytes work on
+# Windows and macOS. Do not add a catch-all `* text=auto`: binary assets
+# (branding sources, generated icons) must never be converted.
+*.sh text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.gn text eol=lf
+*.gni text eol=lf
+
+# Exact-match fixtures: a CRLF checkout would make every line differ when CI
+# compares a generated list against this file.
+tests/windows-host-failures.txt text eol=lf

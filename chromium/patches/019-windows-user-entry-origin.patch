@@ -1,0 +1,114 @@
+diff --git a/chrome/browser/ui/views/frame/BUILD.gn b/chrome/browser/ui/views/frame/BUILD.gn
+index 3dbe5be4..44c2be0f 100644
+--- a/chrome/browser/ui/views/frame/BUILD.gn
++++ b/chrome/browser/ui/views/frame/BUILD.gn
+@@ -1055,6 +1055,7 @@ source_set("system_menu_model_delegate_impl") {
+     "//components/prefs",
+     "//components/sessions",
+     "//ui/base",
++    "//ui/views",
+   ]
+   if (is_chromeos) {
+     deps += [ "//chromeos/ui/frame" ]
+diff --git a/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc b/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc
+index d0f0f711..7c0f60d2 100644
+--- a/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc
++++ b/chrome/browser/ui/views/frame/browser_caption_button_container_win.cc
+@@ -20,6 +20,7 @@
+ #include "ui/views/accessibility/view_accessibility.h"
+ #include "ui/views/layout/flex_layout.h"
+ #include "ui/views/view_class_properties.h"
++#include "ui/views/widget/browser_cli_foreground_origin.h"
+ 
+ namespace {
+ 
+@@ -45,20 +46,35 @@ BrowserCaptionButtonContainer::BrowserCaptionButtonContainer(
+     BrowserFrameViewWin* frame_view)
+     : frame_view_(frame_view),
+       minimize_button_(AddChildView(CreateCaptionButton(
+-          base::BindRepeating(&BrowserWidget::Minimize,
+-                              base::Unretained(frame_view_->browser_widget())),
++          base::BindRepeating(
++              [](BrowserWidget* widget) {
++                views::ScopedForegroundOrigin origin_scope(
++                    views::ForegroundOrigin::kUserExplicit);
++                widget->Minimize();
++              },
++              base::Unretained(frame_view_->browser_widget())),
+           frame_view_,
+           VIEW_ID_MINIMIZE_BUTTON,
+           IDS_APP_ACCNAME_MINIMIZE))),
+       maximize_button_(AddChildView(CreateCaptionButton(
+-          base::BindRepeating(&BrowserWidget::Maximize,
+-                              base::Unretained(frame_view_->browser_widget())),
++          base::BindRepeating(
++              [](BrowserWidget* widget) {
++                views::ScopedForegroundOrigin origin_scope(
++                    views::ForegroundOrigin::kUserExplicit);
++                widget->Maximize();
++              },
++              base::Unretained(frame_view_->browser_widget())),
+           frame_view_,
+           VIEW_ID_MAXIMIZE_BUTTON,
+           IDS_APP_ACCNAME_MAXIMIZE))),
+       restore_button_(AddChildView(CreateCaptionButton(
+-          base::BindRepeating(&BrowserWidget::Restore,
+-                              base::Unretained(frame_view_->browser_widget())),
++          base::BindRepeating(
++              [](BrowserWidget* widget) {
++                views::ScopedForegroundOrigin origin_scope(
++                    views::ForegroundOrigin::kUserExplicit);
++                widget->Restore();
++              },
++              base::Unretained(frame_view_->browser_widget())),
+           frame_view_,
+           VIEW_ID_RESTORE_BUTTON,
+           IDS_APP_ACCNAME_RESTORE))),
+diff --git a/chrome/browser/ui/views/frame/system_menu_model_delegate.cc b/chrome/browser/ui/views/frame/system_menu_model_delegate.cc
+index 9cc93371..e20d576e 100644
+--- a/chrome/browser/ui/views/frame/system_menu_model_delegate.cc
++++ b/chrome/browser/ui/views/frame/system_menu_model_delegate.cc
+@@ -27,6 +27,7 @@
+ #include "components/prefs/pref_service.h"
+ #include "components/sessions/core/tab_restore_service.h"
+ #include "ui/base/l10n/l10n_util.h"
++#include "ui/views/widget/browser_cli_foreground_origin.h"
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "chromeos/ui/frame/desks/move_to_desks_menu_delegate.h"
+@@ -250,6 +251,11 @@ std::u16string SystemMenuModelDelegate::GetLabelForCommandId(
+ }
+ 
+ void SystemMenuModelDelegate::ExecuteCommand(int command_id, int event_flags) {
++  // This entry point is only reached from a user gesture on the Views system
++  // menu, so the commands it executes are user-explicit and must not be blocked
++  // by the foreground presentation policy.
++  views::ScopedForegroundOrigin origin_scope(
++      views::ForegroundOrigin::kUserExplicit);
+   switch (command_id) {
+     case IDC_BOOKMARK_ALL_TABS:
+       base::RecordAction(
+diff --git a/chrome/browser/ui/views/toolbar/app_menu.cc b/chrome/browser/ui/views/toolbar/app_menu.cc
+index 8094d8b3..a0ecd034 100644
+--- a/chrome/browser/ui/views/toolbar/app_menu.cc
++++ b/chrome/browser/ui/views/toolbar/app_menu.cc
+@@ -123,6 +123,7 @@
+ #include "ui/views/style/typography_provider.h"
+ #include "ui/views/view_class_properties.h"
+ #include "ui/views/view_utils.h"
++#include "ui/views/widget/browser_cli_foreground_origin.h"
+ #include "ui/views/widget/widget.h"
+ 
+ using base::UserMetricsAction;
+@@ -1332,6 +1333,11 @@ bool AppMenu::IsCommandEnabled(int command_id) const {
+ }
+ 
+ void AppMenu::ExecuteCommand(int command_id, int mouse_event_flags) {
++  // This entry point is only reached from a user gesture on the app menu (or a
++  // menu item it delegates to), so the commands it executes are user-explicit
++  // and must not be blocked by the foreground presentation policy.
++  views::ScopedForegroundOrigin origin_scope(
++      views::ForegroundOrigin::kUserExplicit);
+   if (command_id == IDC_CREATE_NEW_TAB_GROUP ||
+       IsTabGroupsCommand(command_id)) {
+     if (command_id != IDC_CREATE_NEW_TAB_GROUP) {

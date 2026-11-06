@@ -1,0 +1,82 @@
+# Browser CLI — full Windows build + acceptance (self-hosted, manual).
+#
+# This job is deliberately NOT run on GitHub-hosted runners. A Chromium 156
+# build from this pinned revision needs:
+#   - Visual Studio BuildTools 2026 18.x (MSVC 14.51) with ATL/MFC
+#   - Windows SDK 10.0.28000.0 + Debugging Tools for Windows
+#   - >= 100 GiB free disk (source ~31 GiB + out/WinDev ~16 GiB + headroom)
+#   - several hours of CPU on 8+ cores
+# See docs/windows-environment-2026-10-22.md for the exact toolchain evidence.
+#
+# Register a self-hosted runner with the labels below and dispatch this workflow
+# manually. The runner is expected to keep a persistent checkout at
+# $BROWSER_CLI_CHROMIUM_SRC so gclient sync and the build cache survive runs.
+name: windows-full
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "ninja -j (6 is the safe default on 32 GiB; >8 OOMs clang)"
+        required: false
+        default: "6"
+      skip_build:
+        description: "Skip ninja and only run acceptance on an existing build"
+        type: boolean
+        default: false
+
+jobs:
+  build-and-accept:
+    runs-on: [self-hosted, windows, x64, chromium]
+    timeout-minutes: 600
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEPOT_TOOLS_WIN_TOOLCHAIN=0
+          export vs2026_install="${VS2026_INSTALL:-C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools}"
+          . scripts/lib/windows-common.sh
+          windows_assert_platform "windows-full"
+          test -d "$(windows_resolve_vs_install)" || { echo "VS2026 BuildTools missing"; exit 1; }
+          sdk="$(windows_resolve_sdk_root)"
+          test -d "$sdk/Include/$WINDOWS_SDK_VERSION" || { echo "SDK $WINDOWS_SDK_VERSION missing"; exit 1; }
+          test -f "$sdk/Debuggers/x64/dbghelp.dll" || { echo "Debugging Tools missing"; exit 1; }
+          echo "toolchain ok"
+
+      - name: Apply patch stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_NO_LAZY_FETCH=1
+          python scripts/apply-patches.py --check --checkout "$BROWSER_CLI_CHROMIUM_SRC" \
+            || python scripts/apply-patches.py --apply --checkout "$BROWSER_CLI_CHROMIUM_SRC"
+
+      - name: Configure (GN)
+        shell: bash
+        run: scripts/configure-windows.sh --checkout "$BROWSER_CLI_CHROMIUM_SRC"
+
+      - name: Build
+        if: ${{ !inputs.skip_build }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-windows.sh --checkout "$BROWSER_CLI_CHROMIUM_SRC" \
+            --jobs "${{ inputs.jobs }}"
+
+      - name: Acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/verify-windows.sh --checkout "$BROWSER_CLI_CHROMIUM_SRC"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance-logs
+          path: build-logs/
+          if-no-files-found: warn

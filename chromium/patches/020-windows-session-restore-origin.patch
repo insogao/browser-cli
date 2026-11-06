@@ -1,0 +1,104 @@
+diff --git a/chrome/browser/sessions/BUILD.gn b/chrome/browser/sessions/BUILD.gn
+index 1582e70b..1e65da14 100644
+--- a/chrome/browser/sessions/BUILD.gn
++++ b/chrome/browser/sessions/BUILD.gn
+@@ -158,6 +158,10 @@ source_set("impl") {
+       "//components/media_device_salt",
+       "//components/pref_registry",
+       "//components/tab_groups",
++      # session_restore.cc scopes its four Show() calls with
++      # views::ScopedForegroundOrigin. enable_session_service is !is_android,
++      # so this code only exists on platforms that build views.
++      "//ui/views",
+     ]
+ 
+     if (is_mac) {
+diff --git a/chrome/browser/sessions/session_restore.cc b/chrome/browser/sessions/session_restore.cc
+index 684340e2..319647fb 100644
+--- a/chrome/browser/sessions/session_restore.cc
++++ b/chrome/browser/sessions/session_restore.cc
+@@ -117,6 +117,7 @@
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
++#include "ui/views/widget/browser_cli_foreground_origin.h"
+ 
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "ash/constants/ash_features.h"
+@@ -497,6 +498,8 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+       browser->GetTabStripModel()->ActivateTabAt(
+           0, TabStripUserGestureDetails(
+                  TabStripUserGestureDetails::GestureType::kOther));
++      views::ScopedForegroundOrigin origin_scope(
++          views::ForegroundOrigin::kSessionRestore);
+       browser->GetWindow()->Show();
+     }
+     NotifySessionServiceOfRestoredTabs(browser,
+@@ -559,7 +562,11 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+         startup_tabs_.emplace_back(chrome::ChromeUINewTabURLAsGURL());
+       }
+       AppendURLsToBrowser(browser, startup_tabs_);
+-      browser->GetWindow()->Show();
++      {
++        views::ScopedForegroundOrigin origin_scope(
++            views::ForegroundOrigin::kSessionRestore);
++        browser->GetWindow()->Show();
++      }
+     }
+ 
+     // Remove any tabs that have been deleted.
+@@ -1360,7 +1367,11 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+       return;
+     }
+ 
+-    browser->GetWindow()->Show();
++    {
++      views::ScopedForegroundOrigin origin_scope(
++          views::ForegroundOrigin::kSessionRestore);
++      browser->GetWindow()->Show();
++    }
+     BrowserInitState::From(browser)->set_is_session_restore(false);
+   }
+ 
+@@ -1415,7 +1426,11 @@ class SessionRestoreImpl : public BrowserCollectionObserver {
+       BrowserWindowInterface* new_browser =
+           CreateBrowserWindow(std::move(params));
+       AppendURLsToBrowser(new_browser, startup_tabs_from_last_and_urls_pref);
+-      new_browser->GetWindow()->Show();
++      {
++        views::ScopedForegroundOrigin origin_scope(
++            views::ForegroundOrigin::kSessionRestore);
++        new_browser->GetWindow()->Show();
++      }
+       browser_to_activate = new_browser;
+     }
+     return browser_to_activate;
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 9ca3bc75..6c259396 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -61,6 +61,7 @@
+ #include "ui/views/corewm/tooltip_aura.h"
+ #include "ui/views/views_features.h"
+ #include "ui/views/views_switches.h"
++#include "ui/views/widget/browser_cli_presentation_policy.h"
+ #include "ui/views/widget/browser_cli_presentation_win.h"
+ #include "ui/views/widget/desktop_aura/desktop_drag_drop_client_win.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_cursor_manager.h"
+@@ -307,6 +308,16 @@ void DesktopWindowTreeHostWin::Init(const Widget::InitParams& params) {
+   InitHost();
+   window()->Show();
+ 
++  // Observation only: the implicit content-window show above is not
++  // suppressed and its visibility is not changed. Log it so a managed-mode
++  // runtime trace can attribute this native presentation.
++  if (BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled()) {
++    LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++              << " transition=content-window-shown"
++              << " window_id=" << BrowserCliWindowIdForHwnd(GetHWND())
++              << " reason=init-implicit-show native=win-hwnd";
++  }
++
+   // Stack immediately above its parent so that it does not cover other
+   // root-level windows, with the exception of menus, to allow them to be
+   // displayed on top of other windows.

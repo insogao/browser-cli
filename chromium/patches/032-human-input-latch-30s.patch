@@ -1,0 +1,164 @@
+diff --git a/content/browser/input_ownership/input_ownership_decider.cc b/content/browser/input_ownership/input_ownership_decider.cc
+--- a/content/browser/input_ownership/input_ownership_decider.cc
++++ b/content/browser/input_ownership/input_ownership_decider.cc
+@@ -36,7 +36,13 @@
+ // Every human input event immediately suppresses all debugger input for this
+ // long (refreshed on each human event). The pause is not debounced: as soon as
+ // a human touches the tab, automation must stop changing the page.
+-constexpr base::TimeDelta kHumanInputPause = base::Seconds(1);
++//
++// Patch 032: 30s is a liveness latch, not a one-second grace. If the extension
++// service worker is unresponsive (or its heartbeat never arrives), automation
++// must not re-grab the page after 1s. A responsive trusted extension clears the
++// latch explicitly with a new per-tab kExplicit setOwnership(); window
++// heartbeats/inherited writes never clear it.
++constexpr base::TimeDelta kHumanInputPause = base::Seconds(30);
+ 
+ // Human presence is *reported* at most once per window; this only affects the
+ // reporting counter, never the pause above.
+@@ -520,7 +526,12 @@
+         return result;
+       }
+       // Idempotent replay (same version, same mode): only refresh last_update
+-      // so a replayed setOwnership() also acts as a heartbeat.
++      // so a replayed setOwnership() also acts as a heartbeat. An explicit
++      // per-tab replay is also the trusted acknowledgement that clears the
++      // human latch; an inherited window write must not.
++      if (origin == InputOwnershipOrigin::kExplicit) {
++        human_pause_until_ = base::TimeTicks();
++      }
+       last_update_ = now;
+       stale_ = false;
+       result.result = InputOwnershipWriteResult::kAccepted;
+@@ -533,11 +544,20 @@
+   // change clears the grants (and stale gesture/scope state); a pure version
+   // bump also clears them, because the embedder is re-establishing the whole
+   // target state (design §1.2).
++  const bool explicit_new_state =
++      origin == InputOwnershipOrigin::kExplicit &&
++      (origin_ != InputOwnershipOrigin::kExplicit || version > version_);
+   mode_ = mode;
+   version_ = version;
+   origin_ = origin;
+   ClearDebuggerSessions();
+   ClearAutomationEventWindow();
++  // Only a trusted per-tab explicit write may release the human latch. A
++  // window heartbeat / inherited write must never clear it, otherwise a dead
++  // service worker's periodic snapshot could hand the page back to AI.
++  if (explicit_new_state) {
++    human_pause_until_ = base::TimeTicks();
++  }
+   last_update_ = now;
+   stale_ = false;
+ 
+diff --git a/content/public/browser/input_ownership.h b/content/public/browser/input_ownership.h
+--- a/content/public/browser/input_ownership.h
++++ b/content/public/browser/input_ownership.h
+@@ -257,7 +257,9 @@
+ //    true ("deliver") and no state is read or written.
+ //  - Human input (events without `blink::WebInputEvent::kFromDebugger`) is
+ //    never dropped. The moment a human event is seen it pauses ALL debugger
+-//    input for `kHumanInputPause` (refreshed by every human event).
++//    input for 30s (refreshed by every human event; only a trusted per-tab
++//    explicit setOwnership clears it early). A dead/unresponsive extension
++//    therefore cannot regain input after 1s.
+ //  - The initial mode is kAssist (fail closed): before any mode is set,
+ //    debugger input is dropped because there is no grant.
+ //  - Debugger input is dropped in kHuman mode.
+diff --git a/content/browser/input_ownership/input_ownership_controller_unittest.cc b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+--- a/content/browser/input_ownership/input_ownership_controller_unittest.cc
++++ b/content/browser/input_ownership/input_ownership_controller_unittest.cc
+@@ -624,10 +624,61 @@
+ 
+   // Human input keeps working during the pause.
+   EXPECT_TRUE(HumanKey(Type::kKeyDown, now + base::Milliseconds(500)));
+-  // ... and refreshes the pause: the debugger is still blocked at 1.4s.
+-  EXPECT_FALSE(Mouse(Type::kMouseDown, SessionA(), now + base::Milliseconds(1400)));
+-  // 1s after the last human event (now+500ms+1s) AI input resumes in AI mode.
+-  EXPECT_TRUE(Mouse(Type::kMouseDown, SessionA(), now + base::Milliseconds(1600)));
++  // ... and refreshes the 30s latch: the debugger is still blocked at 29s.
++  EXPECT_FALSE(Mouse(Type::kMouseDown, SessionA(), now + base::Seconds(29)));
++  // 30s after the last human event (now+500ms+30s) AI input resumes in AI mode.
++  EXPECT_TRUE(Mouse(Type::kMouseDown, SessionA(),
++                    now + base::Seconds(30) + base::Milliseconds(600)));
++}
++
++// Patch 032: a dead/unresponsive extension must not regain input after 1s.
++// The 30s latch can only be released early by a trusted per-tab explicit write;
++// inherited window snapshots never release it.
++TEST_F(InputOwnershipDeciderTest, ExplicitUpdateClearsHumanLatchInheritedDoesNot) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAi, 1,
++                                  InputOwnershipOrigin::kInherited, now)
++                .result);
++  EXPECT_TRUE(HumanMouse(Type::kMouseMove, now));
++  EXPECT_TRUE(decider_.IsDebuggerInputPaused(now + base::Seconds(2)));
++
++  // A window snapshot arriving while the latch is active must not clear it.
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAi, 2,
++                                  InputOwnershipOrigin::kInherited,
++                                  now + base::Seconds(2))
++                .result);
++  EXPECT_TRUE(decider_.IsDebuggerInputPaused(now + base::Seconds(2)));
++
++  // A trusted per-tab explicit write does release it.
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAi, 1,
++                                  InputOwnershipOrigin::kExplicit,
++                                  now + base::Seconds(3))
++                .result);
++  EXPECT_FALSE(decider_.IsDebuggerInputPaused(now + base::Seconds(3)));
++}
++
++// An explicit idempotent write (same version/mode) is the trusted
++// acknowledgement that releases the human latch without a version bump.
++TEST_F(InputOwnershipDeciderTest, ExplicitIdempotentWriteClearsHumanLatch) {
++  EnableFeature();
++  const base::TimeTicks now = T0();
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1,
++                                  InputOwnershipOrigin::kExplicit, now)
++                .result);
++  EXPECT_TRUE(HumanMouse(Type::kMouseMove, now));
++  EXPECT_TRUE(decider_.IsDebuggerInputPaused(now + base::Seconds(2)));
++  ASSERT_EQ(InputOwnershipWriteResult::kAccepted,
++            decider_.SetOwnership(InputOwnershipMode::kAssist, 1,
++                                  InputOwnershipOrigin::kExplicit,
++                                  now + base::Seconds(2))
++                .result);
++  EXPECT_FALSE(decider_.IsDebuggerInputPaused(now + base::Seconds(2)));
++  EXPECT_EQ(1u, decider_.snapshot().version);
+ }
+ 
+ // The pause also gates ASSIST grants, and when it expires the mode decides
+@@ -636,13 +687,13 @@
+   EnableFeature();
+   const base::TimeTicks now = T0();
+   decider_.SetModeForTesting(InputOwnershipMode::kAssist);
+-  decider_.GrantDebuggerInputForTesting(SessionA(), 5, base::Seconds(10), now);
++  decider_.GrantDebuggerInputForTesting(SessionA(), 5, base::Seconds(60), now);
+ 
+   EXPECT_TRUE(HumanMouse(Type::kMouseMove, now));
+   EXPECT_FALSE(Mouse(Type::kMouseDown, SessionA(), now + base::Milliseconds(1)));
+   EXPECT_EQ(5, Remaining(SessionA()));
+ 
+-  const base::TimeTicks after_pause = now + base::Milliseconds(1100);
++  const base::TimeTicks after_pause = now + base::Seconds(31);
+   EXPECT_FALSE(decider_.IsDebuggerInputPaused(after_pause));
+   EXPECT_TRUE(Mouse(Type::kMouseDown, SessionA(), after_pause));
+   EXPECT_EQ(4, Remaining(SessionA()));
+@@ -692,9 +743,9 @@
+   EXPECT_TRUE(HumanMouse(Type::kMouseMove, now));
+   EXPECT_FALSE(decider_.ShouldDeliverDebuggerCommand(
+       SessionA(), Kind::kTap, now + base::Milliseconds(1)));
+-  // ... and the block expires with the human pause.
++  // ... and the block expires with the 30s human latch.
+   EXPECT_TRUE(decider_.ShouldDeliverDebuggerCommand(
+-      SessionA(), Kind::kTap, now + base::Milliseconds(1100)));
++      SessionA(), Kind::kTap, now + base::Seconds(31)));
+ }
+ 
+ // Every supported command kind is accepted in ASSIST and costs exactly one unit.

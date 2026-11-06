@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>bg-probe</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #101010; color: #e8e8e8;
+               font: 14px/1.5 Consolas, monospace; }
+  #wrap { padding: 10px; }
+  #raf, #timer { font-size: 16px; }
+  #c2d { border: 1px solid #444; display: block; }
+  #gl  { border: 1px solid #444; display: block; }
+  /* The top-left 24x24 block encodes the frame counter as a solid colour so the
+     screenshot can be matched against the DOM frame number without OCR. */
+  #marker { width: 24px; height: 24px; display: block; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="idline">id=?</div>
+  <div id="raf">raf=0</div>
+  <div id="timer">timer=0</div>
+  <div id="vis">vis=?</div>
+  <div id="marker"></div>
+  <canvas id="c2d" width="320" height="120"></canvas>
+  <canvas id="gl" width="320" height="120"></canvas>
+</div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const probeId = q.get('id') || 'x';
+
+  const el = {
+    id: document.getElementById('idline'),
+    raf: document.getElementById('raf'),
+    timer: document.getElementById('timer'),
+    vis: document.getElementById('vis'),
+    marker: document.getElementById('marker'),
+    c2d: document.getElementById('c2d'),
+  };
+  const ctx2d = el.c2d.getContext('2d');
+
+  // ---- WebGL -------------------------------------------------------------
+  const gl = (() => {
+    const c = document.getElementById('gl');
+    const g = c.getContext('webgl2') || c.getContext('webgl');
+    if (!g) return null;
+    const vs = g.createShader(g.VERTEX_SHADER);
+    g.shaderSource(vs, 'attribute vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }');
+    g.compileShader(vs);
+    const fs = g.createShader(g.FRAGMENT_SHADER);
+    // Colour is a uniform so each frame visibly differs.
+    g.shaderSource(fs, 'precision mediump float; uniform vec3 u; void main(){ gl_FragColor = vec4(u,1.); }');
+    g.compileShader(fs);
+    const prog = g.createProgram();
+    g.attachShader(prog, vs); g.attachShader(prog, fs); g.linkProgram(prog);
+    g.useProgram(prog);
+    const buf = g.createBuffer();
+    g.bindBuffer(g.ARRAY_BUFFER, buf);
+    g.bufferData(g.ARRAY_BUFFER, new Float32Array([-0.9,-0.9, 0.9,-0.9, 0.0, 0.9]), g.STATIC_DRAW);
+    const loc = g.getAttribLocation(prog, 'p');
+    g.enableVertexAttribArray(loc);
+    g.vertexAttribPointer(loc, 2, g.FLOAT, false, 0, 0);
+    return { g, u: g.getUniformLocation(prog, 'u') };
+  })();
+
+  // ---- state -------------------------------------------------------------
+  let rafCount = 0;
+  let timerCount = 0;
+  let lastBump = 0;
+  let lastRafTs = 0;
+
+  // Frame counter encoded as a colour: R = low byte, G = high byte, B = 255.
+  function markerColour(n) {
+    return [n & 0xff, (n >> 8) & 0xff, 255];
+  }
+
+  function paint() {
+    const [r, g, b] = markerColour(rafCount);
+    el.marker.style.background = `rgb(${r},${g},${b})`;
+    el.raf.textContent = `raf=${rafCount} at=${Math.round(lastRafTs)}`;
+    el.timer.textContent = `timer=${timerCount}`;
+    el.vis.textContent = `vis=${document.visibilityState} focus=${document.hasFocus()}`;
+
+    // Canvas 2D: a bar whose width follows the counter, plus the counter drawn
+    // as a stripe so a stale frame is obvious.
+    ctx2d.fillStyle = '#101010';
+    ctx2d.fillRect(0, 0, 320, 120);
+    ctx2d.fillStyle = `rgb(${r},${g},${b})`;
+    ctx2d.fillRect(0, 0, 320, 24);
+    ctx2d.fillStyle = '#2fa8ff';
+    ctx2d.fillRect(0, 40, ((rafCount * 7) % 320), 40);
+    ctx2d.fillStyle = '#e8e8e8';
+    ctx2d.font = '20px monospace';
+    ctx2d.fillText(String(rafCount), 8, 105);
+
+    if (gl) {
+      gl.g.setClearColor ? null : null;
+      gl.g.uniform3f(gl.u, r / 255, g / 255, 1.0);
+      gl.g.viewport(0, 0, 320, 120);
+      gl.g.clearColor(r / 255, g / 255, 1.0, 1.0);
+      gl.g.clear(gl.g.COLOR_BUFFER_BIT);
+      gl.g.drawArrays(gl.g.TRIANGLES, 0, 3);
+    }
+  }
+
+  function tick(ts) {
+    rafCount += 1;
+    lastRafTs = ts || performance.now();
+    paint();
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  setInterval(() => { timerCount += 1; paint(); }, 100);
+
+  document.addEventListener('visibilitychange', paint);
+
+  // ---- probe API ---------------------------------------------------------
+  window.__probe = () => {
+    const px = ctx2d.getImageData(2, 3, 1, 1).data;   // marker stripe in canvas
+    let glPx = null;
+    if (gl) {
+      const b = new Uint8Array(4);
+      gl.g.readPixels(2, 117, 1, 1, gl.g.RGBA, gl.g.UNSIGNED_BYTE, b);
+      glPx = Array.from(b);
+    }
+    const mr = el.marker.getBoundingClientRect();
+    return {
+      id: probeId,
+      markerRect: { x: mr.x, y: mr.y, w: mr.width, h: mr.height },
+      dpr: window.devicePixelRatio || 1,
+      rafCount,
+      timerCount,
+      lastRafTs: Math.round(lastRafTs),
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+      canvasMarker: Array.from(px),
+      webglPixel: glPx,
+      title: document.title,
+    };
+  };
+
+  // Force a paint from JS without waiting for the next rAF, so a caller can test
+  // "explicit update" separately from the frame pipeline.
+  window.__bump = (n = 1) => {
+    rafCount += n;
+    lastBump += n;
+    paint();
+    return rafCount;
+  };
+
+  document.title = 'bg-probe-' + probeId;
+  el.id.textContent = 'id=' + probeId;
+  paint();
+})();
+</script>
+</body>
+</html>

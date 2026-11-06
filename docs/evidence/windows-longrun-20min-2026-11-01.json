@@ -1,0 +1,1042 @@
+{
+  "tool": "browsercli-longrun-stability-gate",
+  "verdict": "FAIL",
+  "created_at": "2026-11-01T08:34:58.128+00:00",
+  "build": "WinDev (component development build)",
+  "chrome_mtime": "2026-10-27T00:11:56+08:00",
+  "chrome_size": 1755136,
+  "platform": "win32",
+  "cpu_count": 32,
+  "total_memory": 34024747008,
+  "screen": {
+    "width": 2560,
+    "height": 1440
+  },
+  "timeline": {
+    "started_at": 1793522115.6046937,
+    "ended_at": 1793523318.312337,
+    "duration_s": 1202.708,
+    "requested_duration_s": 1200.0,
+    "setup_duration_s": 17.476
+  },
+  "config": {
+    "duration_s": 1200.0,
+    "sample_interval_s": 15.0,
+    "windows": 8,
+    "ownership_enabled": true,
+    "freshness": "bump marker + capture; repeated only on normal w1/w2",
+    "anti_cheat": [
+      "no periodic page reload",
+      "no scheduled page/window close",
+      "no occlusion/backgrounding disable flags",
+      "managed windows are not periodically screenshotted",
+      "no --no-sandbox / --headless / --in-process-gpu"
+    ]
+  },
+  "windows": [
+    {
+      "window": "w1",
+      "session": "normal",
+      "kind": "text",
+      "native_initial": {
+        "visible": true,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": true,
+        "iconic": false
+      },
+      "occluded_final": false,
+      "probe_samples": 81,
+      "paint_stalls": 0,
+      "dead": false,
+      "dead_elapsed_s": null,
+      "dead_reason": null,
+      "crash_event": null,
+      "screenshots": {
+        "count": 22,
+        "ok": 22,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "periodic-1167",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 0,
+            "error": null,
+            "at": "2026-11-01T08:54:43.002+00:00"
+          },
+          {
+            "phase": "final",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 0,
+            "error": null,
+            "at": "2026-11-01T08:55:15.672+00:00"
+          }
+        ]
+      },
+      "native_events": []
+    },
+    {
+      "window": "w2",
+      "session": "normal",
+      "kind": "canvas",
+      "native_initial": {
+        "visible": true,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": true,
+        "iconic": false
+      },
+      "occluded_final": false,
+      "probe_samples": 81,
+      "paint_stalls": 0,
+      "dead": false,
+      "dead_elapsed_s": null,
+      "dead_reason": null,
+      "crash_event": null,
+      "screenshots": {
+        "count": 12,
+        "ok": 12,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "periodic-1091",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 4,
+            "error": null,
+            "at": "2026-11-01T08:53:27.147+00:00"
+          },
+          {
+            "phase": "final",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 4,
+            "error": null,
+            "at": "2026-11-01T08:55:15.963+00:00"
+          }
+        ]
+      },
+      "native_events": []
+    },
+    {
+      "window": "w3",
+      "session": "normal",
+      "kind": "iframe",
+      "native_initial": {
+        "visible": true,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": true,
+        "iconic": false
+      },
+      "occluded_final": true,
+      "probe_samples": 81,
+      "paint_stalls": 1,
+      "dead": false,
+      "dead_elapsed_s": null,
+      "dead_reason": null,
+      "crash_event": null,
+      "screenshots": {
+        "count": 2,
+        "ok": 2,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "baseline",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 0,
+            "error": null,
+            "at": "2026-11-01T08:35:16.299+00:00"
+          },
+          {
+            "phase": "final",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 1,
+            "error": null,
+            "at": "2026-11-01T08:55:16.336+00:00"
+          }
+        ]
+      },
+      "native_events": []
+    },
+    {
+      "window": "w4",
+      "session": "normal",
+      "kind": "webgl",
+      "native_initial": {
+        "visible": true,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": true,
+        "iconic": false
+      },
+      "occluded_final": true,
+      "probe_samples": 81,
+      "paint_stalls": 20,
+      "dead": false,
+      "dead_elapsed_s": null,
+      "dead_reason": null,
+      "crash_event": null,
+      "screenshots": {
+        "count": 3,
+        "ok": 3,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "occluded-check",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 5,
+            "error": null,
+            "at": "2026-11-01T08:50:15.657+00:00"
+          },
+          {
+            "phase": "final",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 5,
+            "error": null,
+            "at": "2026-11-01T08:55:16.673+00:00"
+          }
+        ]
+      },
+      "native_events": [
+        {
+          "elapsed_s": 32.358,
+          "action": "occlude-by-w2",
+          "presented_window": null,
+          "producer": null,
+          "visible": true
+        }
+      ]
+    },
+    {
+      "window": "w5",
+      "session": "agent",
+      "kind": "extension",
+      "native_initial": {
+        "visible": false,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": false,
+        "iconic": false
+      },
+      "occluded_final": true,
+      "probe_samples": 21,
+      "paint_stalls": 0,
+      "dead": true,
+      "dead_elapsed_s": 323.592,
+      "dead_reason": "target-crashed",
+      "crash_event": {
+        "at": "2026-11-01T08:40:39.196+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      },
+      "screenshots": {
+        "count": 2,
+        "ok": 1,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "after-human-show",
+            "ok": true,
+            "fresh": true,
+            "non_blank": true,
+            "frame_delta": 4,
+            "error": null,
+            "at": "2026-11-01T08:35:57.038+00:00"
+          },
+          {
+            "phase": "final",
+            "ok": false,
+            "fresh": null,
+            "non_blank": null,
+            "frame_delta": null,
+            "error": "target dead: target-crashed",
+            "at": "2026-11-01T08:55:17.027+00:00"
+          }
+        ]
+      },
+      "native_events": [
+        {
+          "elapsed_s": 41.432,
+          "action": "human-user-explicit-show",
+          "presented_window": "w5",
+          "producer": true,
+          "visible": true
+        },
+        {
+          "elapsed_s": 241.011,
+          "action": "hide-return-to-managed",
+          "presented_window": null,
+          "producer": null,
+          "visible": false
+        }
+      ]
+    },
+    {
+      "window": "w6",
+      "session": "agent",
+      "kind": "text",
+      "native_initial": {
+        "visible": false,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": false,
+        "iconic": false
+      },
+      "occluded_final": true,
+      "probe_samples": 4,
+      "paint_stalls": 0,
+      "dead": true,
+      "dead_elapsed_s": 84.796,
+      "dead_reason": "target-crashed",
+      "crash_event": {
+        "at": "2026-11-01T08:36:40.400+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      },
+      "screenshots": {
+        "count": 1,
+        "ok": 0,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "final",
+            "ok": false,
+            "fresh": null,
+            "non_blank": null,
+            "frame_delta": null,
+            "error": "target dead: target-crashed",
+            "at": "2026-11-01T08:55:17.027+00:00"
+          }
+        ]
+      },
+      "native_events": []
+    },
+    {
+      "window": "w7",
+      "session": "agent",
+      "kind": "canvas",
+      "native_initial": {
+        "visible": false,
+        "iconic": true
+      },
+      "native_final": {
+        "visible": false,
+        "iconic": true
+      },
+      "occluded_final": false,
+      "probe_samples": 4,
+      "paint_stalls": 0,
+      "dead": true,
+      "dead_elapsed_s": 84.796,
+      "dead_reason": "target-crashed",
+      "crash_event": {
+        "at": "2026-11-01T08:36:40.400+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      },
+      "screenshots": {
+        "count": 1,
+        "ok": 0,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "final",
+            "ok": false,
+            "fresh": null,
+            "non_blank": null,
+            "frame_delta": null,
+            "error": "target dead: target-crashed",
+            "at": "2026-11-01T08:55:17.027+00:00"
+          }
+        ]
+      },
+      "native_events": [
+        {
+          "elapsed_s": 6.604,
+          "action": "minimize",
+          "presented_window": null,
+          "producer": null,
+          "visible": false
+        }
+      ]
+    },
+    {
+      "window": "w8",
+      "session": "agent",
+      "kind": "webgl",
+      "native_initial": {
+        "visible": false,
+        "iconic": false
+      },
+      "native_final": {
+        "visible": false,
+        "iconic": false
+      },
+      "occluded_final": true,
+      "probe_samples": 4,
+      "paint_stalls": 0,
+      "dead": true,
+      "dead_elapsed_s": 84.796,
+      "dead_reason": "target-crashed",
+      "crash_event": {
+        "at": "2026-11-01T08:36:40.400+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      },
+      "screenshots": {
+        "count": 1,
+        "ok": 0,
+        "failed": 0,
+        "last": [
+          {
+            "phase": "final",
+            "ok": false,
+            "fresh": null,
+            "non_blank": null,
+            "frame_delta": null,
+            "error": "target dead: target-crashed",
+            "at": "2026-11-01T08:55:17.027+00:00"
+          }
+        ]
+      },
+      "native_events": []
+    }
+  ],
+  "crash_counts": {
+    "presentation-buffer-dcheck": 4,
+    "gpu-log-crash": 0,
+    "renderer-log-crash": 0,
+    "fatal-log": 0,
+    "target-crashed": 4,
+    "target-destroyed": 0,
+    "probe-failure": 0,
+    "pid-gpu-disappeared": 0,
+    "pid-network-disappeared": 0,
+    "pid-renderer-disappeared": 3,
+    "pid-extension-renderer-disappeared": 1,
+    "browser-exit": 0
+  },
+  "crash_evidence": [
+    {
+      "window": "w5",
+      "session": "agent",
+      "kind": "extension",
+      "basis": "target-crashed",
+      "at": "2026-11-01T08:40:39.196+00:00",
+      "elapsed_s": 323.592,
+      "detail": {
+        "at": "2026-11-01T08:40:39.196+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      }
+    },
+    {
+      "window": "w6",
+      "session": "agent",
+      "kind": "text",
+      "basis": "target-crashed",
+      "at": "2026-11-01T08:36:40.400+00:00",
+      "elapsed_s": 84.796,
+      "detail": {
+        "at": "2026-11-01T08:36:40.400+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      }
+    },
+    {
+      "window": "w7",
+      "session": "agent",
+      "kind": "canvas",
+      "basis": "target-crashed",
+      "at": "2026-11-01T08:36:40.400+00:00",
+      "elapsed_s": 84.796,
+      "detail": {
+        "at": "2026-11-01T08:36:40.400+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      }
+    },
+    {
+      "window": "w8",
+      "session": "agent",
+      "kind": "webgl",
+      "basis": "target-crashed",
+      "at": "2026-11-01T08:36:40.400+00:00",
+      "elapsed_s": 84.796,
+      "detail": {
+        "at": "2026-11-01T08:36:40.400+00:00",
+        "method": "Inspector.targetCrashed",
+        "detail": "{}"
+      }
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "chrome-log",
+      "at": "2026-11-01T08:36:40.093+00:00",
+      "elapsed_s": 60.095,
+      "detail": "[24980:32396:1101/163609.710:FATAL:third_party\\blink\\renderer\\platform\\widget\\compositing\\layer_tree_view.cc:554] DCHECK failed: callbacks.size() <= cc::PresentationTimeCallbackBuffer::kMaxBufferSize (61 vs. 60). "
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "chrome-log",
+      "at": "2026-11-01T08:36:40.093+00:00",
+      "elapsed_s": 60.095,
+      "detail": "[20680:28904:1101/163609.710:FATAL:third_party\\blink\\renderer\\platform\\widget\\compositing\\layer_tree_view.cc:554] DCHECK failed: callbacks.size() <= cc::PresentationTimeCallbackBuffer::kMaxBufferSize (61 vs. 60). "
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "chrome-log",
+      "at": "2026-11-01T08:36:40.102+00:00",
+      "elapsed_s": 60.095,
+      "detail": "[37412:18520:1101/163615.037:FATAL:third_party\\blink\\renderer\\platform\\widget\\compositing\\layer_tree_view.cc:554] DCHECK failed: callbacks.size() <= cc::PresentationTimeCallbackBuffer::kMaxBufferSize (61 vs. 60). "
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "chrome-log",
+      "at": "2026-11-01T08:40:38.945+00:00",
+      "elapsed_s": 315.064,
+      "detail": "[26296:1396:1101/164018.006:FATAL:third_party\\blink\\renderer\\platform\\widget\\compositing\\layer_tree_view.cc:554] DCHECK failed: callbacks.size() <= cc::PresentationTimeCallbackBuffer::kMaxBufferSize (61 vs. 60). "
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "pid-disappeared",
+      "at": "2026-11-01T08:36:40.050+00:00",
+      "elapsed_s": 60.095,
+      "detail": {
+        "at": "2026-11-01T08:36:40.050+00:00",
+        "elapsed_s": 60.095,
+        "session": "agent",
+        "kind": "pid-disappeared",
+        "pid": 37412,
+        "process_type": "renderer",
+        "first_seen_s": 1.359,
+        "last_seen_s": 45.088,
+        "lifetime_s": 43.729,
+        "transient": false,
+        "expected": false
+      }
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "pid-disappeared",
+      "at": "2026-11-01T08:36:40.050+00:00",
+      "elapsed_s": 60.095,
+      "detail": {
+        "at": "2026-11-01T08:36:40.050+00:00",
+        "elapsed_s": 60.095,
+        "session": "agent",
+        "kind": "pid-disappeared",
+        "pid": 24980,
+        "process_type": "renderer",
+        "first_seen_s": 1.359,
+        "last_seen_s": 45.088,
+        "lifetime_s": 43.729,
+        "transient": false,
+        "expected": false
+      }
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "pid-disappeared",
+      "at": "2026-11-01T08:36:40.050+00:00",
+      "elapsed_s": 60.095,
+      "detail": {
+        "at": "2026-11-01T08:36:40.050+00:00",
+        "elapsed_s": 60.095,
+        "session": "agent",
+        "kind": "pid-disappeared",
+        "pid": 20680,
+        "process_type": "renderer",
+        "first_seen_s": 1.359,
+        "last_seen_s": 45.088,
+        "lifetime_s": 43.729,
+        "transient": false,
+        "expected": false
+      }
+    },
+    {
+      "window": null,
+      "session": "agent",
+      "basis": "pid-disappeared",
+      "at": "2026-11-01T08:40:38.937+00:00",
+      "elapsed_s": 315.064,
+      "detail": {
+        "at": "2026-11-01T08:40:38.937+00:00",
+        "elapsed_s": 315.064,
+        "session": "agent",
+        "kind": "pid-disappeared",
+        "pid": 26296,
+        "process_type": "extension-renderer",
+        "first_seen_s": 1.359,
+        "last_seen_s": 300.049,
+        "lifetime_s": 298.69,
+        "transient": false,
+        "expected": false
+      }
+    }
+  ],
+  "scenarios": {
+    "dynamic normal page": {
+      "status": "PASS",
+      "window": "w1"
+    },
+    "canvas": {
+      "status": "PASS",
+      "window": "w2"
+    },
+    "webgl": {
+      "status": "FAIL",
+      "windows": [
+        "w4",
+        "w8"
+      ]
+    },
+    "oopif/iframe": {
+      "status": "PASS",
+      "window": "w3"
+    },
+    "extension page": {
+      "status": "FAIL",
+      "window": "w5"
+    },
+    "normal/agent modes concurrent": {
+      "status": "FAIL"
+    },
+    "normal/agent presentation transition": {
+      "status": "PASS",
+      "human": {
+        "at": "2026-11-01T08:35:57.036+00:00",
+        "elapsed_s": 41.432,
+        "action": "human-user-explicit-show",
+        "presented_window": "w5",
+        "state": {
+          "hwnd": 7866272,
+          "visible": true,
+          "iconic": false,
+          "rect": [
+            10,
+            10,
+            1265,
+            1372
+          ],
+          "foreground": false
+        },
+        "occlusion": {
+          "known": true,
+          "fully_occluded": true,
+          "covered_by": [
+            {
+              "hwnd": 1775688,
+              "title": "BrowserPilot - 文件资源管理器"
+            }
+          ],
+          "windows_above": 35
+        },
+        "producer": true,
+        "args": [
+          "D:/c/src/out/WinDev/chrome.exe",
+          "<temp-profile>",
+          "--browser-cli-user-explicit-show"
+        ],
+        "visible_windows_after": [
+          {
+            "window": "w5",
+            "state": {
+              "hwnd": 7866272,
+              "visible": true,
+              "iconic": false,
+              "rect": [
+                10,
+                10,
+                1265,
+                1372
+              ],
+              "foreground": false
+            }
+          }
+        ]
+      },
+      "hide": {
+        "at": "2026-11-01T08:39:16.615+00:00",
+        "elapsed_s": 241.011,
+        "action": "hide-return-to-managed",
+        "state": {
+          "hwnd": 7866272,
+          "visible": false,
+          "iconic": false,
+          "rect": [
+            10,
+            10,
+            1265,
+            1372
+          ],
+          "foreground": false
+        },
+        "occlusion": {
+          "known": true,
+          "fully_occluded": true,
+          "covered_by": [
+            {
+              "hwnd": 1775688,
+              "title": "BrowserPilot - 文件资源管理器"
+            }
+          ],
+          "windows_above": 39
+        }
+      }
+    },
+    "long hidden window": {
+      "status": "FAIL",
+      "window": "w6"
+    },
+    "long minimized window": {
+      "status": "FAIL",
+      "window": "w7"
+    },
+    "occluded window": {
+      "status": "PASS",
+      "window": "w4"
+    },
+    "human/presentation transition": {
+      "status": "PASS",
+      "presented_window": "w5"
+    },
+    "human/assist/ai ownership": {
+      "status": "PASS"
+    },
+    "repeated screenshot freshness": {
+      "status": "PASS",
+      "windows": {
+        "w1": 22,
+        "w2": 12
+      }
+    },
+    "sw restart": {
+      "status": "PASS",
+      "detail": {
+        "attempted": true,
+        "ok": true,
+        "basis": "new-worker-reply",
+        "closed_target_ids": [
+          "57BE839B2C795171F5F04A6C2E1C4EEB"
+        ],
+        "before_targets": [
+          {
+            "targetId": "57BE839B2C795171F5F04A6C2E1C4EEB",
+            "type": "service_worker",
+            "title": "Service Worker chrome-extension://nnollghpaggbcdkkgoieneffnlijinio/sw.js",
+            "url": "chrome-extension://nnollghpaggbcdkkgoieneffnlijinio/sw.js",
+            "attached": true,
+            "canAccessOpener": false,
+            "browserContextId": "00A8CE8EEB5D5787DEC18942A478838A"
+          }
+        ],
+        "after_targets": [
+          {
+            "targetId": "57BE839B2C795171F5F04A6C2E1C4EEB",
+            "type": "service_worker",
+            "title": "Service Worker chrome-extension://nnollghpaggbcdkkgoieneffnlijinio/sw.js",
+            "url": "chrome-extension://nnollghpaggbcdkkgoieneffnlijinio/sw.js",
+            "attached": true,
+            "canAccessOpener": false,
+            "browserContextId": "00A8CE8EEB5D5787DEC18942A478838A"
+          }
+        ],
+        "new_target_ids": [],
+        "before_reply": {
+          "ok": true,
+          "n": 15,
+          "at": 1793522123247,
+          "workerStartedAt": 1793522100340,
+          "workerAgeMs": 22907,
+          "senderId": "nnollghpaggbcdkkgoieneffnlijinio"
+        },
+        "after_reply": {
+          "ok": true,
+          "n": 16,
+          "at": 1793522124252,
+          "workerStartedAt": 1793522124251,
+          "workerAgeMs": 1,
+          "senderId": "nnollghpaggbcdkkgoieneffnlijinio"
+        },
+        "page_probe": {
+          "id": "w5",
+          "mode": "extension",
+          "paintCount": 35,
+          "rafCount": 18,
+          "tickCount": 16,
+          "replyErrors": 0,
+          "lastReply": {
+            "ok": true,
+            "n": 16,
+            "at": 1793522124252,
+            "workerStartedAt": 1793522124251,
+            "workerAgeMs": 1,
+            "senderId": "nnollghpaggbcdkkgoieneffnlijinio"
+          },
+          "frozen": false,
+          "lastPaintAt": 1793522124347,
+          "visibilityState": "visible",
+          "hasFocus": true,
+          "markerRect": {
+            "x": 12,
+            "y": 57.1875,
+            "w": 24,
+            "h": 24
+          },
+          "canvasRect": {
+            "x": 12,
+            "y": 89.1875,
+            "w": 322,
+            "h": 122
+          },
+          "dpr": 1,
+          "canvasMarker": [
+            35,
+            0,
+            255,
+            255
+          ],
+          "title": "lr-w5-extension"
+        }
+      }
+    },
+    "host restart": {
+      "status": "BLOCKED",
+      "reason": "no BrowserPilot Native Messaging Host process in this gate"
+    },
+    "renderer/gpu/network crash counts": {
+      "status": "FAIL",
+      "counts": {
+        "presentation-buffer-dcheck": 4,
+        "gpu-log-crash": 0,
+        "renderer-log-crash": 0,
+        "fatal-log": 0,
+        "target-crashed": 4,
+        "target-destroyed": 0,
+        "probe-failure": 0,
+        "pid-gpu-disappeared": 0,
+        "pid-network-disappeared": 0,
+        "pid-renderer-disappeared": 3,
+        "pid-extension-renderer-disappeared": 1,
+        "browser-exit": 0
+      }
+    },
+    "resource trends": {
+      "status": "PASS",
+      "findings": [
+        {
+          "severity": "info",
+          "metric": "private",
+          "message": "private start=1822343168 peak=946896896",
+          "start": 1822343168,
+          "peak": 946896896
+        },
+        {
+          "severity": "info",
+          "metric": "handles",
+          "message": "handles start=14973 peak=9827",
+          "start": 14973,
+          "peak": 9827
+        }
+      ]
+    }
+  },
+  "failures": [
+    "agent: presentation-buffer DCHECK at 60.1s",
+    "agent: presentation-buffer DCHECK at 60.1s",
+    "agent: presentation-buffer DCHECK at 60.1s",
+    "agent: presentation-buffer DCHECK at 315.1s",
+    "agent/w5 died at 323.6s (target-crashed)",
+    "agent/w6 died at 84.8s (target-crashed)",
+    "agent/w7 died at 84.8s (target-crashed)",
+    "agent/w8 died at 84.8s (target-crashed)"
+  ],
+  "blockers": [
+    "WinRelease chrome.exe is absent; this run is a WinDev baseline, not a release-build gate",
+    "Native-host restart not exercised: this gate has no BrowserPilot Native Messaging Host process; only the extension service worker was restarted/verified"
+  ],
+  "resources": {
+    "private": {
+      "start": 1822343168,
+      "end": 1506222080,
+      "peak": 1827196928,
+      "peak_at_s": 45.088
+    },
+    "rss": {
+      "start": 5163728896,
+      "end": 4261138432,
+      "peak": 5218648064,
+      "peak_at_s": 45.088
+    },
+    "handles": {
+      "start": 14973,
+      "end": 10786,
+      "peak": 15815,
+      "peak_at_s": 45.088
+    },
+    "process_count": {
+      "start": 24,
+      "end": 20,
+      "peak": 24,
+      "peak_at_s": 1.359
+    },
+    "gpu_private": {
+      "start": 371769344,
+      "end": 293609472,
+      "peak": 371769344,
+      "peak_at_s": 1.359
+    },
+    "network_private": {
+      "start": 97792000,
+      "end": 93110272,
+      "peak": 97792000,
+      "peak_at_s": 1.359
+    },
+    "cpu_seconds": {
+      "start": 27,
+      "end": 583,
+      "peak": 583,
+      "peak_at_s": 1185.243
+    }
+  },
+  "resource_findings": [
+    {
+      "severity": "info",
+      "metric": "private",
+      "message": "private start=1822343168 peak=946896896",
+      "start": 1822343168,
+      "peak": 946896896
+    },
+    {
+      "severity": "info",
+      "metric": "handles",
+      "message": "handles start=14973 peak=9827",
+      "start": 14973,
+      "peak": 9827
+    }
+  ],
+  "sw_restart": {
+    "attempted": true,
+    "ok": true,
+    "basis": "new-worker-reply",
+    "closed_target_ids": [
+      "57BE839B2C795171F5F04A6C2E1C4EEB"
+    ],
+    "new_target_ids": [],
+    "before_reply": {
+      "ok": true,
+      "n": 15,
+      "at": 1793522123247,
+      "workerStartedAt": 1793522100340,
+      "workerAgeMs": 22907,
+      "senderId": "nnollghpaggbcdkkgoieneffnlijinio"
+    },
+    "after_reply": {
+      "ok": true,
+      "n": 16,
+      "at": 1793522124252,
+      "workerStartedAt": 1793522124251,
+      "workerAgeMs": 1,
+      "senderId": "nnollghpaggbcdkkgoieneffnlijinio"
+    }
+  },
+  "ownership": {
+    "available": true,
+    "attempted": true,
+    "context": {
+      "type": "extension-page",
+      "url": "chrome-extension://nnollghpaggbcdkkgoieneffnlijinio/page.html?id=w5&tick=1000",
+      "target_id": "A906E38DB407A51891310EB3E277FF2A",
+      "probe": {
+        "available": true,
+        "keys": [
+          "onHumanPresence",
+          "beginInputCommand",
+          "endInputCommand",
+          "getOwnership",
+          "grantInput",
+          "heartbeat",
+          "setOwnership",
+          "CommandOutcome",
+          "Mode"
+        ],
+        "hasWindows": true,
+        "hasTabs": true
+      }
+    },
+    "history": [
+      {
+        "elapsed_s": 15.055,
+        "window": "w5",
+        "requested_mode": "human",
+        "requested_version": 1,
+        "accepted": true,
+        "kernel_mode": "human",
+        "kernel_version": 1,
+        "verified_after": true,
+        "reason": null
+      },
+      {
+        "elapsed_s": 25.046,
+        "window": "w5",
+        "requested_mode": "assist",
+        "requested_version": 2,
+        "accepted": true,
+        "kernel_mode": "assist",
+        "kernel_version": 2,
+        "verified_after": true,
+        "reason": null
+      },
+      {
+        "elapsed_s": 35.108,
+        "window": "w5",
+        "requested_mode": "ai",
+        "requested_version": 3,
+        "accepted": true,
+        "kernel_mode": "ai",
+        "kernel_version": 3,
+        "verified_after": true,
+        "reason": null
+      }
+    ]
+  },
+  "event_counts": {
+    "task-start": 13,
+    "visible-layout-reapplied": 1,
+    "native-transition": 4,
+    "sw-restart": 1,
+    "ownership-transition": 6,
+    "pid-disappeared": 4,
+    "unknown": 4,
+    "window-crashed": 4
+  }
+}

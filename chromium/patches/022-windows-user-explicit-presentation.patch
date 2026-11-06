@@ -1,0 +1,205 @@
+diff --git a/chrome/browser/browser_cli/BUILD.gn b/chrome/browser/browser_cli/BUILD.gn
+index 0a42070f..d367c905 100644
+--- a/chrome/browser/browser_cli/BUILD.gn
++++ b/chrome/browser/browser_cli/BUILD.gn
+@@ -142,8 +142,12 @@ if (is_win) {
+       "user_explicit_presentation_win.cc",
+     ]
+     deps = [
++      ":foreground_assist_presentation_win",
+       ":user_explicit_show",
+       "//base",
++      "//chrome/browser/ui/browser_window",
++      "//ui/aura",
++      "//ui/base",
+       "//ui/gfx:native_ui_types",
+       "//ui/views",
+     ]
+diff --git a/chrome/browser/browser_cli/user_explicit_presentation_win.cc b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+index 8de71737..dbca7f6b 100644
+--- a/chrome/browser/browser_cli/user_explicit_presentation_win.cc
++++ b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+@@ -4,28 +4,105 @@
+ 
+ #include "chrome/browser/browser_cli/user_explicit_presentation.h"
+ 
++#include <stdint.h>
++
+ #include "base/command_line.h"
+ #include "base/files/file_path.h"
+ #include "base/logging.h"
++#include "base/memory/raw_ptr.h"
+ #include "base/notreached.h"
++#include "chrome/browser/browser_cli/foreground_assist_presentation.h"
+ #include "chrome/browser/browser_cli/user_explicit_show.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/base/base_window.h"
+ #include "ui/views/widget/browser_cli_presentation_policy.h"
++#include "ui/views/widget/browser_cli_presentation_win.h"
++#include "ui/views/widget/widget.h"
+ 
+ namespace browser_cli {
+ namespace {
+ 
++// The already-existing browser window an explicit `show` reuses. Empty (null
++// widget, id 0) when no eligible window exists; the producer then fails closed
++// instead of creating one.
++struct ReusableWindow {
++  raw_ptr<views::Widget> widget = nullptr;
++  uint64_t window_id = 0;
++  bool user_owned = false;
++};
++
+ // Structured producer log, matching the macOS producer vocabulary. The
+ // presentation policy adds its own BROWSER_CLI_PRESENTATION decision log for
+ // every actual request, so an allow/deny pair can always be correlated.
+ void LogProducerOutcome(const char* result,
+                         const char* reason,
+-                        bool managed_mode) {
++                        bool managed_mode,
++                        uint64_t window_id) {
+   LOG(INFO) << "BROWSER_CLI_USER_EXPLICIT_SHOW stage=producer"
+             << " result=" << result << " reason=" << reason
++            << " window_id=" << window_id
+             << " managed=" << (managed_mode ? "yes" : "no")
+             << " native=win-hwnd";
+ }
+ 
++// Iterates browser windows in activation order (most recently active first).
++// Prefers a window the user already owns. Only top-level browser windows are
++// eligible.
++ReusableWindow FindReusableWindow() {
++  ReusableWindow candidate;
++  GlobalBrowserCollection* collection = GlobalBrowserCollection::GetInstance();
++  if (!collection) {
++    return candidate;
++  }
++  views::BrowserCliPresentationPolicy* policy =
++      views::BrowserCliPresentationPolicy::Get();
++  collection->ForEach(
++      [&candidate, policy](BrowserWindowInterface* browser) {
++        ui::BaseWindow* base_window =
++            browser ? browser->GetWindow() : nullptr;
++        if (!base_window) {
++          return true;
++        }
++        views::Widget* widget = views::Widget::GetWidgetForNativeWindow(
++            base_window->GetNativeWindow());
++        if (!widget || !widget->is_top_level()) {
++          return true;
++        }
++        aura::Window* native_window = widget->GetNativeWindow();
++        aura::WindowTreeHost* host =
++            native_window ? native_window->GetHost() : nullptr;
++        if (!host) {
++          return true;
++        }
++        const uint64_t window_id = views::BrowserCliWindowIdForHwnd(
++            host->GetAcceleratedWidget());
++        if (window_id == 0) {
++          return true;
++        }
++        const bool user_owned = policy->IsUserExplicitOwned(window_id);
++        if (!candidate.widget) {
++          // First eligible window in activation order: the fallback candidate.
++          candidate.widget = widget;
++          candidate.window_id = window_id;
++          candidate.user_owned = user_owned;
++        }
++        if (user_owned) {
++          // Never present some other background window when the user already
++          // owns one; take it and stop iterating.
++          candidate.widget = widget;
++          candidate.window_id = window_id;
++          candidate.user_owned = true;
++          return false;
++        }
++        return true;
++      },
++      BrowserCollection::Order::kActivation);
++  return candidate;
++}
++
+ }  // namespace
+ 
+ bool HandleUserExplicitShowRequest(
+@@ -40,13 +117,17 @@ bool HandleUserExplicitShowRequest(
+   const bool managed_mode =
+       views::BrowserCliPresentationPolicy::Get()->IsManagedModeEnabled();
+ 
+-  // Patch 016 wires the shared policy and the native suppression, but not a
+-  // native presentation path: every plan that would have to touch a window
+-  // fails closed without creating, showing or activating one. The
+-  // reusable-window lookup is therefore intentionally not performed; both
+-  // presenting plans have the same not-implemented outcome.
++  // Only a pure explicit show in managed mode resolves a window: every other
++  // classification (blocked launch arguments, unmanaged stock behavior) must
++  // not touch the window list at all.
++  ReusableWindow reusable;
++  if (managed_mode && request_class == UserExplicitShowRequestClass::kShow) {
++    reusable = FindReusableWindow();
++  }
++
+   switch (PlanUserExplicitShow(request_class, managed_mode,
+-                               /*has_reusable_window=*/false)) {
++                               /*has_reusable_window=*/reusable.widget !=
++                                   nullptr)) {
+     case UserExplicitShowPlan::kNoAction:
+       if (request_class ==
+           UserExplicitShowRequestClass::kBlockedByLaunchArguments) {
+@@ -54,18 +135,47 @@ bool HandleUserExplicitShowRequest(
+         // presentation. The caller continues ordinary command-line processing,
+         // which creates only background-managed windows.
+         LogProducerOutcome("denied", "launch-arguments-not-user-explicit",
+-                           managed_mode);
++                           managed_mode, /*window_id=*/0);
+       } else {
+         // Stock Chromium already presents its own windows; the producer must
+         // not add a duplicate visibility path or a duplicate window.
+-        LogProducerOutcome("noop", "unmanaged-stock-behavior", managed_mode);
++        LogProducerOutcome("noop", "unmanaged-stock-behavior", managed_mode,
++                           /*window_id=*/0);
+       }
+       return false;
+ 
+-    case UserExplicitShowPlan::kPresentExistingWindow:
++    case UserExplicitShowPlan::kPresentExistingWindow: {
++      // The only USER_EXPLICIT presentation on Windows: scope Show/Activate
++      // exactly, so the shared policy grants per-window HUMAN ownership and the
++      // Windows host gate lets these two native calls through.
++      {
++        views::ScopedForegroundOrigin origin_scope(
++            views::ForegroundOrigin::kUserExplicit);
++        reusable.widget->Show();
++        reusable.widget->Activate();
++      }
++      if (reusable.widget->IsVisible()) {
++        // The user now owns this window: cancel the pending assist timeout so
++        // its original deadline can never hide the window later.
++        GetForegroundAssistController()->OnLeaseReleasedByUserTakeover(
++            reusable.window_id);
++        LogProducerOutcome("handled", "existing-window-presented", managed_mode,
++                           reusable.window_id);
++      } else {
++        // The host gate denied the presentation (or the window stayed hidden);
++        // never retry through another native path.
++        LogProducerOutcome("failed", "presentation-denied", managed_mode,
++                           reusable.window_id);
++      }
++      return true;
++    }
++
+     case UserExplicitShowPlan::kCreateWindowThenPresent:
+-      LogProducerOutcome("failed", "windows-gateway-not-implemented",
+-                         managed_mode);
++      // Window creation is patch 023. Fail closed: never fall through to a
++      // native Show() or to ordinary command-line processing that could create
++      // a visible window.
++      LogProducerOutcome("failed", "window-creation-not-implemented",
++                         managed_mode, /*window_id=*/0);
+       return true;
+   }
+ 

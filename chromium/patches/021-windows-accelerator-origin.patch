@@ -1,0 +1,16 @@
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 0f195065..04938462 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -5252,6 +5252,11 @@ const views::View* BrowserView::GetViewByElementId(
+ // BrowserView, ui::AcceleratorTarget overrides:
+ 
+ bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
++  // Keyboard accelerators are user input. Attribute the command they execute so
++  // the presentation policy does not treat a user shortcut as unattributed
++  // automation; the policy still decides every action.
++  views::ScopedForegroundOrigin origin_scope(
++      views::ForegroundOrigin::kUserExplicit);
+   NativeWebKeyboardEvent native_event(accelerator.ToKeyEvent());
+   if (ExclusiveAccessManager::From(browser_)->HandleUserKeyEvent(
+           native_event)) {

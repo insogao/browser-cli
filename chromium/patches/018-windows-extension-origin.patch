@@ -1,0 +1,84 @@
+diff --git a/chrome/browser/extensions/api/tabs/tabs_api.cc b/chrome/browser/extensions/api/tabs/tabs_api.cc
+index e7dceb51..daf52bdc 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -79,7 +79,7 @@
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
+ #include "ui/display/screen.h"
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ #include "ui/views/widget/browser_cli_foreground_origin.h"
+ #endif
+ 
+@@ -998,9 +998,10 @@ ExtensionFunction::ResponseAction WindowsCreateFunction::Run() {
+ 
+   // Browser CLI: attribute the presentation requests this API makes to the
+   // extension origin; the policy denies focus/minimize/re-show of a window the
+-  // user explicitly owns. macOS-only for now: Browser CLI is a macOS product
+-  // and other platforms do not compile ui/views into this target.
+-#if BUILDFLAG(IS_MAC)
++  // user explicitly owns. macOS and Windows both compile the //ui/views
++  // dependency this scope needs (GN adds it under toolkit_views in
++  // chrome/browser/extensions/BUILD.gn), so the scope is not macOS-only.
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   views::ScopedForegroundOrigin origin_scope(
+       views::ForegroundOrigin::kExtension);
+ #endif
+@@ -1568,9 +1569,10 @@ ExtensionFunction::ResponseAction WindowsUpdateFunction::Run() {
+ 
+   // Browser CLI: attribute the presentation requests this API makes to the
+   // extension origin; the policy denies focus/minimize/re-show of a window the
+-  // user explicitly owns. macOS-only for now: Browser CLI is a macOS product
+-  // and other platforms do not compile ui/views into this target.
+-#if BUILDFLAG(IS_MAC)
++  // user explicitly owns. macOS and Windows both compile the //ui/views
++  // dependency this scope needs (GN adds it under toolkit_views in
++  // chrome/browser/extensions/BUILD.gn), so the scope is not macOS-only.
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   views::ScopedForegroundOrigin origin_scope(
+       views::ForegroundOrigin::kExtension);
+ #endif
+@@ -2375,8 +2377,10 @@ ExtensionFunction::ResponseAction TabsCreateFunction::Run() {
+ 
+   BrowserWindowCreateParams create_params(BrowserWindowInterface::TYPE_NORMAL,
+                                           *profile_to_use, user_gesture());
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   // Browser CLI: `chrome.tabs.create` is an extension automation producer.
++  // The capture applies to every platform that compiles the extension origin
++  // dependency (macOS and Windows today).
+   // CreateBrowserWindow() posts its callback to a later task, after this
+   // stack (and any ScopedForegroundOrigin on it) has unwound. Bind the
+   // extension origin by value so OnBrowserWindowCreatedWithOrigin() can
+@@ -2395,7 +2399,7 @@ ExtensionFunction::ResponseAction TabsCreateFunction::Run() {
+   return RespondLater();
+ }
+ 
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ void TabsCreateFunction::OnBrowserWindowCreatedWithOrigin(
+     views::ForegroundOrigin origin,
+     BrowserWindowInterface* browser) {
+diff --git a/chrome/browser/extensions/api/tabs/tabs_api.h b/chrome/browser/extensions/api/tabs/tabs_api.h
+index 3ca9acfa..6a61ce90 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_api.h
++++ b/chrome/browser/extensions/api/tabs/tabs_api.h
+@@ -69,7 +69,7 @@ class IsolatedWebAppUrlInfo;
+ }
+ #endif
+ 
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+ namespace views {
+ enum class ForegroundOrigin;
+ }
+@@ -324,7 +324,7 @@ class TabsCreateFunction : public ExtensionFunction {
+   // Called after a new browser window has been created.
+   void OnBrowserWindowCreated(BrowserWindowInterface* browser);
+ 
+-#if BUILDFLAG(IS_MAC)
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+   // Browser CLI: continuation for the asynchronous window-creation path. The
+   // `origin` is bound by value in Run() and therefore survives the PostTask
+   // inside CreateBrowserWindow(); the scope it establishes covers only this

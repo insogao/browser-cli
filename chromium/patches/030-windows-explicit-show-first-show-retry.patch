@@ -1,0 +1,119 @@
+diff --git a/ui/views/widget/browser_cli_presentation_win.cc b/ui/views/widget/browser_cli_presentation_win.cc
+--- a/ui/views/widget/browser_cli_presentation_win.cc
++++ b/ui/views/widget/browser_cli_presentation_win.cc
+@@ -26,6 +26,35 @@
+   }
+   aura::WindowTreeHost* host = native_window->GetHost();
+   return host ? BrowserCliWindowIdForHwnd(host->GetAcceleratedWidget()) : 0;
++}
++
++// Shows and activates `widget`, and repeats both calls exactly once while the
++// window is still not visible.
++//
++// Windows resolves the first ShowWindow call of a window against STARTUPINFO's
++// wShowWindow when the process was started with STARTF_USESHOWWINDOW (the same
++// rule the SW_HIDE correction in HWNDMessageHandler::Show documents): a request
++// whose state differs from that startup value is silently ignored and leaves
++// the HWND hidden. A browser process started by a hidden-console host (node's
++// windowsHide, a Windows service, a CI runner) therefore ignores the first
++// Show() of a managed window whose creation-time show the policy denied. The
++// ignored call is not an error; the next Show() is a regular ShowWindow and is
++// honored. The retry runs only while the window is still invisible, so a
++// window the first Show already presented is never touched twice, and both
++// attempts re-check the shared policy through the host gates.
++bool ShowAndActivateWithFirstShowRetry(Widget* widget) {
++  widget->Show();
++  widget->Activate();
++  if (widget->IsVisible()) {
++    return true;
++  }
++  LOG(INFO) << "BROWSER_CLI_PRESENTATION stage=host"
++            << " transition=presentation-retry"
++            << " window_id=" << WindowIdForWidget(widget)
++            << " reason=first-showwindow-not-honored native=win-hwnd";
++  widget->Show();
++  widget->Activate();
++  return widget->IsVisible();
+ }
+ 
+ }  // namespace
+@@ -67,6 +96,16 @@
+   return !policy->AllowPresentation(
+       ForegroundOrigin::kUnknown,
+       BrowserCliPresentationAction::kShowAndActivate, window_id);
++}
++
++bool BrowserCliPresentForUserExplicitAction(Widget* widget) {
++  // A non-top-level widget resolves to window id 0, which never establishes
++  // per-window HUMAN ownership; fail closed instead of presenting it.
++  if (!widget || !widget->is_top_level()) {
++    return false;
++  }
++  ScopedForegroundOrigin user_scope(ForegroundOrigin::kUserExplicit);
++  return ShowAndActivateWithFirstShowRetry(widget);
+ }
+ 
+ bool BrowserCliPresentForAgentAssistAction(Widget* widget) {
+diff --git a/ui/views/widget/browser_cli_presentation_win.h b/ui/views/widget/browser_cli_presentation_win.h
+--- a/ui/views/widget/browser_cli_presentation_win.h
++++ b/ui/views/widget/browser_cli_presentation_win.h
+@@ -39,6 +39,17 @@
+ // closed).
+ VIEWS_EXPORT bool BrowserCliShouldSuppressWindowPosChange(HWND hwnd);
+ 
++// Presents `widget` for an explicit USER_EXPLICIT `show` request. Scopes
++// kUserExplicit and issues Show()+Activate(); when the window is still not
++// visible afterwards, the same two calls are repeated exactly once. The retry
++// is required because Windows resolves a window's first ShowWindow call
++// against STARTUPINFO's wShowWindow when the process was started with
++// STARTF_USESHOWWINDOW: a browser launched by a hidden-console host (node's
++// windowsHide, a Windows service, a CI runner) silently ignores that first
++// show. Every attempt goes through the same host gates, so the shared policy
++// decides each of them. Returns whether the window ended up visible.
++VIEWS_EXPORT bool BrowserCliPresentForUserExplicitAction(Widget* widget);
++
+ // Presents `widget` for an already-granted assist lease. Scopes kAgentAssist
+ // and issues Show()+Activate(); the host gates re-check the shared policy.
+ // Returns whether the window ended up visible.
+diff --git a/chrome/browser/browser_cli/user_explicit_presentation_win.cc b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+--- a/chrome/browser/browser_cli/user_explicit_presentation_win.cc
++++ b/chrome/browser/browser_cli/user_explicit_presentation_win.cc
+@@ -170,16 +170,13 @@
+       return false;
+ 
+     case UserExplicitShowPlan::kPresentExistingWindow: {
+-      // The only USER_EXPLICIT presentation on Windows: scope Show/Activate
+-      // exactly, so the shared policy grants per-window HUMAN ownership and the
+-      // Windows host gate lets these two native calls through.
+-      {
+-        views::ScopedForegroundOrigin origin_scope(
+-            views::ForegroundOrigin::kUserExplicit);
+-        reusable.widget->Show();
+-        reusable.widget->Activate();
+-      }
+-      if (reusable.widget->IsVisible()) {
++      // The only USER_EXPLICIT presentation on Windows: the gateway scopes
++      // kUserExplicit around Show/Activate (and its one documented retry), so
++      // the shared policy grants per-window HUMAN ownership and the Windows
++      // host gate lets these native calls through.
++      const bool presented = views::BrowserCliPresentForUserExplicitAction(
++          reusable.widget);
++      if (presented) {
+         // The user now owns this window: cancel the pending assist timeout so
+         // its original deadline can never hide the window later.
+         GetForegroundAssistController()->OnLeaseReleasedByUserTakeover(
+@@ -226,13 +223,7 @@
+       }
+       const uint64_t window_id = views::BrowserCliWindowIdForHwnd(
+           widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget());
+-      {
+-        views::ScopedForegroundOrigin origin_scope(
+-            views::ForegroundOrigin::kUserExplicit);
+-        widget->Show();
+-        widget->Activate();
+-      }
+-      if (widget->IsVisible()) {
++      if (views::BrowserCliPresentForUserExplicitAction(widget)) {
+         GetForegroundAssistController()->OnLeaseReleasedByUserTakeover(
+             window_id);
+         LogProducerOutcome("handled", "window-created-and-presented",

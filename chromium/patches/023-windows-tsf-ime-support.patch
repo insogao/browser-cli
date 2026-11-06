@@ -1,0 +1,100 @@
+diff --git a/ui/base/ime/win/BUILD.gn b/ui/base/ime/win/BUILD.gn
+index 8972a21f80fe8662afee39dfd270bd5d8774f696..befad31be9e390982bf54ff07607d6cf3e11cffc 100644
+--- a/ui/base/ime/win/BUILD.gn
++++ b/ui/base/ime/win/BUILD.gn
+@@ -31,6 +31,11 @@ component("win") {
+ 
+   defines = [ "IS_UI_BASE_IME_WIN_IMPL" ]
+ 
++  # Browser CLI: tsf_bridge.cc catches a C++ exception raised by third-party
++  # text services inside ITfThreadMgr::Activate, so a broken IME degrades to
++  # "no IME" instead of terminating the browser process.
++  configs += [ "//build/config/compiler:exceptions" ]
++
+   public_deps = [ "//ui/base/ime" ]
+ 
+   deps = [
+diff --git a/ui/base/ime/win/tsf_bridge.cc b/ui/base/ime/win/tsf_bridge.cc
+index 0c980b7eb8b21375c7832054ef2f2931e9dedf43..bd8ae6cd4b67d6ed08247845cb811b4ed980d0da 100644
+--- a/ui/base/ime/win/tsf_bridge.cc
++++ b/ui/base/ime/win/tsf_bridge.cc
+@@ -8,6 +8,7 @@
+ 
+ #include <map>
+ 
++#include "base/command_line.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/ref_counted.h"
+@@ -707,6 +708,32 @@ base::ThreadLocalOwnedPointer<TSFBridge>& GetThreadLocalTSFBridge() {
+ 
+ // TsfBridge  -----------------------------------------------------------------
+ 
++namespace {
++
++// Runs the TSF initialization inside an SEH-protected frame. The frame must not
++// hold any C++ object that needs unwinding: __try cannot appear in a function
++// that requires object unwinding, so the bridge construction stays in the
++// caller and only raw COM pointers are touched here.
++//
++// Browser CLI: a TIP that raises a normal exception (SEH or C++ EH that does not
++// swallow it) is turned into "no IME support" instead of unwinding the browser
++// process. This is defense in depth only: a TIP that catches its own exception
++// and calls ExitProcess cannot be stopped here, which is why
++// TSFBridge::Initialize() also skips TSF entirely in managed mode.
++HRESULT InitializeTsfBridgeGuarded(TSFBridgeImpl* bridge, bool* threw) {
++  *threw = false;
++  HRESULT result = E_FAIL;
++  __try {
++    result = bridge->Initialize();
++  } __except (EXCEPTION_EXECUTE_HANDLER) {
++    *threw = true;
++    result = E_FAIL;
++  }
++  return result;
++}
++
++}  // namespace
++
+ // static
+ HRESULT TSFBridge::Initialize() {
+   TRACE_EVENT0("ime", "TSFBridge::Initialize");
+@@ -718,8 +745,37 @@ HRESULT TSFBridge::Initialize() {
+     return S_OK;
+   }
+ 
++  // Browser CLI: TSF stays enabled in every mode, including managed background
++  // runs. A managed window can be handed to the user at any moment (HUMAN /
++  // ASSIST), and at that point the user must be able to type in their own
++  // language; this revision has no IMM32 fallback, so skipping TSF means no
++  // input method at all.
++  //
++  // Disabling it is now an explicit diagnostic switch and nothing else:
++  //   --browser-cli-tsf=disabled
++  // It exists so the "does this IME break startup" question can still be
++  // answered on a suspect machine. It must never be tied to a window
++  // presentation switch again: those two concerns are independent.
++  if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "browser-cli-tsf") == "disabled") {
++    LOG(INFO) << "BROWSER_CLI_IME stage=tsf decision=skip"
++                 " reason=diagnostic-switch";
++    return E_FAIL;
++  }
++
++  // Browser CLI: an unusable IME must degrade to "no IME support" instead of
++  // terminating the browser process. See InitializeTsfBridgeGuarded().
+   auto delegate = std::make_unique<TSFBridgeImpl>();
+-  HRESULT hr = delegate->Initialize();
++  bool ime_threw = false;
++  HRESULT hr = InitializeTsfBridgeGuarded(delegate.get(), &ime_threw);
++  if (ime_threw) {
++    LOG(WARNING) << "The active TIP raised an exception during TSF "
++                    "initialization; continuing without IME support.";
++    // Never publish a partially initialized bridge.
++    GetThreadLocalTSFBridge().Set(nullptr);
++    return hr;
++  }
++
+   if (SUCCEEDED(hr)) {
+     ReplaceThreadLocalTSFBridge(std::move(delegate));
+   }

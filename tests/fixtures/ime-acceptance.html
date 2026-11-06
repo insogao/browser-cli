@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>IME acceptance</title>
+<style>
+  body { font: 16px/1.6 "Microsoft YaHei", sans-serif; margin: 24px; }
+  label { display: block; margin-top: 18px; font-weight: 600; }
+  input, textarea, .editable {
+    width: 520px; padding: 8px; font-size: 18px;
+    border: 1px solid #888; border-radius: 4px; display: block;
+    font-family: "Microsoft YaHei", sans-serif;
+  }
+  textarea { height: 90px; }
+  .editable { min-height: 60px; border: 1px solid #888; border-radius: 4px; padding: 8px; }
+  #results { margin-top: 20px; padding: 10px; background: #f2f2f2; white-space: pre-wrap;
+             font-family: Consolas, monospace; }
+</style>
+</head>
+<body>
+  <h1>IME acceptance page</h1>
+
+  <label for="addr">1) URL bar test: use the address bar above</label>
+
+  <label for="single">2) &lt;input type=text&gt;</label>
+  <input id="single" type="text" autocomplete="off" spellcheck="false">
+
+  <label for="multi">3) &lt;textarea&gt;</label>
+  <textarea id="multi" spellcheck="false"></textarea>
+
+  <label>4) contenteditable</label>
+  <div id="ce" class="editable" contenteditable="true"></div>
+
+  <div id="results"></div>
+
+<script>
+  const out = document.getElementById('results');
+  function report() {
+    out.textContent =
+      'input.value        = ' + JSON.stringify(document.getElementById('single').value) + '\n' +
+      'textarea.value     = ' + JSON.stringify(document.getElementById('multi').value) + '\n' +
+      'contenteditable    = ' + JSON.stringify(document.getElementById('ce').textContent) + '\n' +
+      'document.title     = ' + JSON.stringify(document.title);
+  }
+  for (const id of ['single', 'multi', 'ce']) {
+    const el = document.getElementById(id);
+    el.addEventListener('input', report);
+    el.addEventListener('keyup', report);
+  }
+  report();
+  // Expose the current values so an external check can read them verbatim.
+  window.__imeState = () => ({
+    input: document.getElementById('single').value,
+    textarea: document.getElementById('multi').value,
+    ce: document.getElementById('ce').textContent,
+  });
+</script>
+</body>
+</html>

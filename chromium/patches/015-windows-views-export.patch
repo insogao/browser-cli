@@ -1,0 +1,31 @@
+diff --git a/ui/views/BUILD.gn b/ui/views/BUILD.gn
+index b960dffc..9795d55f 100644
+--- a/ui/views/BUILD.gn
++++ b/ui/views/BUILD.gn
+@@ -1075,6 +1075,7 @@ source_set("browser_cli_presentation_policy") {
+     "widget/browser_cli_presentation_policy.cc",
+     "widget/browser_cli_presentation_policy.h",
+   ]
++  defines = [ "VIEWS_IMPLEMENTATION" ]
+   deps = [
+     "//base",
+     "//ui/gfx:native_ui_types",
+@@ -1298,6 +1299,10 @@ source_set("test_support") {
+ 
+ test("browser_cli_presentation_policy_unittests") {
+   sources = [ "widget/browser_cli_presentation_policy_unittest.cc" ]
++  # The policy source_set is linked statically into this test binary, so the
++  # test's own references must resolve locally rather than as imports from the
++  # views DLL.
++  defines = [ "VIEWS_IMPLEMENTATION" ]
+   deps = [
+     ":browser_cli_presentation_policy",
+     "//base",
+@@ -1309,6 +1314,7 @@ test("browser_cli_presentation_policy_unittests") {
+ 
+ test("browser_cli_foreground_lease_unittests") {
+   sources = [ "widget/browser_cli_foreground_lease_unittest.cc" ]
++  defines = [ "VIEWS_IMPLEMENTATION" ]
+   deps = [
+     ":browser_cli_presentation_policy",
+     "//base",
